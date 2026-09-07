@@ -35,7 +35,6 @@ COPY litestream.yml /etc/litestream.yml
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/chadashot-entrypoint
 RUN mkdir -p /data && chown node:node /data
 EXPOSE 8787
-VOLUME ["/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
 ENTRYPOINT ["chadashot-entrypoint"]
