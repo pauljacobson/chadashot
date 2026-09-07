@@ -27,7 +27,7 @@ import {
   verifyAdditionalPasskey,
   verifyLogin,
 } from './api';
-import { type ReaderFilter, type SyncStatus, useReader } from './useReader';
+import { type ArticleReadFilter, type ReaderFilter, type SyncStatus, useReader } from './useReader';
 import { buildFeedGroups, type FeedSortOrder, feedFaviconUrl } from './feedTree';
 import {
   clearOfflineData,
@@ -389,20 +389,26 @@ function SubscribePanel({ onClose, onSubscribed }: { onClose: () => void; onSubs
 function ArticleList({
   title,
   articles,
+  readFilter,
+  showReadFilter = true,
   markAllCandidates,
   selectedId,
   onSelect,
   onToggleRead,
   onToggleStar,
+  onReadFilterChange,
   onMarkAllRead,
 }: {
   title: string;
   articles: Article[];
+  readFilter: ArticleReadFilter;
+  showReadFilter?: boolean;
   markAllCandidates?: Article[];
   selectedId: string | null;
   onSelect: (article: Article) => void;
   onToggleRead: (article: Article) => void;
   onToggleStar: (article: Article) => void;
+  onReadFilterChange: (filter: ArticleReadFilter) => void;
   onMarkAllRead?: (articles: Article[]) => Promise<number>;
 }) {
   const [confirmingMarkAll, setConfirmingMarkAll] = useState(false);
@@ -424,6 +430,20 @@ function ArticleList({
     <section className="article-list" id="article-list" aria-label={`${title} articles`}>
       <header className="list-header">
         <div className="list-heading"><h1>{title}</h1><span>{articles.length}</span></div>
+        {showReadFilter && (
+          <div className="article-read-filter" role="group" aria-label="Filter articles by read status">
+            {(['all', 'unread', 'read'] as const).map((filter) => (
+              <button
+                key={filter}
+                type="button"
+                aria-pressed={readFilter === filter}
+                onClick={() => onReadFilterChange(filter)}
+              >
+                {filter[0]!.toUpperCase() + filter.slice(1)}
+              </button>
+            ))}
+          </div>
+        )}
         {onMarkAllRead && unreadCount > 0 && (
           <button className="mark-all-button" onClick={() => setConfirmingMarkAll(true)}>✓ Mark all read</button>
         )}
@@ -1301,6 +1321,7 @@ export function App() {
       : filterLabels[activeFilter.kind];
 
   function chooseFilter(filter: ReaderFilter) {
+    if (filter.kind === 'inbox') reader.setReadFilter('all');
     reader.setFilter(filter);
     setMobileScreen('list');
   }
@@ -1365,11 +1386,14 @@ export function App() {
           key={activeFilter.kind === 'folder' || activeFilter.kind === 'feed' ? `${activeFilter.kind}:${activeFilter.id}` : activeFilter.kind}
           title={title}
           articles={reader.articles}
-          markAllCandidates={activeFilter.kind === 'feed' ? reader.filteredArticles : undefined}
+          readFilter={reader.readFilter}
+          showReadFilter={activeFilter.kind !== 'inbox'}
+          markAllCandidates={activeFilter.kind === 'feed' && reader.readFilter !== 'read' ? reader.filteredArticles : undefined}
           selectedId={reader.selectedArticle?.id ?? null}
           onSelect={chooseArticle}
           onToggleRead={(article) => void reader.toggleRead(article)}
           onToggleStar={(article) => void reader.toggleStarred(article)}
+          onReadFilterChange={reader.setReadFilter}
           onMarkAllRead={activeFilter.kind === 'feed' ? async (articles) => {
             const count = await reader.markAllRead(articles);
             setNotice(`${count} ${count === 1 ? 'item' : 'items'} marked as read`);

@@ -557,7 +557,7 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   border-bottom: 1px solid var(--border);
 }
 .list-header h1 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
-.list-heading { min-width: 0; display: flex; align-items: center; }
+.list-heading { min-width: 0; flex: 1; display: flex; align-items: center; }
 .list-heading h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list-heading > span {
   min-width: 24px;
@@ -572,9 +572,31 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   color: var(--accent-contrast);
   font-size: 11px;
 }
+.article-read-filter {
+  flex: none;
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--surface-muted);
+}
+.article-read-filter button {
+  min-height: 26px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  cursor: pointer;
+}
+.article-read-filter button[aria-pressed="true"] {
+  background: var(--accent);
+  color: var(--accent-contrast);
+}
+.article-read-filter button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .mark-all-button {
   flex: none;
-  margin-left: auto;
   padding: 7px 9px;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
@@ -993,7 +1015,9 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   .article-list, .reader-pane { height: calc(100dvh - 126px); border-right: 0; }
   .mobile-list .reader-pane { display: none; }
   .mobile-reader .article-list { display: none; }
-  .list-header { min-height: 50px; }
+  .list-header { min-height: 50px; flex-wrap: wrap; padding-block: 8px; }
+  .article-read-filter { order: 3; width: 100%; }
+  .article-read-filter button { flex: 1; min-height: 34px; }
   .article-main-action { min-height: 112px; padding: 15px 42px 14px 17px; }
   .reader-toolbar { min-height: 56px; gap: 2px; padding: 0 8px; }
   .reader-toolbar button, .toolbar-link { min-width: 44px; min-height: 44px; padding: 0 8px; border: 0; border-radius: 50%; background: transparent; font-size: 0; }

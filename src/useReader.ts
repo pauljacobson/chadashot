@@ -21,6 +21,12 @@ export type ReaderFilter =
   | { kind: 'feed'; id: string };
 
 export type SyncStatus = 'offline' | 'syncing' | 'current' | 'error';
+export type ArticleReadFilter = 'all' | 'unread' | 'read';
+
+export function filterArticlesByReadState(articles: Article[], filter: ArticleReadFilter) {
+  if (filter === 'all') return articles;
+  return articles.filter((article) => filter === 'read' ? article.read : !article.read);
+}
 
 function shouldQueue(error: unknown) {
   return !(error instanceof ApiError) || error.status === 429 || error.status >= 500;
@@ -41,6 +47,7 @@ export function useReader(enabled = true) {
   const [filter, setFilter] = useState<ReaderFilter>({ kind: 'inbox' });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
+  const [readFilter, setReadFilter] = useState<ArticleReadFilter>('all');
   const [status, setStatus] = useState<SyncStatus>(navigator.onLine ? 'syncing' : 'offline');
   const [error, setError] = useState<string | null>(null);
   const [pendingMutations, setPendingMutations] = useState(0);
@@ -164,7 +171,7 @@ export function useReader(enabled = true) {
     });
   }, [filter, snapshot]);
 
-  const articles = useMemo(() => {
+  const searchedArticles = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
     if (!normalizedQuery) return filteredArticles;
     return filteredArticles.filter((article) => {
@@ -174,9 +181,14 @@ export function useReader(enabled = true) {
     });
   }, [filteredArticles, query]);
 
+  const articles = useMemo(
+    () => filterArticlesByReadState(searchedArticles, readFilter),
+    [readFilter, searchedArticles],
+  );
+
   const selectedArticle = useMemo(
-    () => snapshot?.articles.find((article) => article.id === selectedId) ?? articles[0] ?? null,
-    [articles, selectedId, snapshot],
+    () => articles.find((article) => article.id === selectedId) ?? articles[0] ?? null,
+    [articles, selectedId],
   );
 
   const mutate = useCallback(async (article: Article, operation: ArticleMutation['operation'], value: boolean) => {
@@ -248,6 +260,7 @@ export function useReader(enabled = true) {
     setSnapshot(null);
     setSelectedId(null);
     setFilter({ kind: 'inbox' });
+    setReadFilter('all');
     setError(null);
     setPendingMutations(0);
     setStatus(navigator.onLine ? 'current' : 'offline');
@@ -260,11 +273,13 @@ export function useReader(enabled = true) {
     selectedArticle,
     selectedId,
     filter,
+    readFilter,
     query,
     status,
     error,
     pendingMutations,
     setFilter,
+    setReadFilter,
     setQuery,
     selectArticle: setSelectedId,
     synchronize,
