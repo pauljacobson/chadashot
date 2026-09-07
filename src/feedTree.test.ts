@@ -41,6 +41,19 @@ describe('feed tree groups', () => {
     expect(groups[1].subscriptions.map((feed) => feed.id)).toEqual(['feed/shared']);
     expect(groups[2]).toMatchObject({ title: 'Uncategorized', unreadCount: 2, uncategorized: true });
   });
+
+  it('removes feeds without unread items and folders left empty by that filter', () => {
+    const groups = buildFeedGroups(snapshot([
+      subscription({ id: 'feed/tech-unread', folderIds: ['technology'], unreadCount: 3 }),
+      subscription({ id: 'feed/tech-read', folderIds: ['technology'], unreadCount: 0 }),
+      subscription({ id: 'feed/writing-read', folderIds: ['writing'], unreadCount: 0 }),
+      subscription({ id: 'feed/loose-unread', folderIds: [], unreadCount: 1 }),
+    ]), true);
+
+    expect(groups.map((group) => group.id)).toEqual(['technology', UNCATEGORIZED_FOLDER_ID]);
+    expect(groups[0].subscriptions.map((feed) => feed.id)).toEqual(['feed/tech-unread']);
+    expect(groups[1].subscriptions.map((feed) => feed.id)).toEqual(['feed/loose-unread']);
+  });
 });
 
 describe('feed favicon URL', () => {

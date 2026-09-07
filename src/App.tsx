@@ -60,16 +60,18 @@ function FeedIcon({ subscription }: { subscription: Subscription }) {
   return <img className="feed-icon" src={source} alt="" aria-hidden="true" loading="lazy" onError={() => setFailedSource(source)} />;
 }
 
-function FeedTree({ snapshot, filter, onFilter, onSubscribe, onFeedSelection, showHeading = true }: {
+function FeedTree({ snapshot, filter, unreadOnly, onFilter, onSubscribe, onFeedSelection, onUnreadOnlyChange, showHeading = true }: {
   snapshot: ReturnType<typeof useReader>['snapshot'];
   filter: ReaderFilter;
+  unreadOnly: boolean;
   onFilter: (filter: ReaderFilter) => void;
   onSubscribe: () => void;
   onFeedSelection?: () => void;
+  onUnreadOnlyChange: (unreadOnly: boolean) => void;
   showHeading?: boolean;
 }) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
-  const feedGroups = buildFeedGroups(snapshot);
+  const feedGroups = buildFeedGroups(snapshot, unreadOnly);
 
   function toggleFolder(folderId: string) {
     setExpandedFolders((current) => {
@@ -113,7 +115,14 @@ function FeedTree({ snapshot, filter, onFilter, onSubscribe, onFeedSelection, sh
   return (
     <div className="nav-group feeds-group">
       {showHeading && <div className="nav-heading-row"><div className="nav-heading">Feeds</div><button aria-label="Add feed" onClick={onSubscribe}>＋</button></div>}
-      {feedGroups.map(folderGroup)}
+      <label className="feed-filter-toggle">
+        <span>Unread feeds only</span>
+        <span className="toggle-control">
+          <input type="checkbox" role="switch" checked={unreadOnly} onChange={(event) => onUnreadOnlyChange(event.target.checked)} />
+          <span className="toggle-track" aria-hidden="true"><span /></span>
+        </span>
+      </label>
+      {feedGroups.length > 0 ? feedGroups.map(folderGroup) : <div className="empty-feed-tree">No feeds with unread items.</div>}
     </div>
   );
 }
@@ -124,6 +133,8 @@ function Navigation({
   onFilter,
   onSettings,
   onSubscribe,
+  unreadOnly,
+  onUnreadOnlyChange,
   status,
 }: {
   snapshot: ReturnType<typeof useReader>['snapshot'];
@@ -131,6 +142,8 @@ function Navigation({
   onFilter: (filter: ReaderFilter) => void;
   onSettings: () => void;
   onSubscribe: () => void;
+  unreadOnly: boolean;
+  onUnreadOnlyChange: (unreadOnly: boolean) => void;
   status: SyncStatus;
 }) {
   const unread = snapshot?.articles.filter((article) => !article.read).length ?? 0;
@@ -148,7 +161,7 @@ function Navigation({
             <span aria-hidden="true">☆</span><span>Starred</span>
           </button>
         </div>
-        <FeedTree snapshot={snapshot} filter={filter} onFilter={onFilter} onSubscribe={onSubscribe} />
+        <FeedTree snapshot={snapshot} filter={filter} unreadOnly={unreadOnly} onFilter={onFilter} onSubscribe={onSubscribe} onUnreadOnlyChange={onUnreadOnlyChange} />
       </nav>
       <div className="connection-status">
         <span className={`status-dot ${status}`}></span>{syncLabel(status)}
@@ -158,18 +171,20 @@ function Navigation({
   );
 }
 
-function MobileFeedsPanel({ snapshot, filter, onFilter, onSubscribe, onClose }: {
+function MobileFeedsPanel({ snapshot, filter, unreadOnly, onFilter, onSubscribe, onUnreadOnlyChange, onClose }: {
   snapshot: ReturnType<typeof useReader>['snapshot'];
   filter: ReaderFilter;
+  unreadOnly: boolean;
   onFilter: (filter: ReaderFilter) => void;
   onSubscribe: () => void;
+  onUnreadOnlyChange: (unreadOnly: boolean) => void;
   onClose: () => void;
 }) {
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <section className="mobile-feeds-panel" role="dialog" aria-modal="true" aria-labelledby="mobile-feeds-title">
         <header><h1 id="mobile-feeds-title">Feeds</h1><button onClick={onSubscribe}>＋ Add feed</button><button aria-label="Close feeds" onClick={onClose}>×</button></header>
-        <FeedTree snapshot={snapshot} filter={filter} onFilter={onFilter} onFeedSelection={onClose} onSubscribe={onSubscribe} showHeading={false} />
+        <FeedTree snapshot={snapshot} filter={filter} unreadOnly={unreadOnly} onFilter={onFilter} onFeedSelection={onClose} onSubscribe={onSubscribe} onUnreadOnlyChange={onUnreadOnlyChange} showHeading={false} />
       </section>
     </div>
   );
@@ -498,6 +513,7 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [subscribeOpen, setSubscribeOpen] = useState(false);
   const [feedsOpen, setFeedsOpen] = useState(false);
+  const [unreadFeedsOnly, setUnreadFeedsOnly] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileScreen, setMobileScreen] = useState<MobileScreen>('list');
   const [notice, setNotice] = useState('');
@@ -575,7 +591,7 @@ export function App() {
         </div>
       </header>
       <div className="workspace">
-        <Navigation snapshot={reader.snapshot} filter={reader.filter} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} onSubscribe={() => setSubscribeOpen(true)} status={reader.status} />
+        <Navigation snapshot={reader.snapshot} filter={reader.filter} unreadOnly={unreadFeedsOnly} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} onSubscribe={() => setSubscribeOpen(true)} onUnreadOnlyChange={setUnreadFeedsOnly} status={reader.status} />
         <ArticleList title={title} articles={reader.articles} selectedId={reader.selectedArticle?.id ?? null} onSelect={chooseArticle} onToggleStar={(article) => void reader.toggleStarred(article)} />
         <ReaderPane
           key={reader.selectedArticle?.id ?? 'empty-reader'}
@@ -617,8 +633,10 @@ export function App() {
       {feedsOpen && <MobileFeedsPanel
         snapshot={reader.snapshot}
         filter={reader.filter}
+        unreadOnly={unreadFeedsOnly}
         onFilter={chooseFilter}
         onSubscribe={() => { setFeedsOpen(false); setSubscribeOpen(true); }}
+        onUnreadOnlyChange={setUnreadFeedsOnly}
         onClose={() => setFeedsOpen(false)}
       />}
       {subscribeOpen && <SubscribePanel

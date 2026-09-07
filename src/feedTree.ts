@@ -7,16 +7,20 @@ export type FeedGroup = Folder & {
   subscriptions: Subscription[];
 };
 
-export function buildFeedGroups(snapshot: ReaderSnapshot | null): FeedGroup[] {
+export function buildFeedGroups(snapshot: ReaderSnapshot | null, unreadOnly = false): FeedGroup[] {
   if (!snapshot) return [];
 
   const folderIds = new Set(snapshot.folders.map((folder) => folder.id));
-  const groups = snapshot.folders.map((folder) => ({
-    ...folder,
-    uncategorized: false,
-    subscriptions: snapshot.subscriptions.filter((subscription) => subscription.folderIds.includes(folder.id)),
-  }));
-  const uncategorized = snapshot.subscriptions.filter((subscription) =>
+  const visibleSubscriptions = unreadOnly
+    ? snapshot.subscriptions.filter((subscription) => subscription.unreadCount > 0)
+    : snapshot.subscriptions;
+  const groups: FeedGroup[] = snapshot.folders.map((folder) => ({
+      ...folder,
+      uncategorized: false,
+      subscriptions: visibleSubscriptions.filter((subscription) => subscription.folderIds.includes(folder.id)),
+    }))
+    .filter((group) => !unreadOnly || group.subscriptions.length > 0);
+  const uncategorized = visibleSubscriptions.filter((subscription) =>
     subscription.folderIds.length === 0
     || !subscription.folderIds.some((folderId) => folderIds.has(folderId)),
   );

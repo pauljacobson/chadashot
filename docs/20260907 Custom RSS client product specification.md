@@ -56,7 +56,7 @@ The first release is intentionally single-user and single-provider. The design s
 - **Inbox:** unread items across all feeds.
 - **All:** all synchronized items, newest first.
 - **Starred:** items starred in Birchfeed.
-- **Feeds:** an expandable tree of Birchfeed folders/labels with their feeds nested beneath them; feeds without a recognized folder appear under Uncategorized.
+- **Feeds:** an expandable tree of Birchfeed folders/labels with their feeds nested beneath them; feeds without a recognized folder appear under Uncategorized. A toggle above the tree limits it to feeds containing unread items and hides folders left empty by that filter.
 - **Settings:** connection, passkeys, Readwise, offline storage, and application information.
 
 “Read later” should not be invented as a separate state in the first release. Starred remains the portable saved-item state supported by the RSS service. Saving to Reader is an explicit outbound action rather than another local queue.
