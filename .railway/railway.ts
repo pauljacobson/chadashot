@@ -25,9 +25,6 @@ export default defineRailway(() => {
       PORT: "8787",
       BOOTSTRAP_TOKEN: preserve(),
       ENCRYPTION_KEY: preserve(),
-      LITESTREAM_ACCESS_KEY_ID: preserve(),
-      LITESTREAM_REPLICA_URL: preserve(),
-      LITESTREAM_SECRET_ACCESS_KEY: preserve(),
     },
   });
 
