@@ -56,7 +56,7 @@ The first release is intentionally single-user and single-provider. The design s
 - **Inbox:** unread items across all feeds.
 - **All:** all synchronized items, newest first.
 - **Starred:** items starred in Birchfeed.
-- **Folders:** Birchfeed folders/labels and their feeds.
+- **Feeds:** an expandable tree of Birchfeed folders/labels with their feeds nested beneath them; feeds without a recognized folder appear under Uncategorized.
 - **Settings:** connection, passkeys, Readwise, offline storage, and application information.
 
 “Read later” should not be invented as a separate state in the first release. Starred remains the portable saved-item state supported by the RSS service. Saving to Reader is an explicit outbound action rather than another local queue.
@@ -65,7 +65,7 @@ The first release is intentionally single-user and single-provider. The design s
 
 Use a three-pane layout:
 
-1. A narrow navigation sidebar containing destinations, folders, feeds, unread counts, connection status, and settings.
+1. A narrow navigation sidebar containing destinations, an expandable folder/feed tree with favicons and unread counts, connection status, and settings.
 2. An article list showing source, title, excerpt, age, unread state, and star.
 3. A reading pane with article metadata, reading actions, selected-text controls, and the article body.
 

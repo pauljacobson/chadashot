@@ -1,7 +1,7 @@
 import DOMPurify from 'dompurify';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Article, IntegrationStatus, SessionState } from '../shared/reader';
+import type { Article, IntegrationStatus, SessionState, Subscription } from '../shared/reader';
 import {
   connectBirchfeed,
   connectReadwise,
@@ -16,6 +16,7 @@ import {
   verifyLogin,
 } from './api';
 import { type ReaderFilter, type SyncStatus, useReader } from './useReader';
+import { buildFeedGroups, feedFaviconUrl } from './feedTree';
 
 type MobileScreen = 'list' | 'reader';
 
@@ -23,6 +24,7 @@ const filterLabels: Record<ReaderFilter['kind'], string> = {
   inbox: 'Inbox',
   all: 'All articles',
   starred: 'Starred',
+  uncategorized: 'Uncategorized',
   folder: 'Folder',
   feed: 'Feed',
 };
@@ -41,6 +43,79 @@ function syncLabel(status: SyncStatus) {
   if (status === 'offline') return 'Offline';
   if (status === 'error') return 'Action needed';
   return 'Up to date';
+}
+
+function FeedIcon({ subscription }: { subscription: Subscription }) {
+  const source = feedFaviconUrl(subscription);
+  const [failedSource, setFailedSource] = useState<string | null>(null);
+
+  if (!source || failedSource === source) {
+    return (
+      <span className="feed-icon feed-icon-fallback" aria-hidden="true">
+        <svg viewBox="0 0 16 16" focusable="false"><circle cx="4" cy="12" r="1.4"/><path d="M3 7a6 6 0 0 1 6 6M3 3a10 10 0 0 1 10 10"/></svg>
+      </span>
+    );
+  }
+
+  return <img className="feed-icon" src={source} alt="" aria-hidden="true" loading="lazy" onError={() => setFailedSource(source)} />;
+}
+
+function FeedTree({ snapshot, filter, onFilter, onSubscribe, onFeedSelection, showHeading = true }: {
+  snapshot: ReturnType<typeof useReader>['snapshot'];
+  filter: ReaderFilter;
+  onFilter: (filter: ReaderFilter) => void;
+  onSubscribe: () => void;
+  onFeedSelection?: () => void;
+  showHeading?: boolean;
+}) {
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
+  const feedGroups = buildFeedGroups(snapshot);
+
+  function toggleFolder(folderId: string) {
+    setExpandedFolders((current) => {
+      const next = new Set(current);
+      if (next.has(folderId)) next.delete(folderId);
+      else next.add(folderId);
+      return next;
+    });
+  }
+
+  function folderGroup(folder: (typeof feedGroups)[number]) {
+    const expanded = expandedFolders.has(folder.id);
+    const active = folder.uncategorized
+      ? filter.kind === 'uncategorized'
+      : filter.kind === 'folder' && filter.id === folder.id;
+    return (
+      <div className="feed-tree-folder" key={folder.id}>
+        <button
+          className={`nav-item folder-item ${active ? 'active' : ''}`}
+          aria-expanded={expanded}
+          onClick={() => {
+            toggleFolder(folder.id);
+            onFilter(folder.uncategorized ? { kind: 'uncategorized' } : { kind: 'folder', id: folder.id });
+          }}
+        >
+          <span className="folder-chevron" aria-hidden="true">{expanded ? '⌄' : '›'}</span><span>{folder.title}</span><span className="nav-count">{folder.unreadCount}</span>
+        </button>
+        {expanded && (
+          <div className="nested-feeds">
+            {folder.subscriptions.length === 0 ? <div className="empty-folder">No feeds</div> : folder.subscriptions.map((subscription) => (
+              <button key={subscription.id} className={`nav-item nested-feed ${filter.kind === 'feed' && filter.id === subscription.id ? 'active' : ''}`} onClick={() => { onFilter({ kind: 'feed', id: subscription.id }); onFeedSelection?.(); }}>
+                <FeedIcon subscription={subscription} /><span>{subscription.title}</span>{subscription.unreadCount > 0 && <span className="nav-count">{subscription.unreadCount}</span>}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="nav-group feeds-group">
+      {showHeading && <div className="nav-heading-row"><div className="nav-heading">Feeds</div><button aria-label="Add feed" onClick={onSubscribe}>＋</button></div>}
+      {feedGroups.map(folderGroup)}
+    </div>
+  );
 }
 
 function Navigation({
@@ -73,28 +148,30 @@ function Navigation({
             <span aria-hidden="true">☆</span><span>Starred</span>
           </button>
         </div>
-        <div className="nav-group">
-          <div className="nav-heading">Folders</div>
-          {snapshot?.folders.map((folder) => (
-            <button key={folder.id} className={`nav-item ${filter.kind === 'folder' && filter.id === folder.id ? 'active' : ''}`} onClick={() => onFilter({ kind: 'folder', id: folder.id })}>
-              <span aria-hidden="true">⌁</span><span>{folder.title}</span><span className="nav-count">{folder.unreadCount}</span>
-            </button>
-          ))}
-        </div>
-        <div className="nav-group feeds-group">
-          <div className="nav-heading-row"><div className="nav-heading">Feeds</div><button aria-label="Add feed" onClick={onSubscribe}>＋</button></div>
-          {snapshot?.subscriptions.map((subscription) => (
-            <button key={subscription.id} className={`nav-item ${filter.kind === 'feed' && filter.id === subscription.id ? 'active' : ''}`} onClick={() => onFilter({ kind: 'feed', id: subscription.id })}>
-              <span className="feed-initial" aria-hidden="true">{subscription.title.slice(0, 1)}</span><span>{subscription.title}</span>
-            </button>
-          ))}
-        </div>
+        <FeedTree snapshot={snapshot} filter={filter} onFilter={onFilter} onSubscribe={onSubscribe} />
       </nav>
       <div className="connection-status">
         <span className={`status-dot ${status}`}></span>{syncLabel(status)}
         <button onClick={onSettings}>Settings</button>
       </div>
     </aside>
+  );
+}
+
+function MobileFeedsPanel({ snapshot, filter, onFilter, onSubscribe, onClose }: {
+  snapshot: ReturnType<typeof useReader>['snapshot'];
+  filter: ReaderFilter;
+  onFilter: (filter: ReaderFilter) => void;
+  onSubscribe: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+      <section className="mobile-feeds-panel" role="dialog" aria-modal="true" aria-labelledby="mobile-feeds-title">
+        <header><h1 id="mobile-feeds-title">Feeds</h1><button onClick={onSubscribe}>＋ Add feed</button><button aria-label="Close feeds" onClick={onClose}>×</button></header>
+        <FeedTree snapshot={snapshot} filter={filter} onFilter={onFilter} onFeedSelection={onClose} onSubscribe={onSubscribe} showHeading={false} />
+      </section>
+    </div>
   );
 }
 
@@ -420,6 +497,7 @@ export function App() {
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [subscribeOpen, setSubscribeOpen] = useState(false);
+  const [feedsOpen, setFeedsOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileScreen, setMobileScreen] = useState<MobileScreen>('list');
   const [notice, setNotice] = useState('');
@@ -531,11 +609,18 @@ export function App() {
       <nav className="mobile-navigation" aria-label="Primary navigation">
         <button className={reader.filter.kind === 'inbox' ? 'active' : ''} onClick={() => chooseFilter({ kind: 'inbox' })}><span>●</span>Inbox</button>
         <button className={reader.filter.kind === 'starred' ? 'active' : ''} onClick={() => chooseFilter({ kind: 'starred' })}><span>☆</span>Starred</button>
-        <button onClick={() => setSubscribeOpen(true)}><span>＋</span>Add feed</button>
+        <button onClick={() => setFeedsOpen(true)}><span>⌁</span>Feeds</button>
         <button onClick={() => setSettingsOpen(true)}><span>⚙</span>Settings</button>
       </nav>
       {notice && <div className="toast" role="status" aria-live="polite">{notice}</div>}
       {reader.error && <div className="error-banner" role="alert">{reader.error}</div>}
+      {feedsOpen && <MobileFeedsPanel
+        snapshot={reader.snapshot}
+        filter={reader.filter}
+        onFilter={chooseFilter}
+        onSubscribe={() => { setFeedsOpen(false); setSubscribeOpen(true); }}
+        onClose={() => setFeedsOpen(false)}
+      />}
       {subscribeOpen && <SubscribePanel
         onClose={() => setSubscribeOpen(false)}
         onSubscribed={async (feedUrl) => {

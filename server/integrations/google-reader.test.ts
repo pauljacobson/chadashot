@@ -18,7 +18,7 @@ describe('Google Reader compatible Birchfeed client', () => {
       const url = String(input);
       if (url.endsWith('/accounts/ClientLogin')) return new Response('SID=ignored\nAuth=reader-key\n');
       if (url.includes('/subscription/list')) return jsonResponse({ subscriptions: [{
-        id: 'feed/https://example.test/feed', title: 'Example', url: 'https://example.test/feed', htmlUrl: 'https://example.test',
+        id: 'feed/https://example.test/feed', title: 'Example', url: 'https://example.test/feed', htmlUrl: 'https://example.test', iconUrl: '../f.php?h=abc',
         categories: [{ id: 'user/-/label/Tech', label: 'Tech' }],
       }] });
       if (url.includes('/stream/contents/')) return jsonResponse({ items: [{
@@ -36,7 +36,7 @@ describe('Google Reader compatible Birchfeed client', () => {
     expect(snapshot.source).toBe('google-reader');
     expect(fetchMock.mock.calls[0][0]).toBe('https://reader.example.test/api/greader.php/accounts/ClientLogin');
     expect(snapshot.folders).toEqual([{ id: 'folder:user/-/label/Tech', title: 'Tech', unreadCount: 1 }]);
-    expect(snapshot.subscriptions[0]).toMatchObject({ title: 'Example', unreadCount: 1 });
+    expect(snapshot.subscriptions[0]).toMatchObject({ title: 'Example', unreadCount: 1, iconUrl: 'https://reader.example.test/api/f.php?h=abc' });
     expect(snapshot.articles[0]).toMatchObject({ title: 'A careful web', starred: true, read: false, folderIds: ['folder:user/-/label/Tech'] });
   });
 

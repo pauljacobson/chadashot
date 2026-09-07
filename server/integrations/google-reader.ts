@@ -17,6 +17,7 @@ const subscriptionListSchema = z.object({
     title: z.string(),
     url: z.string().optional(),
     htmlUrl: z.string().optional(),
+    iconUrl: z.string().optional(),
     categories: z.array(z.object({ id: z.string(), label: z.string().optional() })).default([]),
   })),
 });
@@ -80,6 +81,16 @@ export class GoogleReaderClient {
     return this.credentials.serverUrl.replace(/\/+$/, '');
   }
 
+  private iconUrl(iconUrl: string | undefined) {
+    if (!iconUrl) return null;
+    try {
+      const resolved = new URL(iconUrl, `${this.baseUrl}/`);
+      return resolved.protocol === 'http:' || resolved.protocol === 'https:' ? resolved.toString() : null;
+    } catch {
+      return null;
+    }
+  }
+
   private async request(url: string, init?: RequestInit) {
     try {
       return await this.fetchImplementation(url, init);
@@ -137,6 +148,7 @@ export class GoogleReaderClient {
       title: subscription.title,
       url: subscription.url ?? subscription.id.replace(/^feed\//, ''),
       siteUrl: subscription.htmlUrl ?? null,
+      iconUrl: this.iconUrl(subscription.iconUrl),
       folderIds: subscription.categories.map((category) => folderId(category.id)),
       unreadCount: 0,
     }));

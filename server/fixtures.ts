@@ -31,10 +31,10 @@ export const fixtureSnapshot: ReaderSnapshot = {
     { id: 'wordpress', title: 'WordPress', unreadCount: 6 },
   ],
   subscriptions: [
-    { id: 'feed/infrequently', title: 'Infrequently Noted', url: 'https://example.com/infrequently.xml', siteUrl: 'https://example.com/infrequently', folderIds: ['writing'], unreadCount: 4 },
-    { id: 'feed/dense', title: 'Dense Discovery', url: 'https://example.com/dense.xml', siteUrl: 'https://example.com/dense', folderIds: ['technology'], unreadCount: 8 },
-    { id: 'feed/connected', title: 'Connected Places', url: 'https://example.com/connected.xml', siteUrl: 'https://example.com/connected', folderIds: ['technology'], unreadCount: 0 },
-    { id: 'feed/marginalian', title: 'The Marginalian', url: 'https://example.com/marginalian.xml', siteUrl: 'https://example.com/marginalian', folderIds: ['writing'], unreadCount: 0 },
+    { id: 'feed/infrequently', title: 'Infrequently Noted', url: 'https://example.com/infrequently.xml', siteUrl: 'https://example.com/infrequently', iconUrl: '/feed-icons/infrequently.svg', folderIds: ['writing'], unreadCount: 4 },
+    { id: 'feed/dense', title: 'Dense Discovery', url: 'https://example.com/dense.xml', siteUrl: 'https://example.com/dense', iconUrl: '/feed-icons/dense.svg', folderIds: ['technology'], unreadCount: 8 },
+    { id: 'feed/connected', title: 'Connected Places', url: 'https://example.com/connected.xml', siteUrl: 'https://example.com/connected', iconUrl: '/feed-icons/connected.svg', folderIds: ['technology'], unreadCount: 0 },
+    { id: 'feed/marginalian', title: 'The Marginalian', url: 'https://example.com/marginalian.xml', siteUrl: 'https://example.com/marginalian', iconUrl: '/feed-icons/marginalian.svg', folderIds: ['writing'], unreadCount: 0 },
   ],
   articles: [
     {

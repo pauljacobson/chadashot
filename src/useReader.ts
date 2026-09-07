@@ -6,6 +6,7 @@ export type ReaderFilter =
   | { kind: 'inbox' }
   | { kind: 'all' }
   | { kind: 'starred' }
+  | { kind: 'uncategorized' }
   | { kind: 'folder'; id: string }
   | { kind: 'feed'; id: string };
 
@@ -81,11 +82,16 @@ export function useReader(enabled = true) {
   const articles = useMemo(() => {
     if (!snapshot) return [];
     const normalizedQuery = query.trim().toLocaleLowerCase();
+    const knownFolderIds = new Set(snapshot.folders.map((folder) => folder.id));
+    const uncategorizedFeedIds = new Set(snapshot.subscriptions
+      .filter((subscription) => subscription.folderIds.length === 0 || !subscription.folderIds.some((folderId) => knownFolderIds.has(folderId)))
+      .map((subscription) => subscription.id));
     return snapshot.articles.filter((article) => {
       const inFilter =
         filter.kind === 'all'
         || (filter.kind === 'inbox' && !article.read)
         || (filter.kind === 'starred' && article.starred)
+        || (filter.kind === 'uncategorized' && uncategorizedFeedIds.has(article.feedId))
         || (filter.kind === 'folder' && article.folderIds.includes(filter.id))
         || (filter.kind === 'feed' && article.feedId === filter.id);
       if (!inFilter) return false;

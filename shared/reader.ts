@@ -22,6 +22,7 @@ export type Subscription = {
   title: string;
   url: string;
   siteUrl: string | null;
+  iconUrl: string | null;
   folderIds: string[];
   unreadCount: number;
 };

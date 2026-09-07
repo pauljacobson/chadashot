@@ -70,7 +70,11 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
   const fetchImplementation = dependencies.fetchImplementation ?? fetch;
   app.disable('x-powered-by');
   app.use(helmet({
-    contentSecurityPolicy: config.nodeEnv === 'production' ? undefined : false,
+    contentSecurityPolicy: config.nodeEnv === 'production' ? {
+      directives: {
+        imgSrc: ["'self'", 'data:', 'https:'],
+      },
+    } : false,
   }));
   app.use(express.json({ limit: '256kb', strict: true }));
 
