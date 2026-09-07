@@ -6,6 +6,7 @@ Chadashot deploys as one Docker-based Railway service from the repository root. 
 
 - Connect the Chadashot GitHub repository and deploy from its root directory.
 - Mount a persistent volume at `/data`.
+- Keep `DATA_DIR=/data`. The container startup wrapper gives the unprivileged application user access to Railway's root-owned mount before starting Chadashot.
 - Chadashot stores both its SQLite database and its redacted application log on that volume. By default the log is retained at up to 5 MiB and is also emitted to Railway's service console.
 - Set `APP_ORIGIN` to `https://chadashot.app`.
 - Set `ENCRYPTION_KEY` to 32 random bytes encoded as base64. One way to generate it locally is `openssl rand -base64 32`.
