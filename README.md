@@ -6,7 +6,25 @@ The previous FreshRSS deployment wrapper has been moved to a local, Git-ignored 
 
 ## Project status
 
-The product specification and supporting research are in [`docs/`](docs/). Implementation has not started yet.
+The first application foundation is in development. It currently provides the responsive reading interface, fixture-backed synchronization, local development identity, system light/dark appearance, and typed server boundary. The product specification and supporting research are in [`docs/`](docs/).
+
+## Run locally
+
+Requires Node.js 24 or later.
+
+```bash
+cp .env.example .env
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. Local development authentication only accepts loopback requests and cannot be enabled when `NODE_ENV=production`.
+
+Run all verification checks with:
+
+```bash
+npm run check
+```
 
 ## Current decisions
 

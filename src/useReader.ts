@@ -1,0 +1,136 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { Article, ArticleMutation, ReaderSnapshot } from '../shared/reader';
+import { getReaderSnapshot, sendArticleMutation } from './api';
+
+export type ReaderFilter =
+  | { kind: 'inbox' }
+  | { kind: 'all' }
+  | { kind: 'starred' }
+  | { kind: 'folder'; id: string }
+  | { kind: 'feed'; id: string };
+
+export type SyncStatus = 'offline' | 'syncing' | 'current' | 'error';
+
+export function useReader() {
+  const [snapshot, setSnapshot] = useState<ReaderSnapshot | null>(null);
+  const [filter, setFilter] = useState<ReaderFilter>({ kind: 'inbox' });
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [status, setStatus] = useState<SyncStatus>(navigator.onLine ? 'syncing' : 'offline');
+  const [error, setError] = useState<string | null>(null);
+  const lastSync = useRef(0);
+  const activeRequest = useRef<AbortController | null>(null);
+
+  const synchronize = useCallback(async () => {
+    if (!navigator.onLine) {
+      setStatus('offline');
+      return;
+    }
+    activeRequest.current?.abort();
+    const controller = new AbortController();
+    activeRequest.current = controller;
+    setStatus('syncing');
+    try {
+      const next = await getReaderSnapshot(controller.signal);
+      setSnapshot((current) => {
+        if (!current) return next;
+        const localState = new Map(current.articles.map((article) => [article.id, { read: article.read, starred: article.starred }]));
+        return {
+          ...next,
+          articles: next.articles.map((article) => ({ ...article, ...localState.get(article.id) })),
+        };
+      });
+      setSelectedId((current) => current ?? next.articles[0]?.id ?? null);
+      setError(null);
+      setStatus('current');
+      lastSync.current = Date.now();
+    } catch (syncError) {
+      if (controller.signal.aborted) return;
+      setError(syncError instanceof Error ? syncError.message : 'Synchronization failed');
+      setStatus('error');
+    }
+  }, []);
+
+  useEffect(() => {
+    const initialSync = window.setTimeout(() => void synchronize(), 0);
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') void synchronize();
+    }, 3 * 60 * 1000);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && Date.now() - lastSync.current > 60_000) void synchronize();
+    };
+    const handleOnline = () => void synchronize();
+    const handleOffline = () => setStatus('offline');
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      activeRequest.current?.abort();
+      window.clearTimeout(initialSync);
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [synchronize]);
+
+  const articles = useMemo(() => {
+    if (!snapshot) return [];
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    return snapshot.articles.filter((article) => {
+      const inFilter =
+        filter.kind === 'all'
+        || (filter.kind === 'inbox' && !article.read)
+        || (filter.kind === 'starred' && article.starred)
+        || (filter.kind === 'folder' && article.folderIds.includes(filter.id))
+        || (filter.kind === 'feed' && article.feedId === filter.id);
+      if (!inFilter) return false;
+      if (!normalizedQuery) return true;
+      return [article.title, article.source, article.author, article.summary]
+        .filter(Boolean)
+        .some((value) => value!.toLocaleLowerCase().includes(normalizedQuery));
+    });
+  }, [filter, query, snapshot]);
+
+  const selectedArticle = useMemo(
+    () => snapshot?.articles.find((article) => article.id === selectedId) ?? articles[0] ?? null,
+    [articles, selectedId, snapshot],
+  );
+
+  const mutate = useCallback(async (article: Article, operation: ArticleMutation['operation'], value: boolean) => {
+    setSnapshot((current) => current ? {
+      ...current,
+      articles: current.articles.map((candidate) => candidate.id === article.id ? { ...candidate, [operation]: value } : candidate),
+    } : current);
+
+    try {
+      await sendArticleMutation({ articleId: article.id, operation, value });
+    } catch (mutationError) {
+      setSnapshot((current) => current ? {
+        ...current,
+        articles: current.articles.map((candidate) => candidate.id === article.id ? { ...candidate, [operation]: !value } : candidate),
+      } : current);
+      setError(mutationError instanceof Error ? mutationError.message : 'Could not save change');
+      setStatus(navigator.onLine ? 'error' : 'offline');
+    }
+  }, []);
+
+  return {
+    snapshot,
+    articles,
+    selectedArticle,
+    selectedId,
+    filter,
+    query,
+    status,
+    error,
+    setFilter,
+    setQuery,
+    selectArticle: setSelectedId,
+    synchronize,
+    toggleRead: (article: Article) => mutate(article, 'read', !article.read),
+    toggleStarred: (article: Article) => mutate(article, 'starred', !article.starred),
+  };
+}

@@ -2,6 +2,12 @@
 .env.*
 !.env.example
 .DS_Store
+node_modules/
+dist/
+server-dist/
+coverage/
+data/
+*.log
 
 # Local reference only: superseded FreshRSS deployment wrapper
 /archive/freshrss-deployment/
