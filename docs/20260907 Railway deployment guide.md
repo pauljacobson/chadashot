@@ -6,10 +6,12 @@ Chadashot deploys as one Docker-based Railway service from the repository root. 
 
 - Connect the Chadashot GitHub repository and deploy from its root directory.
 - Mount a persistent volume at `/data`.
+- Chadashot stores both its SQLite database and its redacted application log on that volume. By default the log is retained at up to 5 MiB and is also emitted to Railway's service console.
 - Set `APP_ORIGIN` to `https://chadashot.app`.
 - Set `ENCRYPTION_KEY` to 32 random bytes encoded as base64. One way to generate it locally is `openssl rand -base64 32`.
 - Set `BOOTSTRAP_TOKEN` to a separate long random value for the initial setup ceremony.
 - Railway supplies `PORT`; Chadashot listens on it automatically.
+- Optional logging controls are `LOG_LEVEL` (`debug`, `info`, `warn`, or `error`), `LOG_OUTPUT` (`console`, `file`, or `both`), and `LOG_MAX_BYTES`. The defaults are `info`, `both`, and 5 MiB.
 - The deployment health check is `/api/health`.
 
 Treat `ENCRYPTION_KEY` as permanent application data: changing it makes the saved Birchfeed and Readwise credentials unreadable. Store it in a password manager as well as Railway.

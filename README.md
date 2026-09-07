@@ -30,7 +30,7 @@ npm run check
 
 ## Deploy to Railway
 
-Railway builds the root [`Dockerfile`](Dockerfile), checks `/api/health`, and stores the SQLite database in a volume mounted at `/data`. Production requires `APP_ORIGIN`, `ENCRYPTION_KEY`, and an initial `BOOTSTRAP_TOKEN`. Follow the staged [Railway deployment guide](docs/20260907%20Railway%20deployment%20guide.md) before replacing the current FreshRSS service.
+Railway builds the root [`Dockerfile`](Dockerfile), checks `/api/health`, and stores the SQLite database and bounded application log in a volume mounted at `/data`. Production requires `APP_ORIGIN`, `ENCRYPTION_KEY`, and an initial `BOOTSTRAP_TOKEN`. Follow the staged [Railway deployment guide](docs/20260907%20Railway%20deployment%20guide.md) before replacing the current FreshRSS service.
 
 ## Current decisions
 
