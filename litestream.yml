@@ -1,0 +1,22 @@
+access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+
+# Keep a rolling 30-day point-in-time history in R2. Litestream manages
+# retention so its incremental restore chain remains internally consistent.
+snapshot:
+  interval: 24h
+  retention: 720h
+
+validation:
+  interval: 24h
+
+logging:
+  level: info
+  type: json
+  stderr: true
+
+dbs:
+  - path: /data/chadashot.sqlite
+    replica:
+      url: ${LITESTREAM_REPLICA_URL}
+      sync-interval: 10s

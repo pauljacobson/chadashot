@@ -6,7 +6,7 @@ The previous FreshRSS deployment wrapper has been moved to a local, Git-ignored 
 
 ## Project status
 
-The initial review version includes the responsive reading interface, an expandable folder/feed tree with favicons and persistent ordering preferences, fixture-backed local use, live Birchfeed synchronization, manual feed subscriptions, offline article caching and queued read/star changes, encrypted service credentials with explicit disconnect controls, production passkey onboarding with recovery codes and multiple passkeys, persistent Readwise highlights, Reader document saving, versioned database migrations, and optional S3-compatible backups. The product specification, deployment guide, and supporting research are in [`docs/`](docs/).
+The initial review version includes the responsive reading interface, an expandable folder/feed tree with favicons and persistent ordering preferences, fixture-backed local use, live Birchfeed synchronization, manual feed subscriptions, offline article caching and queued read/star changes, encrypted service credentials with explicit disconnect controls, production passkey onboarding with recovery codes and multiple passkeys, persistent Readwise highlights, Reader document saving, versioned database migrations, and optional Litestream replication to Cloudflare R2. The product specification, deployment guide, and supporting research are in [`docs/`](docs/).
 
 ## Run locally
 
@@ -30,7 +30,7 @@ npm run check
 
 ## Deploy to Railway
 
-Railway builds the root [`Dockerfile`](Dockerfile), checks `/api/health`, and stores the SQLite database and bounded application log in a volume mounted at `/data`. Production requires `APP_ORIGIN`, `ENCRYPTION_KEY`, and an initial `BOOTSTRAP_TOKEN`. Optional S3-compatible backups can upload consistent SQLite copies directly to a private Cloudflare R2 bucket. Follow the staged [Railway deployment guide](docs/20260907%20Railway%20deployment%20guide.md) before replacing the current FreshRSS service.
+Railway builds the root [`Dockerfile`](Dockerfile), checks `/api/health`, and stores the SQLite database and bounded application log in a volume mounted at `/data`. Production requires `APP_ORIGIN`, `ENCRYPTION_KEY`, and an initial `BOOTSTRAP_TOKEN`. Optional Railway environment variables enable Litestream to continuously replicate SQLite to a private Cloudflare R2 bucket and restore it when a new volume starts empty. Follow the staged [Railway deployment guide](docs/20260907%20Railway%20deployment%20guide.md) before replacing the current FreshRSS service.
 
 ## Current decisions
 

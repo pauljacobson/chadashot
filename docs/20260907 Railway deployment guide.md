@@ -19,25 +19,23 @@ Treat `ENCRYPTION_KEY` as permanent application data: changing it makes the save
 
 #### Optional Cloudflare R2 backups
 
-Railway volume backups and Cloudflare R2 serve different purposes. Enable Railway's native volume backups as the fastest same-platform restore path. Chadashot can additionally upload a consistent SQLite backup to a private R2 bucket, which provides an off-platform copy.
+Railway volume backups and Cloudflare R2 serve different purposes. Enable Railway's native volume backups as the fastest same-platform restore path. For an off-platform copy, the production container includes Litestream and Railway supplies its R2 connection entirely through service variables. Backup scheduling and Cloudflare credentials are not handled by Chadashot application code.
+
+A separate Railway cron/template service is a good fit for PostgreSQL or MySQL because it can connect to those servers over the network. It cannot safely back up Chadashot's local SQLite file: Railway attaches a volume to one service, and a second service cannot share that mount. Running Litestream beside Chadashot in the same container keeps SQLite locking local and supported while retaining Railway as the configuration surface.
 
 Create a private R2 bucket and an S3 API token restricted to that bucket, then add these Railway variables:
 
 ```text
-BACKUP_S3_ENDPOINT=https://<CLOUDFLARE_ACCOUNT_ID>.r2.cloudflarestorage.com
-BACKUP_S3_REGION=auto
-BACKUP_S3_BUCKET=<PRIVATE_BUCKET_NAME>
-BACKUP_S3_ACCESS_KEY_ID=<SCOPED_ACCESS_KEY_ID>
-BACKUP_S3_SECRET_ACCESS_KEY=<SCOPED_SECRET_ACCESS_KEY>
-BACKUP_S3_PREFIX=chadashot
-BACKUP_INTERVAL_HOURS=24
+LITESTREAM_REPLICA_URL=s3://<PRIVATE_BUCKET_NAME>/chadashot?endpoint=<CLOUDFLARE_ACCOUNT_ID>.r2.cloudflarestorage.com&region=auto
+LITESTREAM_ACCESS_KEY_ID=<SCOPED_ACCESS_KEY_ID>
+LITESTREAM_SECRET_ACCESS_KEY=<SCOPED_SECRET_ACCESS_KEY>
 ```
 
-All four endpoint/bucket/credential values are required together; omitting all of them disables offsite backups. Chadashot creates the first backup about one minute after startup and repeats it at the configured interval. Successful uploads and failures appear in Settings → Application logs. Objects are organized by year and month under the configured prefix.
+All three values are required together; omitting all of them disables offsite replication. Litestream restores `/data/chadashot.sqlite` from R2 when the volume is empty, starts Chadashot, and sends changes to R2 every ten seconds. Its logs appear in Railway's service logs rather than Settings → Application logs because Litestream is infrastructure, not part of the application.
 
-Configure an R2 lifecycle rule to expire backups after the chosen retention period; 30–90 daily copies is a reasonable starting point for this personal app. Keep `ENCRYPTION_KEY` outside both Railway and R2 as part of the recovery record. Integration credentials inside SQLite are encrypted with that key, recovery codes are stored only as hashes, and saved highlight text remains readable inside the database backup.
+Litestream creates a daily full snapshot and retains a rolling 30-day point-in-time history. Give the scoped R2 token permission to read, write, list, and delete objects in this bucket so Litestream can restore and enforce retention. Do not add an R2 lifecycle rule shorter than 30 days because deleting individual objects can break an incremental restore chain. Keep `ENCRYPTION_KEY` outside both Railway and R2 as part of the recovery record. Integration credentials inside SQLite are encrypted with that key, recovery codes are stored only as hashes, and saved highlight text remains readable inside the database replica.
 
-Test restoration before relying on the backup: stop writes to Chadashot, retrieve a recent `.sqlite` object, place it at `/data/chadashot.sqlite`, and start the service. The migration runner will then apply any newer application migrations. Do not restore a database created by a newer application release into an older release unless that release explicitly supports the newer schema.
+Test restoration before relying on the backup: confirm Litestream has created objects in R2, deploy the same image and variables with a fresh `/data` volume in a temporary Railway environment, and verify that the account and articles return. The migration runner will apply any newer application migrations after Litestream restores the database. Do not restore a database created by a newer application release into an older release unless that release explicitly supports the newer schema.
 
 #### Database migrations
 
@@ -55,13 +53,13 @@ Migration rules:
 
 1. The existing FreshRSS instance contains no data that needs preserving, so detach or delete its old volume rather than mounting it into Chadashot.
 2. Point the Railway service at this GitHub repository's root. Keep the Dockerfile builder, `/api/health` health check, and create a fresh volume mounted at `/data`.
-3. Add the required production variables and, if desired, the R2 variables above. Remove obsolete FreshRSS variables from the service.
+3. Add the required production variables and, if desired, the three Litestream/R2 variables above. Remove obsolete FreshRSS variables from the service.
 4. Deploy and verify the health check before completing the custom-domain cutover. The final `chadashot.app` domain must be active before creating a real passkey because passkeys are bound to that domain.
 5. Open Chadashot, enter the Railway `BOOTSTRAP_TOKEN`, create the initial account, register the first passkey, and save the one-time recovery codes.
 6. Remove `BOOTSTRAP_TOKEN` from Railway after setup succeeds. The server also refuses bootstrap after an account exists.
 7. Add a second passkey from Settings → Account security, then verify that one recovery code can sign in and is rejected when reused.
 8. Connect Birchfeed and Readwise from Settings, then verify synchronization, read/star mutations, persistent highlights, and Reader document saving.
-9. If R2 is configured, wait for the first `Offsite database backup uploaded` log entry and confirm the object exists in the private bucket.
+9. If R2 is configured, confirm the Litestream startup and replication messages in Railway's service logs, then confirm objects exist under the `chadashot` prefix in the private bucket.
 
 #### Rollback boundary
 
