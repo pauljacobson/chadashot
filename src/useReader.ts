@@ -11,7 +11,7 @@ export type ReaderFilter =
 
 export type SyncStatus = 'offline' | 'syncing' | 'current' | 'error';
 
-export function useReader() {
+export function useReader(enabled = true) {
   const [snapshot, setSnapshot] = useState<ReaderSnapshot | null>(null);
   const [filter, setFilter] = useState<ReaderFilter>({ kind: 'inbox' });
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -22,6 +22,7 @@ export function useReader() {
   const activeRequest = useRef<AbortController | null>(null);
 
   const synchronize = useCallback(async () => {
+    if (!enabled) return;
     if (!navigator.onLine) {
       setStatus('offline');
       return;
@@ -49,9 +50,10 @@ export function useReader() {
       setError(syncError instanceof Error ? syncError.message : 'Synchronization failed');
       setStatus('error');
     }
-  }, []);
+  }, [enabled]);
 
   useEffect(() => {
+    if (!enabled) return;
     const initialSync = window.setTimeout(() => void synchronize(), 0);
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') void synchronize();
@@ -74,7 +76,7 @@ export function useReader() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [synchronize]);
+  }, [enabled, synchronize]);
 
   const articles = useMemo(() => {
     if (!snapshot) return [];

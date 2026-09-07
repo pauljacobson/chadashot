@@ -51,6 +51,42 @@ button, input, textarea { font: inherit; }
 button { color: inherit; }
 a { color: inherit; }
 
+.auth-screen {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background:
+    radial-gradient(circle at 20% 10%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 32rem),
+    var(--background);
+}
+
+.auth-card {
+  width: min(100%, 430px);
+  display: grid;
+  gap: 20px;
+  padding: clamp(28px, 7vw, 48px);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--surface);
+  box-shadow: 0 24px 70px var(--shadow);
+}
+
+.auth-card .app-mark { width: 48px; height: 48px; font-size: 28px; }
+.auth-card h1 { margin: 4px 0 0; font-family: Georgia, Cambria, "Times New Roman", serif; font-size: 2rem; }
+.auth-card p, .auth-card small { margin: 0; color: var(--muted); line-height: 1.55; }
+.auth-fields { display: grid; gap: 14px; }
+.auth-fields label { display: grid; gap: 7px; color: var(--muted); font-size: .82rem; font-weight: 650; }
+.auth-fields input {
+  min-height: 44px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  padding: 0 12px;
+  background: var(--background);
+  color: var(--text);
+}
+.auth-error { color: var(--danger); font-size: .88rem; }
+
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,

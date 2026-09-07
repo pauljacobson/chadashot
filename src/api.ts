@@ -1,4 +1,10 @@
 import type { ArticleMutation, ReaderSnapshot, SessionState } from '../shared/reader';
+import type {
+  PublicKeyCredentialCreationOptionsJSON,
+  PublicKeyCredentialRequestOptionsJSON,
+  RegistrationResponseJSON,
+  AuthenticationResponseJSON,
+} from '@simplewebauthn/browser';
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -31,5 +37,32 @@ export function sendArticleMutation(mutation: ArticleMutation) {
   return request<{ mutation: ArticleMutation; synchronized: boolean }>('/api/reader/mutations', {
     method: 'POST',
     body: JSON.stringify(mutation),
+  });
+}
+
+export function getBootstrapOptions(displayName: string, bootstrapToken: string) {
+  return request<{ setupId: string; options: PublicKeyCredentialCreationOptionsJSON }>('/api/auth/bootstrap/options', {
+    method: 'POST',
+    body: JSON.stringify({ displayName, bootstrapToken }),
+  });
+}
+
+export function verifyBootstrap(setupId: string, bootstrapToken: string, credential: RegistrationResponseJSON) {
+  return request<{ authenticated: true }>('/api/auth/bootstrap/verify', {
+    method: 'POST',
+    body: JSON.stringify({ setupId, bootstrapToken, credential }),
+  });
+}
+
+export function getLoginOptions() {
+  return request<{ challengeId: string; options: PublicKeyCredentialRequestOptionsJSON }>('/api/auth/login/options', {
+    method: 'POST',
+  });
+}
+
+export function verifyLogin(challengeId: string, credential: AuthenticationResponseJSON) {
+  return request<{ authenticated: true }>('/api/auth/login/verify', {
+    method: 'POST',
+    body: JSON.stringify({ challengeId, credential }),
   });
 }

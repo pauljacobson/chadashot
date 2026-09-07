@@ -6,6 +6,8 @@ import { z } from 'zod';
 import type { ArticleMutation } from '../shared/reader.js';
 import type { AppConfig } from './config.js';
 import { developmentSession, requireDevelopmentUser } from './auth/development.js';
+import { createPasskeyAuthentication } from './auth/passkeys.js';
+import { openDatabase, type AppDatabase } from './database.js';
 import { fixtureSnapshot } from './fixtures.js';
 
 const mutationSchema = z.object({
@@ -14,8 +16,9 @@ const mutationSchema = z.object({
   value: z.boolean(),
 });
 
-export function createApp(config: AppConfig) {
+export function createApp(config: AppConfig, dependencies: { database?: AppDatabase } = {}) {
   const app = express();
+  const database = dependencies.database ?? openDatabase(config.dataDir);
   app.disable('x-powered-by');
   app.use(helmet({
     contentSecurityPolicy: config.nodeEnv === 'production' ? undefined : false,
@@ -26,11 +29,13 @@ export function createApp(config: AppConfig) {
     res.status(200).json({ status: 'ok' });
   });
 
+  const passkeys = config.authMode === 'passkey' ? createPasskeyAuthentication(config, database) : null;
+  if (passkeys) app.use('/api/auth', passkeys.router);
   app.get('/api/session', (req, res) => {
-    res.json(developmentSession(req, config));
+    res.json(passkeys ? passkeys.sessionState(req) : developmentSession(req, config));
   });
 
-  const requireUser = requireDevelopmentUser(config);
+  const requireUser = passkeys?.requireUser ?? requireDevelopmentUser(config);
 
   app.get('/api/reader/snapshot', requireUser, (_req, res) => {
     res.json({ ...fixtureSnapshot, generatedAt: new Date().toISOString() });

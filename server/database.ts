@@ -35,6 +35,7 @@ const schema = `
     kind TEXT NOT NULL CHECK (kind IN ('bootstrap', 'login', 'register')),
     challenge TEXT NOT NULL,
     display_name TEXT,
+    user_id TEXT,
     expires_at TEXT NOT NULL
   );
 

@@ -2,11 +2,12 @@ import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
+import { openMemoryDatabase } from './database.js';
 
 const config = loadConfig({ NODE_ENV: 'test', AUTH_MODE: 'development' });
 
 describe('application API', () => {
-  const app = createApp(config);
+  const app = createApp(config, { database: openMemoryDatabase() });
 
   it('reports health without authentication', async () => {
     const response = await request(app).get('/api/health');

@@ -1,7 +1,8 @@
 import DOMPurify from 'dompurify';
+import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Article, SessionState } from '../shared/reader';
-import { getSession } from './api';
+import { getBootstrapOptions, getLoginOptions, getSession, verifyBootstrap, verifyLogin } from './api';
 import { type ReaderFilter, type SyncStatus, useReader } from './useReader';
 
 type MobileScreen = 'list' | 'reader';
@@ -228,6 +229,55 @@ function SettingsPanel({ session, onClose }: { session: SessionState; onClose: (
   );
 }
 
+function AuthenticationScreen({ session, onAuthenticated }: { session: SessionState; onAuthenticated: () => Promise<void> }) {
+  const [displayName, setDisplayName] = useState('Paul');
+  const [bootstrapToken, setBootstrapToken] = useState('');
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function authenticate() {
+    setWorking(true);
+    setError(null);
+    try {
+      if (session.setupRequired) {
+        const pending = await getBootstrapOptions(displayName, bootstrapToken);
+        const credential = await startRegistration({ optionsJSON: pending.options });
+        await verifyBootstrap(pending.setupId, bootstrapToken, credential);
+      } else {
+        const pending = await getLoginOptions();
+        const credential = await startAuthentication({ optionsJSON: pending.options });
+        await verifyLogin(pending.challengeId, credential);
+      }
+      await onAuthenticated();
+    } catch (authError) {
+      setError(authError instanceof Error ? authError.message : 'Passkey authentication failed');
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  return (
+    <main className="auth-screen">
+      <section className="auth-card">
+        <span className="app-mark">ח</span>
+        <div><div className="eyebrow">Chadashot</div><h1>{session.setupRequired ? 'Create your private reader' : 'Welcome back'}</h1></div>
+        <p>{session.setupRequired ? 'Use the one-time setup token from Railway, then register a passkey on this device.' : 'Use a registered passkey to open your reader.'}</p>
+        {session.setupRequired && (
+          <div className="auth-fields">
+            <label>Display name<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} autoComplete="name" /></label>
+            <label>One-time setup token<input type="password" value={bootstrapToken} onChange={(event) => setBootstrapToken(event.target.value)} autoComplete="one-time-code" /></label>
+          </div>
+        )}
+        <button className="primary-action" disabled={working || (session.setupRequired && (!displayName.trim() || !bootstrapToken))} onClick={() => void authenticate()}>
+          {working ? 'Waiting for your device…' : session.setupRequired ? 'Create account and passkey' : 'Sign in with a passkey'}
+        </button>
+        {error && <div className="auth-error" role="alert">{error}</div>}
+        <small>{session.setupRequired ? 'Setup closes permanently after the first account is created.' : 'Your passkey never leaves your device.'}</small>
+      </section>
+    </main>
+  );
+}
+
 export function App() {
   const [session, setSession] = useState<SessionState | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
@@ -235,7 +285,11 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileScreen, setMobileScreen] = useState<MobileScreen>('list');
   const [notice, setNotice] = useState('');
-  const reader = useReader();
+  const reader = useReader(Boolean(session?.authenticated));
+
+  async function refreshSession() {
+    setSession(await getSession());
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -271,7 +325,7 @@ export function App() {
   if (sessionError) return <div className="centered-state"><strong>Chadashot could not start</strong><span>{sessionError}</span></div>;
   if (!session) return <div className="centered-state"><span className="app-mark">ח</span><span>Opening Chadashot…</span></div>;
   if (!session.authenticated) {
-    return <div className="centered-state"><span className="app-mark">ח</span><strong>{session.setupRequired ? 'Set up Chadashot' : 'Sign in to Chadashot'}</strong><span>{session.setupRequired ? 'Create the initial account and register its first passkey.' : 'Use a passkey to continue.'}</span><button className="primary-action">{session.setupRequired ? 'Begin setup' : 'Sign in with a passkey'}</button></div>;
+    return <AuthenticationScreen session={session} onAuthenticated={refreshSession} />;
   }
 
   const activeFilter = reader.filter;
