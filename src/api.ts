@@ -110,3 +110,10 @@ export function saveReadwiseDocument(article: {
     body: JSON.stringify(article),
   });
 }
+
+export function subscribeToFeed(feedUrl: string) {
+  return request<{ subscription: { id: string; title: string; url: string }; synchronized: true }>('/api/subscriptions', {
+    method: 'POST',
+    body: JSON.stringify({ feedUrl }),
+  });
+}

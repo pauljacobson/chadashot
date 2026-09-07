@@ -53,6 +53,16 @@ const readerDocumentSchema = z.object({
   author: z.string().max(500).nullable(),
   canonicalUrl: z.url(),
 });
+const subscriptionSchema = z.object({ feedUrl: z.url() });
+
+function normalizeFeedUrl(value: string) {
+  const url = new URL(value);
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+    throw new Error('Feed URL must be an HTTP or HTTPS address without embedded credentials');
+  }
+  url.hash = '';
+  return url.toString();
+}
 
 export function createApp(config: AppConfig, dependencies: { database?: AppDatabase; fetchImplementation?: typeof fetch } = {}) {
   const app = express();
@@ -180,6 +190,24 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
     const credentials = loadBirchfeed(database, config);
     if (credentials) await new GoogleReaderClient(credentials, fetchImplementation).mutate(mutation);
     res.status(200).json({ mutation, synchronized: true });
+  });
+
+  app.post('/api/subscriptions', requireUser, async (req, res) => {
+    const body = subscriptionSchema.parse(req.body);
+    const credentials = loadBirchfeed(database, config);
+    if (!credentials) return res.status(409).json({ error: 'Connect an RSS service in Settings before adding feeds' });
+    let feedUrl: string;
+    try {
+      feedUrl = normalizeFeedUrl(body.feedUrl);
+    } catch (error) {
+      return res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid feed URL' });
+    }
+    try {
+      const subscription = await new GoogleReaderClient(credentials, fetchImplementation).subscribe(feedUrl);
+      return res.status(201).json({ subscription, synchronized: true });
+    } catch (error) {
+      return res.status(502).json({ error: error instanceof Error ? error.message : 'Could not add feed' });
+    }
   });
 
   if (config.nodeEnv === 'production') {

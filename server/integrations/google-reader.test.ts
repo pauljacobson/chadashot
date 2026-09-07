@@ -49,4 +49,47 @@ describe('Google Reader compatible Birchfeed client', () => {
     expect(String(request?.[0])).toContain('/edit-tag');
     expect(String(request?.[1]?.body)).toContain('a=user%2F-%2Fstate%2Fcom.google%2Fread');
   });
+
+  it('subscribes through quickadd with the service write token', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.endsWith('/token')) return new Response('write-token');
+      if (url.includes('/subscription/quickadd')) return new Response(JSON.stringify({
+        numResults: 1,
+        query: 'https://example.test/feed.xml',
+        streamId: 'feed/42',
+        streamName: 'Example feed',
+      }), { status: 200 });
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const client = new GoogleReaderClient({
+      serverUrl: 'https://reader.example.test/api/greader.php', email: 'reader@example.test', apiKey: 'secret',
+    }, fetchMock);
+
+    const subscription = await client.subscribe('https://example.test/feed.xml');
+    expect(subscription).toEqual({ id: 'feed/42', title: 'Example feed', url: 'https://example.test/feed.xml' });
+    const body = String(fetchMock.mock.calls.at(-1)?.[1]?.body);
+    expect(body).toContain('quickadd=https%3A%2F%2Fexample.test%2Ffeed.xml');
+    expect(body).toContain('T=write-token');
+  });
+
+  it('falls back to subscription edit when quickadd is unavailable', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.endsWith('/token')) return new Response('write-token');
+      if (url.includes('/subscription/quickadd')) return new Response('', { status: 404 });
+      if (url.endsWith('/subscription/edit')) return new Response('OK');
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const client = new GoogleReaderClient({
+      serverUrl: 'https://reader.example.test/api/greader.php', email: 'reader@example.test', apiKey: 'secret',
+    }, fetchMock);
+
+    await client.subscribe('https://example.test/feed.xml');
+    const body = String(fetchMock.mock.calls.at(-1)?.[1]?.body);
+    expect(body).toContain('ac=subscribe');
+    expect(body).toContain('s=feed%2Fhttps%3A%2F%2Fexample.test%2Ffeed.xml');
+  });
 });

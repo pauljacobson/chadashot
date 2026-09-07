@@ -138,6 +138,7 @@ The application stores the complete API base URL explicitly. It must not blindly
 #### Required provider operations
 
 - Authenticate through `accounts/ClientLogin` using the Birchfeed account email and a dedicated API key.
+- Add a feed or website URL through the write-token-protected `subscription/quickadd` endpoint, with `subscription/edit` and `ac=subscribe` as the compatibility fallback.
 - Fetch subscriptions, folders/tags, unread counts, article streams, continuation pages, and individual item content.
 - Obtain and refresh the write token required for mutations.
 - Mark read/unread, star/unstar, and mark a stream read.

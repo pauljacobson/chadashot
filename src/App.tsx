@@ -11,6 +11,7 @@ import {
   getLoginOptions,
   getSession,
   saveReadwiseDocument,
+  subscribeToFeed,
   verifyBootstrap,
   verifyLogin,
 } from './api';
@@ -47,12 +48,14 @@ function Navigation({
   filter,
   onFilter,
   onSettings,
+  onSubscribe,
   status,
 }: {
   snapshot: ReturnType<typeof useReader>['snapshot'];
   filter: ReaderFilter;
   onFilter: (filter: ReaderFilter) => void;
   onSettings: () => void;
+  onSubscribe: () => void;
   status: SyncStatus;
 }) {
   const unread = snapshot?.articles.filter((article) => !article.read).length ?? 0;
@@ -79,7 +82,7 @@ function Navigation({
           ))}
         </div>
         <div className="nav-group feeds-group">
-          <div className="nav-heading">Feeds</div>
+          <div className="nav-heading-row"><div className="nav-heading">Feeds</div><button aria-label="Add feed" onClick={onSubscribe}>＋</button></div>
           {snapshot?.subscriptions.map((subscription) => (
             <button key={subscription.id} className={`nav-item ${filter.kind === 'feed' && filter.id === subscription.id ? 'active' : ''}`} onClick={() => onFilter({ kind: 'feed', id: subscription.id })}>
               <span className="feed-initial" aria-hidden="true">{subscription.title.slice(0, 1)}</span><span>{subscription.title}</span>
@@ -92,6 +95,40 @@ function Navigation({
         <button onClick={onSettings}>Settings</button>
       </div>
     </aside>
+  );
+}
+
+function SubscribePanel({ onClose, onSubscribed }: { onClose: () => void; onSubscribed: (feedUrl: string) => Promise<void> }) {
+  const [feedUrl, setFeedUrl] = useState('');
+  const [subscribing, setSubscribing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    setSubscribing(true);
+    setError(null);
+    try {
+      await onSubscribed(feedUrl);
+      onClose();
+    } catch (subscriptionError) {
+      setError(subscriptionError instanceof Error ? subscriptionError.message : 'Could not add feed');
+    } finally {
+      setSubscribing(false);
+    }
+  }
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+      <section className="subscribe-panel" role="dialog" aria-modal="true" aria-labelledby="subscribe-title">
+        <header><div><div className="eyebrow">Subscription</div><h1 id="subscribe-title">Add a feed</h1></div><button aria-label="Close add feed" onClick={onClose}>×</button></header>
+        <form onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+          <label htmlFor="feed-url">Feed or website URL</label>
+          <input id="feed-url" type="url" inputMode="url" autoCapitalize="none" spellCheck={false} autoFocus required value={feedUrl} onChange={(event) => setFeedUrl(event.target.value)} placeholder="https://example.com/feed.xml" />
+          <p>The connected RSS service will discover and subscribe to the feed.</p>
+          {error && <div className="auth-error" role="alert">{error}</div>}
+          <div className="dialog-actions"><button type="button" onClick={onClose}>Cancel</button><button className="primary-action" disabled={subscribing || !feedUrl} type="submit">{subscribing ? 'Adding…' : 'Add feed'}</button></div>
+        </form>
+      </section>
+    </div>
   );
 }
 
@@ -382,6 +419,7 @@ export function App() {
   const [session, setSession] = useState<SessionState | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [subscribeOpen, setSubscribeOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileScreen, setMobileScreen] = useState<MobileScreen>('list');
   const [notice, setNotice] = useState('');
@@ -459,7 +497,7 @@ export function App() {
         </div>
       </header>
       <div className="workspace">
-        <Navigation snapshot={reader.snapshot} filter={reader.filter} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} status={reader.status} />
+        <Navigation snapshot={reader.snapshot} filter={reader.filter} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} onSubscribe={() => setSubscribeOpen(true)} status={reader.status} />
         <ArticleList title={title} articles={reader.articles} selectedId={reader.selectedArticle?.id ?? null} onSelect={chooseArticle} onToggleStar={(article) => void reader.toggleStarred(article)} />
         <ReaderPane
           key={reader.selectedArticle?.id ?? 'empty-reader'}
@@ -493,11 +531,19 @@ export function App() {
       <nav className="mobile-navigation" aria-label="Primary navigation">
         <button className={reader.filter.kind === 'inbox' ? 'active' : ''} onClick={() => chooseFilter({ kind: 'inbox' })}><span>●</span>Inbox</button>
         <button className={reader.filter.kind === 'starred' ? 'active' : ''} onClick={() => chooseFilter({ kind: 'starred' })}><span>☆</span>Starred</button>
-        <button onClick={() => { setSidebarOpen(true); setMobileScreen('list'); }}><span>⌁</span>Feeds</button>
+        <button onClick={() => setSubscribeOpen(true)}><span>＋</span>Add feed</button>
         <button onClick={() => setSettingsOpen(true)}><span>⚙</span>Settings</button>
       </nav>
       {notice && <div className="toast" role="status" aria-live="polite">{notice}</div>}
       {reader.error && <div className="error-banner" role="alert">{reader.error}</div>}
+      {subscribeOpen && <SubscribePanel
+        onClose={() => setSubscribeOpen(false)}
+        onSubscribed={async (feedUrl) => {
+          const result = await subscribeToFeed(feedUrl);
+          setNotice(`Subscribed to ${result.subscription.title}`);
+          await reader.synchronize();
+        }}
+      />}
       {settingsOpen && <SettingsPanel session={session} onClose={() => setSettingsOpen(false)} onConnected={reader.synchronize} />}
     </div>
   );

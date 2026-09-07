@@ -64,6 +64,37 @@ describe('application API', () => {
       .toThrow('Server URL cannot contain credentials');
   });
 
+  it('adds a subscription to the configured Reader service', async () => {
+    const database = openMemoryDatabase();
+    const encryptedConfig = loadConfig({
+      NODE_ENV: 'test',
+      AUTH_MODE: 'development',
+      ENCRYPTION_KEY: Buffer.alloc(32, 4).toString('base64'),
+    });
+    const fetchImplementation = async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.endsWith('/token')) return new Response('write-token');
+      if (url.includes('/subscription/quickadd')) return new Response(JSON.stringify({
+        numResults: 1, query: 'https://example.test/feed.xml', streamId: 'feed/42', streamName: 'Example feed',
+      }), { status: 200 });
+      return new Response('', { status: 404 });
+    };
+    const subscriptionApp = createApp(encryptedConfig, { database, fetchImplementation });
+    await request(subscriptionApp).put('/api/settings/rss').send({
+      serverUrl: 'https://reader.example.test/api/greader.php',
+      email: 'reader@example.test',
+      apiKey: 'reader-secret',
+    });
+
+    const response = await request(subscriptionApp).post('/api/subscriptions').send({ feedUrl: 'https://example.test/feed.xml' });
+    expect(response.status).toBe(201);
+    expect(response.body).toEqual({
+      subscription: { id: 'feed/42', title: 'Example feed', url: 'https://example.test/feed.xml' },
+      synchronized: true,
+    });
+  });
+
   it('saves highlights and documents through separate Readwise actions', async () => {
     const database = openMemoryDatabase();
     const encryptedConfig = loadConfig({

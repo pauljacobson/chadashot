@@ -264,6 +264,21 @@ textarea:focus-visible {
   letter-spacing: .08em;
   text-transform: uppercase;
 }
+.nav-heading-row { display: flex; align-items: center; min-height: 28px; }
+.nav-heading-row .nav-heading { flex: 1; margin-bottom: 0; }
+.nav-heading-row > button {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  font-size: 18px;
+  cursor: pointer;
+}
+.nav-heading-row > button:hover { background: var(--surface-active); color: var(--text); }
 
 .nav-item {
   position: relative;
@@ -465,6 +480,24 @@ textarea:focus-visible {
   background: var(--surface);
   box-shadow: 0 22px 70px rgba(0,0,0,.28);
 }
+.subscribe-panel {
+  width: min(460px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: 0 22px 70px rgba(0,0,0,.28);
+}
+.subscribe-panel > header { display: flex; align-items: center; padding: 24px; border-bottom: 1px solid var(--border); }
+.subscribe-panel h1 { margin: 3px 0 0; font-size: 25px; }
+.subscribe-panel > header > button { margin-left: auto; width: 42px; height: 42px; border: 0; border-radius: 50%; background: transparent; font-size: 24px; cursor: pointer; }
+.subscribe-panel form { display: grid; gap: 10px; padding: 24px; }
+.subscribe-panel label { color: var(--muted); font-size: .82rem; font-weight: 650; }
+.subscribe-panel input { min-height: 44px; padding: 0 12px; border: 1px solid var(--border-strong); border-radius: 9px; background: var(--background); color: var(--text); }
+.subscribe-panel p { margin: 0 0 8px; color: var(--muted); font-size: .82rem; line-height: 1.5; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.dialog-actions button { min-height: 40px; padding: 0 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); cursor: pointer; }
+.dialog-actions .primary-action { background: var(--accent); }
 .settings-panel > header { display: flex; align-items: center; padding: 24px; border-bottom: 1px solid var(--border); }
 .settings-panel h1 { margin: 3px 0 0; font-size: 25px; }
 .settings-panel > header > button { margin-left: auto; width: 42px; height: 42px; border: 0; border-radius: 50%; background: transparent; font-size: 24px; cursor: pointer; }
@@ -576,7 +609,7 @@ textarea:focus-visible {
   .mobile-navigation button span { font-size: 17px; }
   .mobile-navigation button.active { color: var(--accent); font-weight: 600; }
   .dialog-backdrop { padding: 0; place-items: end stretch; }
-  .settings-panel { width: 100%; max-height: calc(100dvh - 28px); border-radius: 18px 18px 0 0; }
+  .settings-panel, .subscribe-panel { width: 100%; max-height: calc(100dvh - 28px); border-radius: 18px 18px 0 0; }
   .toast, .error-banner { right: 12px; bottom: 82px; }
   .error-banner { bottom: 132px; }
 }

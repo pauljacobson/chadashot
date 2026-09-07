@@ -38,6 +38,14 @@ const streamSchema = z.object({
   })),
 });
 
+const quickAddSchema = z.object({
+  numResults: z.number(),
+  query: z.string().optional(),
+  streamId: z.string().optional(),
+  streamName: z.string().optional(),
+  error: z.string().optional(),
+});
+
 function folderId(categoryId: string) {
   return `folder:${categoryId}`;
 }
@@ -182,5 +190,42 @@ export class GoogleReaderClient {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
     });
+  }
+
+  async subscribe(feedUrl: string) {
+    const auth = await this.authenticate();
+    const token = await (await this.authorizedRequest('/reader/api/0/token', auth)).text();
+    const quickAddBody = new URLSearchParams({ quickadd: feedUrl, T: token });
+    const quickAddResponse = await this.fetchImplementation(`${this.baseUrl}/reader/api/0/subscription/quickadd?output=json`, {
+      method: 'POST',
+      headers: {
+        Authorization: `GoogleLogin auth=${auth}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: quickAddBody,
+    });
+
+    if (quickAddResponse.ok) {
+      const result = quickAddSchema.parse(await quickAddResponse.json());
+      if (result.numResults < 1) throw new Error(result.error || 'The RSS service could not find a feed at that URL');
+      return {
+        id: result.streamId ?? `feed/${feedUrl}`,
+        title: result.streamName ?? result.query ?? feedUrl,
+        url: result.query ?? feedUrl,
+      };
+    }
+
+    if (![404, 405].includes(quickAddResponse.status)) {
+      throw new Error(`RSS service subscription failed (${quickAddResponse.status})`);
+    }
+
+    const editBody = new URLSearchParams({ ac: 'subscribe', s: `feed/${feedUrl}`, T: token });
+    const editResponse = await this.authorizedRequest('/reader/api/0/subscription/edit', auth, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: editBody,
+    });
+    if ((await editResponse.text()).trim() !== 'OK') throw new Error('The RSS service did not confirm the subscription');
+    return { id: `feed/${feedUrl}`, title: feedUrl, url: feedUrl };
   }
 }
