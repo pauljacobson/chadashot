@@ -54,6 +54,21 @@ export type SessionState = {
   user: { id: string; displayName: string } | null;
 };
 
+export type PasskeySummary = {
+  credentialId: string;
+  name: string;
+  deviceType: string;
+  backedUp: boolean;
+  createdAt: string;
+  lastUsedAt: string | null;
+};
+
+export type AccountSecurityState = {
+  passkeys: PasskeySummary[];
+  recoveryCodesRemaining: number;
+  recoveryCodesCreatedAt: string | null;
+};
+
 export type IntegrationStatus = {
   rss: { provider: 'google-reader'; configured: boolean; serverUrl: string | null };
   readwise: { configured: boolean };

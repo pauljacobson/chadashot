@@ -1,4 +1,4 @@
-import type { AppLogLevel, AppLogResult, ArticleMutation, IntegrationStatus, ReaderSnapshot, SessionState } from '../shared/reader';
+import type { AccountSecurityState, AppLogLevel, AppLogResult, ArticleMutation, IntegrationStatus, ReaderSnapshot, SessionState } from '../shared/reader';
 import type {
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
@@ -22,6 +22,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(typeof body.error === 'string' ? body.error : `Request failed (${response.status})`);
   }
 
+  if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
 }
 
@@ -55,10 +56,47 @@ export function getBootstrapOptions(displayName: string, bootstrapToken: string)
 }
 
 export function verifyBootstrap(setupId: string, bootstrapToken: string, credential: RegistrationResponseJSON) {
-  return request<{ authenticated: true }>('/api/auth/bootstrap/verify', {
+  return request<{ authenticated: true; recoveryCodes: string[] }>('/api/auth/bootstrap/verify', {
     method: 'POST',
     body: JSON.stringify({ setupId, bootstrapToken, credential }),
   });
+}
+
+export function recoverAccount(code: string) {
+  return request<{ authenticated: true }>('/api/auth/recovery', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  });
+}
+
+export function logout() {
+  return request<void>('/api/auth/logout', { method: 'POST' });
+}
+
+export function getAccountSecurity(signal?: AbortSignal) {
+  return request<AccountSecurityState>('/api/auth/security', { signal });
+}
+
+export function getAdditionalPasskeyOptions(name: string) {
+  return request<{ challengeId: string; options: PublicKeyCredentialCreationOptionsJSON }>('/api/auth/passkeys/options', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function verifyAdditionalPasskey(challengeId: string, credential: RegistrationResponseJSON) {
+  return request<{ registered: true }>('/api/auth/passkeys/verify', {
+    method: 'POST',
+    body: JSON.stringify({ challengeId, credential }),
+  });
+}
+
+export function removePasskey(credentialId: string) {
+  return request<void>(`/api/auth/passkeys/${encodeURIComponent(credentialId)}`, { method: 'DELETE' });
+}
+
+export function regenerateRecoveryCodes() {
+  return request<{ recoveryCodes: string[] }>('/api/auth/recovery-codes', { method: 'POST' });
 }
 
 export function getLoginOptions() {

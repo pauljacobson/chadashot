@@ -1,7 +1,7 @@
 import DOMPurify from 'dompurify';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
-import type { AppLogLevel, AppLogResult, Article, IntegrationStatus, SessionState, Subscription } from '../shared/reader';
+import type { AccountSecurityState, AppLogLevel, AppLogResult, Article, IntegrationStatus, SessionState, Subscription } from '../shared/reader';
 import {
   appLogExportUrl,
   connectBirchfeed,
@@ -9,14 +9,21 @@ import {
   createReadwiseHighlight,
   disconnectReadwise,
   disconnectRssService,
+  getAccountSecurity,
+  getAdditionalPasskeyOptions,
   getBootstrapOptions,
   getAppLogs,
   getIntegrationStatus,
   getLoginOptions,
   getSession,
+  logout,
+  recoverAccount,
+  regenerateRecoveryCodes,
+  removePasskey,
   saveReadwiseDocument,
   subscribeToFeed,
   verifyBootstrap,
+  verifyAdditionalPasskey,
   verifyLogin,
 } from './api';
 import { type ReaderFilter, type SyncStatus, useReader } from './useReader';
@@ -715,11 +722,142 @@ export function LogsPanel({ onClose }: { onClose: () => void }) {
   );
 }
 
-function SettingsPanel({ session, onClose, onConnected, onRssDisconnected }: {
+function downloadRecoveryCodes(codes: string[]) {
+  const blob = new Blob([
+    `Chadashot recovery codes\n\nEach code works once. Store these somewhere private.\n\n${codes.join('\n')}\n`,
+  ], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'chadashot-recovery-codes.txt';
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function RecoveryCodesView({ codes, onDone }: { codes: string[]; onDone: () => void }) {
+  const [copied, setCopied] = useState(false);
+
+  return (
+    <div className="recovery-codes-view">
+      <div className="recovery-warning" role="alert"><strong>Save these recovery codes now</strong><span>They are shown only once. Each code can sign you in one time if your passkeys are unavailable.</span></div>
+      <ol>{codes.map((code) => <li key={code}><code>{code}</code></li>)}</ol>
+      <div className="recovery-actions">
+        <button type="button" onClick={() => {
+          void navigator.clipboard.writeText(codes.join('\n')).then(() => setCopied(true));
+        }}>{copied ? 'Copied' : 'Copy codes'}</button>
+        <button type="button" onClick={() => downloadRecoveryCodes(codes)}>Download</button>
+        <button className="primary-action" type="button" onClick={onDone}>I saved these codes</button>
+      </div>
+    </div>
+  );
+}
+
+export function AccountSecurityPanel({ onClose }: { onClose: () => void }) {
+  const [security, setSecurity] = useState<AccountSecurityState | null>(null);
+  const [passkeyName, setPasskeyName] = useState('');
+  const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
+  const [working, setWorking] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function refreshSecurity() {
+    setSecurity(await getAccountSecurity());
+  }
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getAccountSecurity(controller.signal).then(setSecurity).catch((securityError: unknown) => {
+      if (!controller.signal.aborted) setError(securityError instanceof Error ? securityError.message : 'Could not load account security');
+    });
+    return () => controller.abort();
+  }, []);
+
+  async function addPasskey() {
+    if (!passkeyName.trim()) return;
+    setWorking('add');
+    setError(null);
+    try {
+      const pending = await getAdditionalPasskeyOptions(passkeyName.trim());
+      const credential = await startRegistration({ optionsJSON: pending.options });
+      await verifyAdditionalPasskey(pending.challengeId, credential);
+      setPasskeyName('');
+      await refreshSecurity();
+    } catch (passkeyError) {
+      setError(passkeyError instanceof Error ? passkeyError.message : 'Could not register passkey');
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function deletePasskey(credentialId: string, name: string) {
+    if (!window.confirm(`Remove “${name}”? You will no longer be able to sign in with that passkey.`)) return;
+    setWorking(credentialId);
+    setError(null);
+    try {
+      await removePasskey(credentialId);
+      await refreshSecurity();
+    } catch (passkeyError) {
+      setError(passkeyError instanceof Error ? passkeyError.message : 'Could not remove passkey');
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function createNewRecoveryCodes() {
+    if (security?.recoveryCodesRemaining && !window.confirm('Generate new recovery codes? Every existing unused code will stop working.')) return;
+    setWorking('recovery');
+    setError(null);
+    try {
+      const result = await regenerateRecoveryCodes();
+      setRecoveryCodes(result.recoveryCodes);
+      await refreshSecurity();
+    } catch (recoveryError) {
+      setError(recoveryError instanceof Error ? recoveryError.message : 'Could not generate recovery codes');
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+      <section className="security-panel" role="dialog" aria-modal="true" aria-labelledby="security-title">
+        <header><div><div className="eyebrow">Settings</div><h1 id="security-title">Account security</h1></div><button aria-label="Back to settings" onClick={onClose}>×</button></header>
+        {error && <div className="settings-error-banner" role="alert"><strong>Security action failed</strong><span>{error}</span></div>}
+        {recoveryCodes ? (
+          <RecoveryCodesView codes={recoveryCodes} onDone={() => setRecoveryCodes(null)} />
+        ) : (
+          <>
+            <div className="setting-section">
+              <h2>Passkeys</h2>
+              <div className="passkey-list">
+                {security?.passkeys.map((passkey) => (
+                  <div className="passkey-row" key={passkey.credentialId}>
+                    <div><strong>{passkey.name}</strong><span>{passkey.backedUp ? 'Synced passkey' : 'Device-bound passkey'} · Added {new Date(passkey.createdAt).toLocaleDateString()}{passkey.lastUsedAt ? ` · Last used ${new Date(passkey.lastUsedAt).toLocaleDateString()}` : ''}</span></div>
+                    <button className="danger-action" type="button" disabled={working !== null || (security?.passkeys.length ?? 0) <= 1} onClick={() => void deletePasskey(passkey.credentialId, passkey.name)}>{working === passkey.credentialId ? 'Removing…' : 'Remove'}</button>
+                  </div>
+                ))}
+              </div>
+              <div className="add-passkey-form">
+                <label>New passkey name<input value={passkeyName} onChange={(event) => setPasskeyName(event.target.value)} placeholder="Android phone or password manager" maxLength={80} /></label>
+                <button className="primary-action" type="button" disabled={working !== null || !passkeyName.trim()} onClick={() => void addPasskey()}>{working === 'add' ? 'Waiting for your device…' : 'Add passkey'}</button>
+              </div>
+            </div>
+            <div className="setting-section">
+              <h2>Recovery codes</h2>
+              <div className="setting-line"><div><strong>{security?.recoveryCodesRemaining ?? 0} unused codes</strong><span>Each recovery code works once. Generating a new set invalidates every older code.</span></div><button type="button" disabled={working !== null} onClick={() => void createNewRecoveryCodes()}>{working === 'recovery' ? 'Generating…' : 'Generate new codes'}</button></div>
+            </div>
+          </>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function SettingsPanel({ session, onClose, onConnected, onRssDisconnected, onLogout }: {
   session: SessionState;
   onClose: () => void;
   onConnected: () => Promise<void>;
   onRssDisconnected: () => Promise<void> | void;
+  onLogout: () => Promise<void>;
 }) {
   const [status, setStatus] = useState<IntegrationStatus | null>(null);
   const [serverUrl, setServerUrl] = useState('https://birchfeed.app/api/greader.php');
@@ -730,6 +868,7 @@ function SettingsPanel({ session, onClose, onConnected, onRssDisconnected }: {
   const [disconnecting, setDisconnecting] = useState<'rss' | 'readwise' | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [logsOpen, setLogsOpen] = useState(false);
+  const [securityOpen, setSecurityOpen] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -807,6 +946,7 @@ function SettingsPanel({ session, onClose, onConnected, onRssDisconnected }: {
   }
 
   if (logsOpen) return <LogsPanel onClose={() => setLogsOpen(false)} />;
+  if (securityOpen) return <AccountSecurityPanel onClose={() => setSecurityOpen(false)} />;
 
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
@@ -844,18 +984,22 @@ function SettingsPanel({ session, onClose, onConnected, onRssDisconnected }: {
         </div>
         <div className="setting-section">
           <h2>Access</h2>
-          <div className="setting-line"><div><strong>{session.mode === 'development' ? 'Local development identity' : 'Passkey'}</strong><span>{session.mode === 'development' ? 'Available only from loopback in development.' : 'Passkeys protect this deployment.'}</span></div><span className="setting-state">{session.user?.displayName}</span></div>
+          <div className="setting-line"><div><strong>{session.mode === 'development' ? 'Local development identity' : 'Passkeys and recovery'}</strong><span>{session.mode === 'development' ? 'Available only from loopback in development.' : 'Manage sign-in devices and one-time recovery codes.'}</span></div>{session.mode === 'passkey' ? <button type="button" onClick={() => setSecurityOpen(true)}>Manage</button> : <span className="setting-state">{session.user?.displayName}</span>}</div>
+          {session.mode === 'passkey' && <div className="connection-actions"><button type="button" disabled={connecting || disconnecting !== null} onClick={() => void onLogout()}>Log out</button></div>}
         </div>
       </section>
     </div>
   );
 }
 
-function AuthenticationScreen({ session, onAuthenticated }: { session: SessionState; onAuthenticated: () => Promise<void> }) {
+export function AuthenticationScreen({ session, onAuthenticated }: { session: SessionState; onAuthenticated: () => Promise<void> }) {
   const [displayName, setDisplayName] = useState('Paul');
   const [bootstrapToken, setBootstrapToken] = useState('');
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [recoveryMode, setRecoveryMode] = useState(false);
+  const [recoveryCode, setRecoveryCode] = useState('');
+  const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
 
   async function authenticate() {
     setWorking(true);
@@ -864,7 +1008,9 @@ function AuthenticationScreen({ session, onAuthenticated }: { session: SessionSt
       if (session.setupRequired) {
         const pending = await getBootstrapOptions(displayName, bootstrapToken);
         const credential = await startRegistration({ optionsJSON: pending.options });
-        await verifyBootstrap(pending.setupId, bootstrapToken, credential);
+        const result = await verifyBootstrap(pending.setupId, bootstrapToken, credential);
+        setRecoveryCodes(result.recoveryCodes);
+        return;
       } else {
         const pending = await getLoginOptions();
         const credential = await startAuthentication({ optionsJSON: pending.options });
@@ -878,21 +1024,53 @@ function AuthenticationScreen({ session, onAuthenticated }: { session: SessionSt
     }
   }
 
+  async function recover() {
+    setWorking(true);
+    setError(null);
+    try {
+      await recoverAccount(recoveryCode);
+      await onAuthenticated();
+    } catch (recoveryError) {
+      setError(recoveryError instanceof Error ? recoveryError.message : 'Recovery code sign-in failed');
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  if (recoveryCodes) {
+    return (
+      <main className="auth-screen">
+        <section className="auth-card auth-card-wide">
+          <div><div className="eyebrow">Account created</div><h1>Keep a way back in</h1></div>
+          <RecoveryCodesView codes={recoveryCodes} onDone={() => void onAuthenticated()} />
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="auth-screen">
       <section className="auth-card">
         <span className="app-mark">ח</span>
-        <div><div className="eyebrow">Chadashot</div><h1>{session.setupRequired ? 'Create your private reader' : 'Welcome back'}</h1></div>
-        <p>{session.setupRequired ? 'Use the one-time setup token from Railway, then register a passkey on this device.' : 'Use a registered passkey to open your reader.'}</p>
+        <div><div className="eyebrow">Chadashot</div><h1>{session.setupRequired ? 'Create your private reader' : 'Your private reading space'}</h1></div>
+        <p>{session.setupRequired ? 'Use the one-time setup token from Railway, then register a passkey on this device.' : 'Sign in to read and synchronize your feeds.'}</p>
         {session.setupRequired && (
           <div className="auth-fields">
             <label>Display name<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} autoComplete="name" /></label>
             <label>One-time setup token<input type="password" value={bootstrapToken} onChange={(event) => setBootstrapToken(event.target.value)} autoComplete="one-time-code" /></label>
           </div>
         )}
-        <button className="primary-action" disabled={working || (session.setupRequired && (!displayName.trim() || !bootstrapToken))} onClick={() => void authenticate()}>
-          {working ? 'Waiting for your device…' : session.setupRequired ? 'Create account and passkey' : 'Sign in with a passkey'}
-        </button>
+        {!recoveryMode ? (
+          <button className="primary-action" disabled={working || (session.setupRequired && (!displayName.trim() || !bootstrapToken))} onClick={() => void authenticate()}>
+            {working ? 'Waiting for your device…' : session.setupRequired ? 'Create account and passkey' : 'Sign in with a passkey'}
+          </button>
+        ) : (
+          <div className="recovery-login">
+            <label>Recovery code<input value={recoveryCode} onChange={(event) => setRecoveryCode(event.target.value)} autoCapitalize="characters" autoComplete="one-time-code" placeholder="XXXX-XXXX-XXXX-XXXX" /></label>
+            <button className="primary-action" disabled={working || !recoveryCode.trim()} onClick={() => void recover()}>{working ? 'Checking…' : 'Use recovery code'}</button>
+          </div>
+        )}
+        {!session.setupRequired && <button className="auth-secondary-action" type="button" onClick={() => { setRecoveryMode((current) => !current); setError(null); }}>{recoveryMode ? 'Use a passkey instead' : 'Use a recovery code'}</button>}
         {error && <div className="auth-error" role="alert">{error}</div>}
         <small>{session.setupRequired ? 'Setup closes permanently after the first account is created.' : 'Your passkey never leaves your device.'}</small>
       </section>
@@ -1151,6 +1329,12 @@ export function App() {
         onRssDisconnected={async () => {
           reader.clear();
           if (session.mode === 'development') await reader.synchronize();
+        }}
+        onLogout={async () => {
+          await logout();
+          reader.clear();
+          setSettingsOpen(false);
+          await refreshSession();
         }}
       />}
     </div>

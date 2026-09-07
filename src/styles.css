@@ -129,6 +129,7 @@ a { color: inherit; }
   background: var(--surface);
   box-shadow: 0 24px 70px var(--shadow);
 }
+.auth-card-wide { width: min(100%, 620px); }
 
 .auth-card .app-mark { width: 48px; height: 48px; font-size: 28px; }
 .auth-card h1 { margin: 4px 0 0; font-family: Georgia, Cambria, "Times New Roman", serif; font-size: 2rem; }
@@ -144,6 +145,10 @@ a { color: inherit; }
   color: var(--text);
 }
 .auth-error { color: var(--danger); font-size: .88rem; }
+.auth-secondary-action { min-height: 40px; border: 0; background: transparent; color: var(--accent); cursor: pointer; }
+.recovery-login { display: grid; gap: 10px; }
+.recovery-login label, .add-passkey-form label { display: grid; gap: 6px; color: var(--muted); font-size: .8rem; font-weight: 650; }
+.recovery-login input, .add-passkey-form input { min-height: 42px; padding: 0 11px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--background); color: var(--text); }
 .connection-form { display: grid; gap: 10px; margin-top: 12px; }
 .connection-form label { display: grid; gap: 5px; color: var(--muted); font-size: .8rem; font-weight: 650; }
 .connection-form input {
@@ -726,7 +731,8 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 }
 .settings-panel,
 .preferences-panel,
-.logs-panel {
+.logs-panel,
+.security-panel {
   width: min(620px, 100%);
   max-height: min(780px, calc(100vh - 40px));
   overflow: auto;
@@ -777,13 +783,16 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 .dialog-actions .primary-action { background: var(--accent); }
 .settings-panel > header,
 .preferences-panel > header,
-.logs-panel > header { display: flex; align-items: center; padding: 24px; border-bottom: 1px solid var(--border); }
+.logs-panel > header,
+.security-panel > header { display: flex; align-items: center; padding: 24px; border-bottom: 1px solid var(--border); }
 .settings-panel h1,
 .preferences-panel h1,
-.logs-panel h1 { margin: 3px 0 0; font-size: 25px; }
+.logs-panel h1,
+.security-panel h1 { margin: 3px 0 0; font-size: 25px; }
 .settings-panel > header > button,
 .preferences-panel > header > button,
-.logs-panel > header > button { margin-left: auto; width: 42px; height: 42px; border: 0; border-radius: 50%; background: transparent; font-size: 24px; cursor: pointer; }
+.logs-panel > header > button,
+.security-panel > header > button { margin-left: auto; width: 42px; height: 42px; border: 0; border-radius: 50%; background: transparent; font-size: 24px; cursor: pointer; }
 .settings-error-banner {
   display: grid;
   gap: 3px;
@@ -860,6 +869,25 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 }
 
 .preferences-note { margin: 0; padding: 15px 24px 18px; color: var(--faint); font-size: 11px; }
+
+.security-panel { width: min(680px, 100%); max-height: min(780px, calc(100vh - 40px)); overflow: auto; }
+.passkey-list { display: grid; gap: 8px; }
+.passkey-row { display: flex; align-items: center; gap: 12px; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-muted); }
+.passkey-row > div { min-width: 0; flex: 1; }
+.passkey-row strong, .passkey-row span { display: block; }
+.passkey-row strong { font-size: 13px; }
+.passkey-row span { margin-top: 4px; color: var(--muted); font-size: 11px; line-height: 1.45; }
+.add-passkey-form { display: grid; grid-template-columns: 1fr auto; align-items: end; gap: 8px; margin-top: 13px; }
+.recovery-codes-view { display: grid; gap: 16px; padding: 22px 24px 24px; }
+.recovery-warning { display: grid; gap: 4px; padding: 13px; border: 1px solid color-mix(in srgb, #c58524 60%, var(--border)); border-radius: 9px; background: color-mix(in srgb, #c58524 12%, var(--surface)); }
+.recovery-warning strong { font-size: 14px; }
+.recovery-warning span { color: var(--muted); font-size: 12px; line-height: 1.5; }
+.recovery-codes-view ol { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 26px; margin: 0; padding: 0 0 0 30px; }
+.recovery-codes-view li { padding-left: 5px; color: var(--muted); font-size: 12px; }
+.recovery-codes-view code { color: var(--text); font-size: 13px; letter-spacing: .04em; user-select: all; }
+.recovery-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+.recovery-actions button { min-height: 40px; padding: 0 13px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); cursor: pointer; }
+.recovery-actions .primary-action { background: var(--accent); }
 
 .logs-panel { width: min(900px, 100%); height: min(780px, calc(100vh - 40px)); display: flex; flex-direction: column; overflow: hidden; }
 .logs-panel > header { flex: 0 0 auto; }
@@ -1002,7 +1030,9 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   .mobile-navigation button span { font-size: 17px; }
   .mobile-navigation button.active { color: var(--accent); font-weight: 600; }
   .dialog-backdrop { padding: 0; place-items: end stretch; }
-  .settings-panel, .preferences-panel, .subscribe-panel, .mobile-feeds-panel, .logs-panel { width: 100%; max-height: calc(100dvh - 28px); border-radius: 18px 18px 0 0; }
+  .settings-panel, .preferences-panel, .subscribe-panel, .mobile-feeds-panel, .logs-panel, .security-panel { width: 100%; max-height: calc(100dvh - 28px); border-radius: 18px 18px 0 0; }
+  .add-passkey-form { grid-template-columns: 1fr; }
+  .recovery-codes-view ol { grid-template-columns: 1fr; }
   .logs-panel { height: calc(100dvh - 28px); }
   .log-summary { grid-template-columns: repeat(5, minmax(58px, 1fr)); padding: 12px 14px 0; overflow-x: auto; }
   .log-controls { grid-template-columns: 120px 1fr; padding: 12px 14px 8px; }

@@ -84,6 +84,7 @@ export function createApp(config: AppConfig, dependencies: {
   const fetchImplementation = dependencies.fetchImplementation ?? fetch;
   const logger = dependencies.logger ?? new AppLogger(config);
   app.disable('x-powered-by');
+  if (config.nodeEnv === 'production') app.set('trust proxy', 1);
   app.use(requestLogger(logger));
   app.use(helmet({
     contentSecurityPolicy: config.nodeEnv === 'production' ? {
@@ -98,7 +99,7 @@ export function createApp(config: AppConfig, dependencies: {
     res.status(200).json({ status: 'ok' });
   });
 
-  const passkeys = config.authMode === 'passkey' ? createPasskeyAuthentication(config, database) : null;
+  const passkeys = config.authMode === 'passkey' ? createPasskeyAuthentication(config, database, logger) : null;
   if (passkeys) app.use('/api/auth', passkeys.router);
   app.get('/api/session', (req, res) => {
     res.json(passkeys ? passkeys.sessionState(req) : developmentSession(req, config));
