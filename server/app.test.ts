@@ -34,4 +34,22 @@ describe('application API', () => {
     expect(valid.status).toBe(200);
     expect(valid.body.synchronized).toBe(true);
   });
+
+  it('validates and encrypts a Birchfeed connection', async () => {
+    const database = openMemoryDatabase();
+    const encryptedConfig = loadConfig({
+      NODE_ENV: 'test',
+      AUTH_MODE: 'development',
+      ENCRYPTION_KEY: Buffer.alloc(32, 2).toString('base64'),
+    });
+    const fetchImplementation = async () => new Response('Auth=reader-key\n');
+    const connectionApp = createApp(encryptedConfig, { database, fetchImplementation });
+    const response = await request(connectionApp).put('/api/settings/rss').send({
+      email: 'reader@example.test',
+      apiKey: 'birchfeed-secret',
+    });
+    expect(response.status).toBe(200);
+    const stored = database.prepare('SELECT encrypted_config FROM integrations WHERE kind = ?').get('birchfeed') as { encrypted_config: string };
+    expect(stored.encrypted_config).not.toContain('birchfeed-secret');
+  });
 });

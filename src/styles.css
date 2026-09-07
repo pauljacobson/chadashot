@@ -86,6 +86,16 @@ a { color: inherit; }
   color: var(--text);
 }
 .auth-error { color: var(--danger); font-size: .88rem; }
+.connection-form { display: grid; gap: 10px; margin-top: 12px; }
+.connection-form label { display: grid; gap: 5px; color: var(--muted); font-size: .8rem; font-weight: 650; }
+.connection-form input {
+  min-height: 40px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: var(--background);
+  color: var(--text);
+}
 
 button:focus-visible,
 a:focus-visible,

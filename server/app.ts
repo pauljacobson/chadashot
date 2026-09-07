@@ -9,6 +9,8 @@ import { developmentSession, requireDevelopmentUser } from './auth/development.j
 import { createPasskeyAuthentication } from './auth/passkeys.js';
 import { openDatabase, type AppDatabase } from './database.js';
 import { fixtureSnapshot } from './fixtures.js';
+import { GoogleReaderClient } from './integrations/google-reader.js';
+import { hasIntegration, loadBirchfeed, saveIntegration } from './integrations/settings.js';
 
 const mutationSchema = z.object({
   articleId: z.string().min(1),
@@ -16,9 +18,15 @@ const mutationSchema = z.object({
   value: z.boolean(),
 });
 
-export function createApp(config: AppConfig, dependencies: { database?: AppDatabase } = {}) {
+const birchfeedConnectionSchema = z.object({
+  email: z.email(),
+  apiKey: z.string().min(1).max(512),
+});
+
+export function createApp(config: AppConfig, dependencies: { database?: AppDatabase; fetchImplementation?: typeof fetch } = {}) {
   const app = express();
   const database = dependencies.database ?? openDatabase(config.dataDir);
+  const fetchImplementation = dependencies.fetchImplementation ?? fetch;
   app.disable('x-powered-by');
   app.use(helmet({
     contentSecurityPolicy: config.nodeEnv === 'production' ? undefined : false,
@@ -37,12 +45,39 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
 
   const requireUser = passkeys?.requireUser ?? requireDevelopmentUser(config);
 
-  app.get('/api/reader/snapshot', requireUser, (_req, res) => {
-    res.json({ ...fixtureSnapshot, generatedAt: new Date().toISOString() });
+  app.get('/api/settings/status', requireUser, (_req, res) => {
+    res.json({
+      rss: { provider: 'birchfeed', configured: hasIntegration(database, 'birchfeed') },
+      readwise: { configured: hasIntegration(database, 'readwise') },
+    });
   });
 
-  app.post('/api/reader/mutations', requireUser, (req, res) => {
+  app.put('/api/settings/rss', requireUser, async (req, res) => {
+    if (!config.encryptionKey) {
+      return res.status(503).json({ error: 'Set ENCRYPTION_KEY before connecting Birchfeed' });
+    }
+    const credentials = birchfeedConnectionSchema.parse(req.body);
+    const client = new GoogleReaderClient(credentials, fetchImplementation);
+    await client.validateCredentials();
+    saveIntegration(database, config, 'birchfeed', credentials);
+    return res.json({ provider: 'birchfeed', configured: true });
+  });
+
+  app.get('/api/reader/snapshot', requireUser, async (_req, res) => {
+    const credentials = loadBirchfeed(database, config);
+    if (credentials) {
+      return res.json(await new GoogleReaderClient(credentials, fetchImplementation).snapshot());
+    }
+    if (config.nodeEnv === 'production') {
+      return res.status(409).json({ error: 'Connect Birchfeed in Settings before synchronizing' });
+    }
+    return res.json({ ...fixtureSnapshot, generatedAt: new Date().toISOString() });
+  });
+
+  app.post('/api/reader/mutations', requireUser, async (req, res) => {
     const mutation = mutationSchema.parse(req.body) satisfies ArticleMutation;
+    const credentials = loadBirchfeed(database, config);
+    if (credentials) await new GoogleReaderClient(credentials, fetchImplementation).mutate(mutation);
     res.status(200).json({ mutation, synchronized: true });
   });
 

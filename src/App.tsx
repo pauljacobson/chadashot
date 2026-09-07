@@ -1,8 +1,8 @@
 import DOMPurify from 'dompurify';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Article, SessionState } from '../shared/reader';
-import { getBootstrapOptions, getLoginOptions, getSession, verifyBootstrap, verifyLogin } from './api';
+import type { Article, IntegrationStatus, SessionState } from '../shared/reader';
+import { connectBirchfeed, getBootstrapOptions, getIntegrationStatus, getLoginOptions, getSession, verifyBootstrap, verifyLogin } from './api';
 import { type ReaderFilter, type SyncStatus, useReader } from './useReader';
 
 type MobileScreen = 'list' | 'reader';
@@ -203,14 +203,50 @@ function ReaderPane({
   );
 }
 
-function SettingsPanel({ session, onClose }: { session: SessionState; onClose: () => void }) {
+function SettingsPanel({ session, onClose, onConnected }: { session: SessionState; onClose: () => void; onConnected: () => Promise<void> }) {
+  const [status, setStatus] = useState<IntegrationStatus | null>(null);
+  const [email, setEmail] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [connecting, setConnecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getIntegrationStatus(controller.signal).then(setStatus).catch((statusError: unknown) => {
+      if (!controller.signal.aborted) setError(statusError instanceof Error ? statusError.message : 'Could not load connection status');
+    });
+    return () => controller.abort();
+  }, []);
+
+  async function saveBirchfeed() {
+    setConnecting(true);
+    setError(null);
+    try {
+      await connectBirchfeed(email, apiKey);
+      setStatus((current) => current ? { ...current, rss: { provider: 'birchfeed', configured: true } } : current);
+      setApiKey('');
+      await onConnected();
+    } catch (connectionError) {
+      setError(connectionError instanceof Error ? connectionError.message : 'Could not connect Birchfeed');
+    } finally {
+      setConnecting(false);
+    }
+  }
+
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <section className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <header><div><div className="eyebrow">Chadashot</div><h1 id="settings-title">Settings</h1></div><button aria-label="Close settings" onClick={onClose}>×</button></header>
         <div className="setting-section">
           <h2>RSS service</h2>
-          <div className="setting-line"><div><strong>Development fixtures</strong><span>Birchfeed connection is the next implementation slice.</span></div><span className="setting-state">Connected</span></div>
+          <div className="setting-line"><div><strong>Birchfeed</strong><span>Google Reader compatible synchronization.</span></div><span className="setting-state">{status?.rss.configured ? 'Connected' : 'Not connected'}</span></div>
+          {!status?.rss.configured && (
+            <div className="connection-form">
+              <label>Account email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" /></label>
+              <label>Birchfeed API key<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="off" /></label>
+              <button className="primary-action" disabled={connecting || !email || !apiKey} onClick={() => void saveBirchfeed()}>{connecting ? 'Checking…' : 'Connect Birchfeed'}</button>
+            </div>
+          )}
         </div>
         <div className="setting-section">
           <h2>Readwise</h2>
@@ -224,6 +260,7 @@ function SettingsPanel({ session, onClose }: { session: SessionState; onClose: (
           <h2>Appearance</h2>
           <div className="setting-line"><div><strong>Follow system</strong><span>The interface changes with the device light or dark theme.</span></div><span className="setting-state">Automatic</span></div>
         </div>
+        {error && <div className="auth-error" role="alert">{error}</div>}
       </section>
     </div>
   );
@@ -371,7 +408,7 @@ export function App() {
       </nav>
       {notice && <div className="toast" role="status" aria-live="polite">{notice}</div>}
       {reader.error && <div className="error-banner" role="alert">{reader.error}</div>}
-      {settingsOpen && <SettingsPanel session={session} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsPanel session={session} onClose={() => setSettingsOpen(false)} onConnected={reader.synchronize} />}
     </div>
   );
 }

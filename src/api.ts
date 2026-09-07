@@ -1,4 +1,4 @@
-import type { ArticleMutation, ReaderSnapshot, SessionState } from '../shared/reader';
+import type { ArticleMutation, IntegrationStatus, ReaderSnapshot, SessionState } from '../shared/reader';
 import type {
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
@@ -64,5 +64,16 @@ export function verifyLogin(challengeId: string, credential: AuthenticationRespo
   return request<{ authenticated: true }>('/api/auth/login/verify', {
     method: 'POST',
     body: JSON.stringify({ challengeId, credential }),
+  });
+}
+
+export function getIntegrationStatus(signal?: AbortSignal) {
+  return request<IntegrationStatus>('/api/settings/status', { signal });
+}
+
+export function connectBirchfeed(email: string, apiKey: string) {
+  return request<{ provider: 'birchfeed'; configured: true }>('/api/settings/rss', {
+    method: 'PUT',
+    body: JSON.stringify({ email, apiKey }),
   });
 }

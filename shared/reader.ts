@@ -53,6 +53,11 @@ export type SessionState = {
   user: { id: string; displayName: string } | null;
 };
 
+export type IntegrationStatus = {
+  rss: { provider: 'birchfeed'; configured: boolean };
+  readwise: { configured: boolean };
+};
+
 export type ApiErrorBody = {
   error: string;
 };
