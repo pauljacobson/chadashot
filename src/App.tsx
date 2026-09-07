@@ -1,6 +1,6 @@
 import DOMPurify from 'dompurify';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
 import type { Article, IntegrationStatus, SessionState, Subscription } from '../shared/reader';
 import {
   connectBirchfeed,
@@ -22,6 +22,115 @@ import { buildFeedGroups, type FeedSortOrder, feedFaviconUrl } from './feedTree'
 
 type MobileScreen = 'list' | 'reader';
 const FEED_SORT_ORDER_KEY = 'chadashot.feedSortOrder';
+const PANEL_WIDTHS_KEY = 'chadashot.panelWidths';
+const DEFAULT_PANEL_WIDTHS = { sidebar: 220, articleList: 350 };
+const MIN_SIDEBAR_WIDTH = 160;
+const MAX_SIDEBAR_WIDTH = 420;
+const MIN_ARTICLE_LIST_WIDTH = 240;
+const MAX_ARTICLE_LIST_WIDTH = 640;
+const MIN_READER_WIDTH = 300;
+const PANEL_RESIZER_WIDTH = 10;
+
+type PanelWidths = typeof DEFAULT_PANEL_WIDTHS;
+
+function clamp(value: number, minimum: number, maximum: number) {
+  return Math.min(Math.max(value, minimum), maximum);
+}
+
+function savedPanelWidths(): PanelWidths {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PANEL_WIDTHS_KEY) ?? '') as Partial<PanelWidths>;
+    return {
+      sidebar: clamp(Number(saved.sidebar) || DEFAULT_PANEL_WIDTHS.sidebar, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
+      articleList: clamp(Number(saved.articleList) || DEFAULT_PANEL_WIDTHS.articleList, MIN_ARTICLE_LIST_WIDTH, MAX_ARTICLE_LIST_WIDTH),
+    };
+  } catch {
+    return DEFAULT_PANEL_WIDTHS;
+  }
+}
+
+function fitPanelWidths(widths: PanelWidths, availableWidth: number, sidebarOpen: boolean): PanelWidths {
+  if (availableWidth <= 0) return widths;
+
+  let sidebar = clamp(widths.sidebar, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+  let articleList = clamp(widths.articleList, MIN_ARTICLE_LIST_WIDTH, MAX_ARTICLE_LIST_WIDTH);
+  if (!sidebarOpen) {
+    articleList = Math.min(articleList, Math.max(MIN_ARTICLE_LIST_WIDTH, availableWidth - MIN_READER_WIDTH - PANEL_RESIZER_WIDTH));
+    return { sidebar, articleList };
+  }
+
+  const availableForAdjustablePanels = availableWidth - MIN_READER_WIDTH - (PANEL_RESIZER_WIDTH * 2);
+  let excess = Math.max(0, sidebar + articleList - availableForAdjustablePanels);
+  const articleReduction = Math.min(excess, articleList - MIN_ARTICLE_LIST_WIDTH);
+  articleList -= articleReduction;
+  excess -= articleReduction;
+  sidebar -= Math.min(excess, sidebar - MIN_SIDEBAR_WIDTH);
+  return { sidebar, articleList };
+}
+
+function PanelResizer({ className, label, controls, value, minimum, maximum, defaultValue, onResize }: {
+  className: string;
+  label: string;
+  controls: string;
+  value: number;
+  minimum: number;
+  maximum: number;
+  defaultValue: number;
+  onResize: (width: number) => void;
+}) {
+  const drag = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
+
+  useEffect(() => () => document.body.classList.remove('panel-resizing'), []);
+
+  function finishResize(element: HTMLDivElement, pointerId: number) {
+    if (drag.current?.pointerId !== pointerId) return;
+    if (element.hasPointerCapture(pointerId)) element.releasePointerCapture(pointerId);
+    drag.current = null;
+    document.body.classList.remove('panel-resizing');
+  }
+
+  return (
+    <div
+      className={`panel-resizer ${className}`}
+      role="separator"
+      tabIndex={0}
+      aria-label={label}
+      aria-controls={controls}
+      aria-orientation="vertical"
+      aria-valuemin={minimum}
+      aria-valuemax={maximum}
+      aria-valuenow={Math.round(value)}
+      aria-valuetext={`${Math.round(value)} pixels`}
+      title="Drag to resize. Double-click to reset."
+      onDoubleClick={() => onResize(defaultValue)}
+      onKeyDown={(event) => {
+        const step = event.shiftKey ? 40 : 10;
+        if (event.key === 'ArrowLeft') onResize(clamp(value - step, minimum, maximum));
+        else if (event.key === 'ArrowRight') onResize(clamp(value + step, minimum, maximum));
+        else if (event.key === 'Home') onResize(minimum);
+        else if (event.key === 'End') onResize(maximum);
+        else if (event.key === 'Enter') onResize(defaultValue);
+        else return;
+        event.preventDefault();
+      }}
+      onPointerDown={(event) => {
+        if (event.button !== 0) return;
+        drag.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: value };
+        event.currentTarget.setPointerCapture(event.pointerId);
+        document.body.classList.add('panel-resizing');
+        event.preventDefault();
+      }}
+      onPointerMove={(event) => {
+        if (drag.current?.pointerId !== event.pointerId) return;
+        onResize(clamp(drag.current.startWidth + event.clientX - drag.current.startX, minimum, maximum));
+      }}
+      onPointerUp={(event) => finishResize(event.currentTarget, event.pointerId)}
+      onPointerCancel={(event) => finishResize(event.currentTarget, event.pointerId)}
+    >
+      <span aria-hidden="true" />
+    </div>
+  );
+}
 
 function savedFeedSortOrder(): FeedSortOrder {
   try {
@@ -253,7 +362,7 @@ function ArticleList({
   onToggleStar: (article: Article) => void;
 }) {
   return (
-    <section className="article-list" aria-label={`${title} articles`}>
+    <section className="article-list" id="article-list" aria-label={`${title} articles`}>
       <header className="list-header">
         <h1>{title}</h1>
         <span>{articles.length}</span>
@@ -339,11 +448,11 @@ function ReaderPane({
   }
 
   if (!article) {
-    return <main className="reader-pane empty-reader"><div><strong>Select an article</strong><span>Choose something from the list to begin reading.</span></div></main>;
+    return <main className="reader-pane empty-reader" id="reader-pane"><div><strong>Select an article</strong><span>Choose something from the list to begin reading.</span></div></main>;
   }
 
   return (
-    <main className="reader-pane">
+    <main className="reader-pane" id="reader-pane">
       <header className="reader-toolbar">
         <button className="mobile-back" aria-label="Back to article list" onClick={onBack}>←</button>
         <button aria-label={article.read ? 'Mark unread' : 'Mark read'} onClick={() => onToggleRead(article)}>{article.read ? '○ Unread' : '● Read'}</button>
@@ -606,6 +715,9 @@ export function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileScreen, setMobileScreen] = useState<MobileScreen>('list');
   const [notice, setNotice] = useState('');
+  const [panelWidths, setPanelWidths] = useState<PanelWidths>(savedPanelWidths);
+  const [workspaceWidth, setWorkspaceWidth] = useState(0);
+  const workspaceRef = useRef<HTMLDivElement>(null);
   const reader = useReader(Boolean(session?.authenticated));
 
   async function refreshSession() {
@@ -633,6 +745,24 @@ export function App() {
       // The preference remains available for this session if storage is unavailable.
     }
   }, [feedSortOrder]);
+
+  useEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const updateWidth = () => setWorkspaceWidth(workspace.clientWidth);
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(workspace);
+    return () => observer.disconnect();
+  }, [session?.authenticated]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(PANEL_WIDTHS_KEY, JSON.stringify(panelWidths));
+    } catch {
+      // The panel sizes remain available for this session if storage is unavailable.
+    }
+  }, [panelWidths]);
 
   useEffect(() => {
     function handleKeydown(event: KeyboardEvent) {
@@ -675,6 +805,23 @@ export function App() {
     setMobileScreen('reader');
   }
 
+  const fittedPanelWidths = fitPanelWidths(panelWidths, workspaceWidth, sidebarOpen);
+  const sidebarMaximum = Math.max(
+    MIN_SIDEBAR_WIDTH,
+    Math.min(MAX_SIDEBAR_WIDTH, workspaceWidth - fittedPanelWidths.articleList - MIN_READER_WIDTH - (PANEL_RESIZER_WIDTH * 2)),
+  );
+  const articleListMaximum = Math.max(
+    MIN_ARTICLE_LIST_WIDTH,
+    Math.min(
+      MAX_ARTICLE_LIST_WIDTH,
+      workspaceWidth - (sidebarOpen ? fittedPanelWidths.sidebar + (PANEL_RESIZER_WIDTH * 2) : PANEL_RESIZER_WIDTH) - MIN_READER_WIDTH,
+    ),
+  );
+  const workspaceStyle = {
+    '--sidebar-width': `${fittedPanelWidths.sidebar}px`,
+    '--article-list-width': `${fittedPanelWidths.articleList}px`,
+  } as CSSProperties;
+
   return (
     <div className={`app-shell ${sidebarOpen ? '' : 'sidebar-collapsed'} mobile-${mobileScreen}`}>
       <header className="topbar">
@@ -696,9 +843,29 @@ export function App() {
           <button aria-label="Open settings" onClick={() => setSettingsOpen(true)}>⚙</button>
         </div>
       </header>
-      <div className="workspace">
+      <div className="workspace" ref={workspaceRef} style={workspaceStyle}>
         <Navigation snapshot={reader.snapshot} filter={reader.filter} unreadOnly={unreadFeedsOnly} sortOrder={feedSortOrder} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} onSubscribe={() => setSubscribeOpen(true)} onUnreadOnlyChange={setUnreadFeedsOnly} status={reader.status} />
+        <PanelResizer
+          className="sidebar-resizer"
+          label="Resize feed sidebar"
+          controls="reader-sidebar"
+          value={fittedPanelWidths.sidebar}
+          minimum={MIN_SIDEBAR_WIDTH}
+          maximum={sidebarMaximum}
+          defaultValue={DEFAULT_PANEL_WIDTHS.sidebar}
+          onResize={(sidebar) => setPanelWidths((current) => ({ ...current, sidebar }))}
+        />
         <ArticleList title={title} articles={reader.articles} selectedId={reader.selectedArticle?.id ?? null} onSelect={chooseArticle} onToggleStar={(article) => void reader.toggleStarred(article)} />
+        <PanelResizer
+          className="article-list-resizer"
+          label="Resize article list"
+          controls="article-list"
+          value={fittedPanelWidths.articleList}
+          minimum={MIN_ARTICLE_LIST_WIDTH}
+          maximum={articleListMaximum}
+          defaultValue={DEFAULT_PANEL_WIDTHS.articleList}
+          onResize={(articleList) => setPanelWidths((current) => ({ ...current, articleList }))}
+        />
         <ReaderPane
           key={reader.selectedArticle?.id ?? 'empty-reader'}
           article={reader.selectedArticle}
