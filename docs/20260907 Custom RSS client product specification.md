@@ -219,9 +219,10 @@ If Readwise publishes a supported Reader-highlight endpoint, the integration can
 
 #### Recovery
 
-- The user should register at least two passkeys during setup.
-- Emergency recovery is an operator action: a deployment command creates a short-lived one-use recovery link after filesystem/server access has already been established.
-- There is no password fallback, email reset, or security-question flow in the initial release.
+- The first setup ceremony creates one passkey and a set of one-time recovery codes. The codes are shown once and must be copied or downloaded before entering the reader.
+- Settings supports multiple named passkeys so an Android device, password manager, or hardware key can each provide access.
+- Each recovery code can create one authenticated session and is then invalidated. Regenerating the set invalidates all older unused codes.
+- There is no password fallback, email reset, public registration, or security-question flow in the initial release.
 
 ### PWA and offline behavior
 
@@ -229,9 +230,9 @@ If Readwise publishes a supported Reader-highlight endpoint, the integration can
 - Cache the versioned application shell and static assets through the service worker.
 - Prompt before activating a new application version when unsynchronized actions exist; otherwise update unobtrusively.
 - Do not blindly cache authenticated API responses in service-worker Cache Storage.
-- Store normalized subscriptions, the most recent article lists, selected article bodies, reading positions, local highlights, and the mutation outbox in IndexedDB.
+- Store normalized subscriptions, the most recent article lists and bodies, the last authenticated offline identity, and the read/star mutation outbox in IndexedDB.
 - Default offline budget: the latest 200 articles or 100 MB, whichever is reached first. Make this limit configurable later.
-- Queue read/star/highlight mutations while offline and replay them in chronological order when connectivity returns.
+- Queue read/star mutations while offline, coalesce repeated changes to the same article state, and replay them in chronological order when connectivity returns.
 - Display one quiet status label: Offline, Syncing, Up to date, or Action needed.
 - Provide an explicit “Clear offline data” control.
 

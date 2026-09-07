@@ -7,6 +7,29 @@ describe('loadConfig', () => {
     expect(config.authMode).toBe('development');
     expect(config.logOutput).toBe('both');
     expect(config.logFilePath).toBe(`${config.dataDir}/logs/app.ndjson`);
+    expect(config.s3Backup).toBeNull();
+  });
+
+  it('accepts complete S3-compatible backup settings and rejects partial settings', () => {
+    const config = loadConfig({
+      NODE_ENV: 'development',
+      BACKUP_S3_ENDPOINT: 'https://account.r2.cloudflarestorage.com',
+      BACKUP_S3_BUCKET: 'chadashot-backups',
+      BACKUP_S3_ACCESS_KEY_ID: 'access-key',
+      BACKUP_S3_SECRET_ACCESS_KEY: 'secret-key',
+      BACKUP_S3_PREFIX: '/private/chadashot/',
+    });
+    expect(config.s3Backup).toMatchObject({
+      endpoint: 'https://account.r2.cloudflarestorage.com',
+      region: 'auto',
+      bucket: 'chadashot-backups',
+      prefix: 'private/chadashot',
+      intervalHours: 24,
+    });
+    expect(() => loadConfig({
+      NODE_ENV: 'development',
+      BACKUP_S3_ENDPOINT: 'https://account.r2.cloudflarestorage.com',
+    })).toThrow('S3 backups require endpoint, bucket, access key ID, and secret access key');
   });
 
   it('uses passkeys in production', () => {
