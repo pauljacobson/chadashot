@@ -85,6 +85,18 @@ export function connectReadwise(token: string) {
   });
 }
 
+export function disconnectRssService() {
+  return request<{ provider: 'google-reader'; configured: false; removed: boolean }>('/api/settings/rss', {
+    method: 'DELETE',
+  });
+}
+
+export function disconnectReadwise() {
+  return request<{ configured: false; removed: boolean }>('/api/settings/readwise', {
+    method: 'DELETE',
+  });
+}
+
 export function createReadwiseHighlight(article: {
   articleId: string;
   text: string;

@@ -10,7 +10,7 @@ import { createPasskeyAuthentication } from './auth/passkeys.js';
 import { newId, nowIso, openDatabase, type AppDatabase } from './database.js';
 import { fixtureSnapshot } from './fixtures.js';
 import { BIRCHFEED_API_URL, GoogleReaderClient } from './integrations/google-reader.js';
-import { hasIntegration, loadBirchfeed, loadReadwise, saveIntegration } from './integrations/settings.js';
+import { deleteIntegration, hasIntegration, loadBirchfeed, loadReadwise, saveIntegration } from './integrations/settings.js';
 import { ReadwiseClient } from './integrations/readwise.js';
 
 const mutationSchema = z.object({
@@ -124,6 +124,11 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
     }
   });
 
+  app.delete('/api/settings/rss', requireUser, (_req, res) => {
+    const removed = deleteIntegration(database, 'birchfeed');
+    res.json({ provider: 'google-reader', configured: false, removed });
+  });
+
   app.put('/api/settings/readwise', requireUser, async (req, res) => {
     if (!config.encryptionKey) {
       return res.status(503).json({ error: 'Set ENCRYPTION_KEY before connecting Readwise' });
@@ -137,6 +142,11 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
     } catch (error) {
       return res.status(502).json({ error: error instanceof Error ? error.message : 'Could not connect Readwise' });
     }
+  });
+
+  app.delete('/api/settings/readwise', requireUser, (_req, res) => {
+    const removed = deleteIntegration(database, 'readwise');
+    res.json({ configured: false, removed });
   });
 
   app.post('/api/readwise/highlights', requireUser, async (req, res) => {

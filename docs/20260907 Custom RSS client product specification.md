@@ -58,7 +58,7 @@ The first release is intentionally single-user and single-provider. The design s
 - **Starred:** items starred in Birchfeed.
 - **Feeds:** an expandable tree of Birchfeed folders/labels with their feeds nested beneath them; feeds without a recognized folder appear under Uncategorized. A toggle above the tree limits it to feeds containing unread items and hides folders left empty by that filter.
 - **Preferences:** personal interface choices, including system appearance and alphabetical or most-recent folder/feed ordering.
-- **Settings:** service connections, passkeys, offline storage, and application information.
+- **Settings:** service connections, passkeys, offline storage, and application information. Each connected service has a confirmation-protected Disconnect action that removes only Chadashot's stored credential and does not alter the remote account or previously synchronized content.
 
 “Read later” should not be invented as a separate state in the first release. Starred remains the portable saved-item state supported by the RSS service. Saving to Reader is an explicit outbound action rather than another local queue.
 

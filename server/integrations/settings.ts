@@ -26,6 +26,10 @@ export function saveIntegration<T>(database: AppDatabase, config: AppConfig, kin
   `).run(kind, encryptSecret(value, config.encryptionKey), nowIso());
 }
 
+export function deleteIntegration(database: AppDatabase, kind: IntegrationKind) {
+  return database.prepare('DELETE FROM integrations WHERE kind = ?').run(kind).changes > 0;
+}
+
 export function loadBirchfeed(database: AppDatabase, config: AppConfig) {
   const credentials = loadIntegration<GoogleReaderCredentials | Omit<GoogleReaderCredentials, 'serverUrl'>>(database, config, 'birchfeed');
   return credentials ? { serverUrl: BIRCHFEED_API_URL, ...credentials } : null;

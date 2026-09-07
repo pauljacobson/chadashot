@@ -125,6 +125,15 @@ export function useReader(enabled = true) {
     }
   }, []);
 
+  const clear = useCallback(() => {
+    activeRequest.current?.abort();
+    setSnapshot(null);
+    setSelectedId(null);
+    setFilter({ kind: 'inbox' });
+    setError(null);
+    setStatus(navigator.onLine ? 'current' : 'offline');
+  }, []);
+
   return {
     snapshot,
     articles,
@@ -138,6 +147,7 @@ export function useReader(enabled = true) {
     setQuery,
     selectArticle: setSelectedId,
     synchronize,
+    clear,
     toggleRead: (article: Article) => mutate(article, 'read', !article.read),
     toggleStarred: (article: Article) => mutate(article, 'starred', !article.starred),
   };

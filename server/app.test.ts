@@ -55,6 +55,42 @@ describe('application API', () => {
     expect(stored.encrypted_config).not.toContain('birchfeed.app');
   });
 
+  it('disconnects RSS and Readwise without retaining their encrypted credentials', async () => {
+    const database = openMemoryDatabase();
+    const encryptedConfig = loadConfig({
+      NODE_ENV: 'test',
+      AUTH_MODE: 'development',
+      ENCRYPTION_KEY: Buffer.alloc(32, 5).toString('base64'),
+    });
+    const fetchImplementation = async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.endsWith('/api/v2/auth/')) return new Response(null, { status: 204 });
+      return new Response('', { status: 404 });
+    };
+    const connectionApp = createApp(encryptedConfig, { database, fetchImplementation });
+    await request(connectionApp).put('/api/settings/rss').send({
+      serverUrl: 'https://reader.example.test/api/greader.php',
+      email: 'reader@example.test',
+      apiKey: 'reader-secret',
+    });
+    await request(connectionApp).put('/api/settings/readwise').send({ token: 'readwise-secret' });
+
+    const rssResponse = await request(connectionApp).delete('/api/settings/rss');
+    const statusAfterRss = await request(connectionApp).get('/api/settings/status');
+    const readwiseResponse = await request(connectionApp).delete('/api/settings/readwise');
+    const status = await request(connectionApp).get('/api/settings/status');
+
+    expect(rssResponse.body).toEqual({ provider: 'google-reader', configured: false, removed: true });
+    expect(statusAfterRss.body.readwise.configured).toBe(true);
+    expect(readwiseResponse.body).toEqual({ configured: false, removed: true });
+    expect(status.body).toEqual({
+      rss: { provider: 'google-reader', configured: false, serverUrl: null },
+      readwise: { configured: false },
+    });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM integrations').get()).toEqual({ count: 0 });
+  });
+
   it('normalizes safe Reader API URLs and rejects insecure remote endpoints', () => {
     expect(normalizeReaderServerUrl('https://reader.example.test/api/greader.php/', config))
       .toBe('https://reader.example.test/api/greader.php');

@@ -98,6 +98,17 @@ a { color: inherit; }
   color: var(--text);
 }
 .connected-endpoint { margin-top: 8px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; overflow-wrap: anywhere; }
+.connection-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+.danger-action {
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+  border-radius: 8px;
+  background: transparent;
+  color: var(--danger);
+  cursor: pointer;
+}
+.danger-action:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
 
 .pwa-prompt {
   position: fixed;

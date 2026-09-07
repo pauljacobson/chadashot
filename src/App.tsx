@@ -6,6 +6,8 @@ import {
   connectBirchfeed,
   connectReadwise,
   createReadwiseHighlight,
+  disconnectReadwise,
+  disconnectRssService,
   getBootstrapOptions,
   getIntegrationStatus,
   getLoginOptions,
@@ -414,13 +416,19 @@ function PreferencesPanel({ sortOrder, onSortOrderChange, onClose }: {
   );
 }
 
-function SettingsPanel({ session, onClose, onConnected }: { session: SessionState; onClose: () => void; onConnected: () => Promise<void> }) {
+function SettingsPanel({ session, onClose, onConnected, onRssDisconnected }: {
+  session: SessionState;
+  onClose: () => void;
+  onConnected: () => Promise<void>;
+  onRssDisconnected: () => Promise<void> | void;
+}) {
   const [status, setStatus] = useState<IntegrationStatus | null>(null);
   const [serverUrl, setServerUrl] = useState('https://birchfeed.app/api/greader.php');
   const [email, setEmail] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [readwiseToken, setReadwiseToken] = useState('');
   const [connecting, setConnecting] = useState(false);
+  const [disconnecting, setDisconnecting] = useState<'rss' | 'readwise' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -463,15 +471,51 @@ function SettingsPanel({ session, onClose, onConnected }: { session: SessionStat
     }
   }
 
+  async function removeRssService() {
+    if (!window.confirm('Disconnect the RSS service? Chadashot will remove its stored credentials, but your subscriptions and account at the service will not be changed.')) return;
+    setDisconnecting('rss');
+    setError(null);
+    try {
+      await disconnectRssService();
+      setStatus((current) => current ? {
+        ...current,
+        rss: { provider: 'google-reader', configured: false, serverUrl: null },
+      } : current);
+      setEmail('');
+      setApiKey('');
+      await onRssDisconnected();
+    } catch (disconnectError) {
+      setError(disconnectError instanceof Error ? disconnectError.message : 'Could not disconnect RSS service');
+    } finally {
+      setDisconnecting(null);
+    }
+  }
+
+  async function removeReadwise() {
+    if (!window.confirm('Disconnect Readwise? Chadashot will remove its stored access token. Existing highlights and documents in Readwise will not be changed.')) return;
+    setDisconnecting('readwise');
+    setError(null);
+    try {
+      await disconnectReadwise();
+      setStatus((current) => current ? { ...current, readwise: { configured: false } } : current);
+      setReadwiseToken('');
+    } catch (disconnectError) {
+      setError(disconnectError instanceof Error ? disconnectError.message : 'Could not disconnect Readwise');
+    } finally {
+      setDisconnecting(null);
+    }
+  }
+
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <section className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <header><div><div className="eyebrow">Chadashot</div><h1 id="settings-title">Settings</h1></div><button aria-label="Close settings" onClick={onClose}>×</button></header>
-        {error && <div className="settings-error-banner" role="alert"><strong>Connection problem</strong><span>{error}</span></div>}
+        {error && <div className="settings-error-banner" role="alert"><strong>Integration problem</strong><span>{error}</span></div>}
         <div className="setting-section">
           <h2>RSS service</h2>
           <div className="setting-line"><div><strong>Birchfeed or compatible service</strong><span>Google Reader compatible synchronization.</span></div><span className="setting-state">{status?.rss.configured ? 'Connected' : 'Not connected'}</span></div>
           {status?.rss.configured && status.rss.serverUrl && <div className="connected-endpoint">{status.rss.serverUrl}</div>}
+          {status?.rss.configured && <div className="connection-actions"><button className="danger-action" type="button" disabled={disconnecting !== null} onClick={() => void removeRssService()}>{disconnecting === 'rss' ? 'Disconnecting…' : 'Disconnect RSS service'}</button></div>}
           {!status?.rss.configured && (
             <div className="connection-form">
               <label>Server or API URL<input type="url" value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} inputMode="url" autoCapitalize="none" spellCheck={false} /></label>
@@ -484,6 +528,7 @@ function SettingsPanel({ session, onClose, onConnected }: { session: SessionStat
         <div className="setting-section">
           <h2>Readwise</h2>
           <div className="setting-line"><div><strong>Readwise and Reader</strong><span>Highlights and saved documents remain separate actions.</span></div><span className="setting-state">{status?.readwise.configured ? 'Connected' : 'Not connected'}</span></div>
+          {status?.readwise.configured && <div className="connection-actions"><button className="danger-action" type="button" disabled={disconnecting !== null} onClick={() => void removeReadwise()}>{disconnecting === 'readwise' ? 'Disconnecting…' : 'Disconnect Readwise'}</button></div>}
           {!status?.readwise.configured && (
             <div className="connection-form">
               <label>Readwise access token<input type="password" value={readwiseToken} onChange={(event) => setReadwiseToken(event.target.value)} autoComplete="off" /></label>
@@ -703,7 +748,15 @@ export function App() {
           await reader.synchronize();
         }}
       />}
-      {settingsOpen && <SettingsPanel session={session} onClose={() => setSettingsOpen(false)} onConnected={reader.synchronize} />}
+      {settingsOpen && <SettingsPanel
+        session={session}
+        onClose={() => setSettingsOpen(false)}
+        onConnected={reader.synchronize}
+        onRssDisconnected={async () => {
+          reader.clear();
+          if (session.mode === 'development') await reader.synchronize();
+        }}
+      />}
     </div>
   );
 }
