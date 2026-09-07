@@ -241,6 +241,7 @@ function ReaderPane({
 
 function SettingsPanel({ session, onClose, onConnected }: { session: SessionState; onClose: () => void; onConnected: () => Promise<void> }) {
   const [status, setStatus] = useState<IntegrationStatus | null>(null);
+  const [serverUrl, setServerUrl] = useState('https://birchfeed.app/api/greader.php');
   const [email, setEmail] = useState('');
   const [apiKey, setApiKey] = useState('');
   const [readwiseToken, setReadwiseToken] = useState('');
@@ -259,12 +260,15 @@ function SettingsPanel({ session, onClose, onConnected }: { session: SessionStat
     setConnecting(true);
     setError(null);
     try {
-      await connectBirchfeed(email, apiKey);
-      setStatus((current) => current ? { ...current, rss: { provider: 'birchfeed', configured: true } } : current);
+      const connection = await connectBirchfeed(serverUrl, email, apiKey);
+      setStatus((current) => current ? {
+        ...current,
+        rss: { provider: 'google-reader', configured: true, serverUrl: connection.serverUrl },
+      } : current);
       setApiKey('');
       await onConnected();
     } catch (connectionError) {
-      setError(connectionError instanceof Error ? connectionError.message : 'Could not connect Birchfeed');
+      setError(connectionError instanceof Error ? connectionError.message : 'Could not connect RSS service');
     } finally {
       setConnecting(false);
     }
@@ -290,12 +294,14 @@ function SettingsPanel({ session, onClose, onConnected }: { session: SessionStat
         <header><div><div className="eyebrow">Chadashot</div><h1 id="settings-title">Settings</h1></div><button aria-label="Close settings" onClick={onClose}>×</button></header>
         <div className="setting-section">
           <h2>RSS service</h2>
-          <div className="setting-line"><div><strong>Birchfeed</strong><span>Google Reader compatible synchronization.</span></div><span className="setting-state">{status?.rss.configured ? 'Connected' : 'Not connected'}</span></div>
+          <div className="setting-line"><div><strong>Birchfeed or compatible service</strong><span>Google Reader compatible synchronization.</span></div><span className="setting-state">{status?.rss.configured ? 'Connected' : 'Not connected'}</span></div>
+          {status?.rss.configured && status.rss.serverUrl && <div className="connected-endpoint">{status.rss.serverUrl}</div>}
           {!status?.rss.configured && (
             <div className="connection-form">
+              <label>Server or API URL<input type="url" value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} inputMode="url" autoCapitalize="none" spellCheck={false} /></label>
               <label>Account email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="username" /></label>
-              <label>Birchfeed API key<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="off" /></label>
-              <button className="primary-action" disabled={connecting || !email || !apiKey} onClick={() => void saveBirchfeed()}>{connecting ? 'Checking…' : 'Connect Birchfeed'}</button>
+              <label>API key or password<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="off" /></label>
+              <button className="primary-action" disabled={connecting || !serverUrl || !email || !apiKey} onClick={() => void saveBirchfeed()}>{connecting ? 'Checking…' : 'Connect RSS service'}</button>
             </div>
           )}
         </div>

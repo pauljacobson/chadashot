@@ -9,7 +9,7 @@ import { developmentSession, requireDevelopmentUser } from './auth/development.j
 import { createPasskeyAuthentication } from './auth/passkeys.js';
 import { newId, nowIso, openDatabase, type AppDatabase } from './database.js';
 import { fixtureSnapshot } from './fixtures.js';
-import { GoogleReaderClient } from './integrations/google-reader.js';
+import { BIRCHFEED_API_URL, GoogleReaderClient } from './integrations/google-reader.js';
 import { hasIntegration, loadBirchfeed, loadReadwise, saveIntegration } from './integrations/settings.js';
 import { ReadwiseClient } from './integrations/readwise.js';
 
@@ -20,9 +20,23 @@ const mutationSchema = z.object({
 });
 
 const birchfeedConnectionSchema = z.object({
+  serverUrl: z.url(),
   email: z.email(),
   apiKey: z.string().min(1).max(512),
 });
+
+export function normalizeReaderServerUrl(value: string, config: AppConfig) {
+  const url = new URL(value);
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error('Server URL cannot contain credentials, query parameters, or a fragment');
+  }
+  const loopback = ['localhost', '127.0.0.1', '::1'].includes(url.hostname);
+  if (url.protocol !== 'https:' && !(config.nodeEnv !== 'production' && url.protocol === 'http:' && loopback)) {
+    throw new Error('Server URL must use HTTPS');
+  }
+  url.pathname = url.pathname.replace(/\/+$/, '');
+  return url.toString().replace(/\/$/, '');
+}
 
 const readwiseConnectionSchema = z.object({ token: z.string().min(1).max(512) });
 const highlightSchema = z.object({
@@ -63,8 +77,13 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
   const requireUser = passkeys?.requireUser ?? requireDevelopmentUser(config);
 
   app.get('/api/settings/status', requireUser, (_req, res) => {
+    const readerCredentials = loadBirchfeed(database, config);
     res.json({
-      rss: { provider: 'birchfeed', configured: hasIntegration(database, 'birchfeed') },
+      rss: {
+        provider: 'google-reader',
+        configured: hasIntegration(database, 'birchfeed'),
+        serverUrl: readerCredentials?.serverUrl ?? (readerCredentials ? BIRCHFEED_API_URL : null),
+      },
       readwise: { configured: hasIntegration(database, 'readwise') },
     });
   });
@@ -73,11 +92,18 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
     if (!config.encryptionKey) {
       return res.status(503).json({ error: 'Set ENCRYPTION_KEY before connecting Birchfeed' });
     }
-    const credentials = birchfeedConnectionSchema.parse(req.body);
+    const parsedCredentials = birchfeedConnectionSchema.parse(req.body);
+    let serverUrl: string;
+    try {
+      serverUrl = normalizeReaderServerUrl(parsedCredentials.serverUrl, config);
+    } catch (error) {
+      return res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid server URL' });
+    }
+    const credentials = { ...parsedCredentials, serverUrl };
     const client = new GoogleReaderClient(credentials, fetchImplementation);
     await client.validateCredentials();
     saveIntegration(database, config, 'birchfeed', credentials);
-    return res.json({ provider: 'birchfeed', configured: true });
+    return res.json({ provider: 'google-reader', configured: true, serverUrl: credentials.serverUrl });
   });
 
   app.put('/api/settings/readwise', requireUser, async (req, res) => {

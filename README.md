@@ -36,6 +36,7 @@ Railway builds the root [`Dockerfile`](Dockerfile), checks `/api/health`, and st
 
 - Birchfeed is the production RSS aggregation service.
 - The client uses Birchfeed's Google Reader-compatible API.
+- The connection endpoint is configurable for Birchfeed or another compatible service; Birchfeed's documented endpoint is prefilled.
 - Fever support is deferred.
 - The production app remains at `chadashot.app`.
 - Railway deploys the application from this GitHub repository.

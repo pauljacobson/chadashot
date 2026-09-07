@@ -34,7 +34,7 @@ export type Folder = {
 
 export type ReaderSnapshot = {
   generatedAt: string;
-  source: 'fixture' | 'birchfeed';
+  source: 'fixture' | 'google-reader';
   folders: Folder[];
   subscriptions: Subscription[];
   articles: Article[];
@@ -54,7 +54,7 @@ export type SessionState = {
 };
 
 export type IntegrationStatus = {
-  rss: { provider: 'birchfeed'; configured: boolean };
+  rss: { provider: 'google-reader'; configured: boolean; serverUrl: string | null };
   readwise: { configured: boolean };
 };
 

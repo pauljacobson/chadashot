@@ -4,6 +4,7 @@ import type { ArticleMutation, ReaderSnapshot } from '../../shared/reader.js';
 export const BIRCHFEED_API_URL = 'https://birchfeed.app/api/greader.php';
 
 export type GoogleReaderCredentials = {
+  serverUrl: string;
   email: string;
   apiKey: string;
 };
@@ -65,8 +66,11 @@ export class GoogleReaderClient {
   constructor(
     private readonly credentials: GoogleReaderCredentials,
     private readonly fetchImplementation: FetchImplementation = fetch,
-    private readonly baseUrl = BIRCHFEED_API_URL,
   ) {}
+
+  private get baseUrl() {
+    return this.credentials.serverUrl.replace(/\/+$/, '');
+  }
 
   private async authenticate() {
     const body = new URLSearchParams({
@@ -81,9 +85,9 @@ export class GoogleReaderClient {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
     });
-    if (!response.ok) throw new Error('Birchfeed rejected the email or API key');
+    if (!response.ok) throw new Error('The RSS service rejected the email or API key');
     const auth = (await response.text()).split('\n').find((line) => line.startsWith('Auth='))?.slice(5);
-    if (!auth) throw new Error('Birchfeed returned an invalid authentication response');
+    if (!auth) throw new Error('The RSS service returned an invalid authentication response');
     return auth;
   }
 
@@ -95,7 +99,7 @@ export class GoogleReaderClient {
         ...init?.headers,
       },
     });
-    if (!response.ok) throw new Error(`Birchfeed request failed (${response.status})`);
+    if (!response.ok) throw new Error(`RSS service request failed (${response.status})`);
     return response;
   }
 
@@ -159,7 +163,7 @@ export class GoogleReaderClient {
 
     return {
       generatedAt: new Date().toISOString(),
-      source: 'birchfeed',
+      source: 'google-reader',
       folders: [...folderMap.values()],
       subscriptions,
       articles,

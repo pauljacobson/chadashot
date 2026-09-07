@@ -1,6 +1,6 @@
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
-import { createApp } from './app.js';
+import { createApp, normalizeReaderServerUrl } from './app.js';
 import { loadConfig } from './config.js';
 import { openMemoryDatabase } from './database.js';
 
@@ -45,12 +45,23 @@ describe('application API', () => {
     const fetchImplementation = async () => new Response('Auth=reader-key\n');
     const connectionApp = createApp(encryptedConfig, { database, fetchImplementation });
     const response = await request(connectionApp).put('/api/settings/rss').send({
+      serverUrl: 'https://birchfeed.app/api/greader.php',
       email: 'reader@example.test',
       apiKey: 'birchfeed-secret',
     });
     expect(response.status).toBe(200);
     const stored = database.prepare('SELECT encrypted_config FROM integrations WHERE kind = ?').get('birchfeed') as { encrypted_config: string };
     expect(stored.encrypted_config).not.toContain('birchfeed-secret');
+    expect(stored.encrypted_config).not.toContain('birchfeed.app');
+  });
+
+  it('normalizes safe Reader API URLs and rejects insecure remote endpoints', () => {
+    expect(normalizeReaderServerUrl('https://reader.example.test/api/greader.php/', config))
+      .toBe('https://reader.example.test/api/greader.php');
+    expect(() => normalizeReaderServerUrl('http://reader.example.test/api/greader.php', config))
+      .toThrow('Server URL must use HTTPS');
+    expect(() => normalizeReaderServerUrl('https://user:password@reader.example.test/api/greader.php', config))
+      .toThrow('Server URL cannot contain credentials');
   });
 
   it('saves highlights and documents through separate Readwise actions', async () => {

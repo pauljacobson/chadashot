@@ -131,7 +131,7 @@ The user receives one of three outcomes: Saved, Already in Reader, or Retry need
 
 #### Protocol choice
 
-Use the Google Reader-compatible API as the first integration surface. FreshRSS recommends it over Fever and documents subscription, unread-count, tag, stream, write-token, and subscription-edit endpoints. Birchfeed exposes a compatible endpoint at `https://birchfeed.app/api/greader.php`.
+Use the Google Reader-compatible API as the first integration surface. FreshRSS recommends it over Fever and documents subscription, unread-count, tag, stream, write-token, and subscription-edit endpoints. The connection screen accepts an explicit server or API URL so the same adapter can work with Birchfeed or another compatible service; Birchfeed's documented `https://birchfeed.app/api/greader.php` endpoint is prefilled.
 
 The application stores the complete API base URL explicitly. It must not blindly append FreshRSS-specific paths to an arbitrary service root.
 

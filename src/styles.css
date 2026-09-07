@@ -97,6 +97,7 @@ a { color: inherit; }
   background: var(--background);
   color: var(--text);
 }
+.connected-endpoint { margin-top: 8px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .76rem; overflow-wrap: anywhere; }
 
 .pwa-prompt {
   position: fixed;

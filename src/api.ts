@@ -71,10 +71,10 @@ export function getIntegrationStatus(signal?: AbortSignal) {
   return request<IntegrationStatus>('/api/settings/status', { signal });
 }
 
-export function connectBirchfeed(email: string, apiKey: string) {
-  return request<{ provider: 'birchfeed'; configured: true }>('/api/settings/rss', {
+export function connectBirchfeed(serverUrl: string, email: string, apiKey: string) {
+  return request<{ provider: 'google-reader'; configured: true; serverUrl: string }>('/api/settings/rss', {
     method: 'PUT',
-    body: JSON.stringify({ email, apiKey }),
+    body: JSON.stringify({ serverUrl, email, apiKey }),
   });
 }
 

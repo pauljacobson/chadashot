@@ -2,7 +2,7 @@ import type { AppConfig } from '../config.js';
 import type { AppDatabase } from '../database.js';
 import { nowIso } from '../database.js';
 import { decryptSecret, encryptSecret } from '../secrets.js';
-import type { GoogleReaderCredentials } from './google-reader.js';
+import { BIRCHFEED_API_URL, type GoogleReaderCredentials } from './google-reader.js';
 import type { ReadwiseCredentials } from './readwise.js';
 
 type IntegrationKind = 'birchfeed' | 'readwise';
@@ -27,7 +27,8 @@ export function saveIntegration<T>(database: AppDatabase, config: AppConfig, kin
 }
 
 export function loadBirchfeed(database: AppDatabase, config: AppConfig) {
-  return loadIntegration<GoogleReaderCredentials>(database, config, 'birchfeed');
+  const credentials = loadIntegration<GoogleReaderCredentials | Omit<GoogleReaderCredentials, 'serverUrl'>>(database, config, 'birchfeed');
+  return credentials ? { serverUrl: BIRCHFEED_API_URL, ...credentials } : null;
 }
 
 export function loadReadwise(database: AppDatabase, config: AppConfig) {
