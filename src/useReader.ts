@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Article, ArticleMutation, ReaderSnapshot } from '../shared/reader';
-import { getReaderSnapshot, sendArticleMutation, sendArticleMutations } from './api';
+import { ApiError, getReaderSnapshot, sendArticleMutation, sendArticleMutations } from './api';
+import {
+  applyQueuedArticleMutations,
+  enqueueArticleMutation,
+  loadCachedSnapshot,
+  queuedArticleMutations,
+  removeQueuedArticleMutation,
+  requestPersistentStorage,
+  saveCachedSnapshot,
+} from './offlineStore';
 import { applyReadStates } from './readerState';
 
 export type ReaderFilter =
@@ -13,6 +22,20 @@ export type ReaderFilter =
 
 export type SyncStatus = 'offline' | 'syncing' | 'current' | 'error';
 
+function shouldQueue(error: unknown) {
+  return !(error instanceof ApiError) || error.status === 429 || error.status >= 500;
+}
+
+function applyMutation(snapshot: ReaderSnapshot, mutation: ArticleMutation) {
+  if (mutation.operation === 'read') return applyReadStates(snapshot, new Map([[mutation.articleId, mutation.value]]));
+  return {
+    ...snapshot,
+    articles: snapshot.articles.map((article) => article.id === mutation.articleId
+      ? { ...article, starred: mutation.value }
+      : article),
+  };
+}
+
 export function useReader(enabled = true) {
   const [snapshot, setSnapshot] = useState<ReaderSnapshot | null>(null);
   const [filter, setFilter] = useState<ReaderFilter>({ kind: 'inbox' });
@@ -20,8 +43,13 @@ export function useReader(enabled = true) {
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState<SyncStatus>(navigator.onLine ? 'syncing' : 'offline');
   const [error, setError] = useState<string | null>(null);
+  const [pendingMutations, setPendingMutations] = useState(0);
   const lastSync = useRef(0);
   const activeRequest = useRef<AbortController | null>(null);
+
+  const refreshPendingCount = useCallback(async () => {
+    setPendingMutations((await queuedArticleMutations()).length);
+  }, []);
 
   const synchronize = useCallback(async () => {
     if (!enabled) return;
@@ -34,33 +62,58 @@ export function useReader(enabled = true) {
     activeRequest.current = controller;
     setStatus('syncing');
     try {
+      let outboxError: unknown = null;
+      for (const queued of await queuedArticleMutations()) {
+        try {
+          await sendArticleMutation({
+            articleId: queued.articleId,
+            operation: queued.operation,
+            value: queued.value,
+          });
+          await removeQueuedArticleMutation(queued);
+        } catch (mutationError) {
+          outboxError = mutationError;
+          break;
+        }
+      }
+
       const next = await getReaderSnapshot(controller.signal);
-      setSnapshot((current) => {
-        if (!current) return next;
-        const localState = new Map(current.articles.map((article) => [article.id, { read: article.read, starred: article.starred }]));
-        return {
-          ...next,
-          articles: next.articles.map((article) => ({ ...article, ...localState.get(article.id) })),
-        };
-      });
-      setSelectedId((current) => current ?? next.articles[0]?.id ?? null);
-      setError(null);
-      setStatus('current');
+      const remaining = await queuedArticleMutations();
+      const reconciled = applyQueuedArticleMutations(next, remaining);
+      setSnapshot(reconciled);
+      setSelectedId((current) => current ?? reconciled.articles[0]?.id ?? null);
+      setPendingMutations(remaining.length);
+      setError(outboxError ? 'Some offline changes are still waiting to synchronize' : null);
+      setStatus(outboxError ? 'error' : 'current');
       lastSync.current = Date.now();
     } catch (syncError) {
       if (controller.signal.aborted) return;
       setError(syncError instanceof Error ? syncError.message : 'Synchronization failed');
-      setStatus('error');
+      setStatus(navigator.onLine ? 'error' : 'offline');
+      await refreshPendingCount().catch(() => undefined);
     }
-  }, [enabled]);
+  }, [enabled, refreshPendingCount]);
 
   useEffect(() => {
     if (!enabled) return;
-    const initialSync = window.setTimeout(() => void synchronize(), 0);
+    let active = true;
+    let initialSync: number | undefined;
+    void Promise.all([loadCachedSnapshot(), queuedArticleMutations()]).then(([cached, queued]) => {
+      if (!active) return;
+      if (cached && lastSync.current === 0) {
+        const restored = applyQueuedArticleMutations(cached, queued);
+        setSnapshot(restored);
+        setSelectedId((current) => current ?? restored.articles[0]?.id ?? null);
+      }
+      setPendingMutations(queued.length);
+      initialSync = window.setTimeout(() => void synchronize(), 0);
+    }).catch(() => {
+      if (active) initialSync = window.setTimeout(() => void synchronize(), 0);
+    });
+
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') void synchronize();
     }, 3 * 60 * 1000);
-
     const handleVisibility = () => {
       if (document.visibilityState === 'visible' && Date.now() - lastSync.current > 60_000) void synchronize();
     };
@@ -71,14 +124,27 @@ export function useReader(enabled = true) {
     window.addEventListener('offline', handleOffline);
 
     return () => {
+      active = false;
       activeRequest.current?.abort();
-      window.clearTimeout(initialSync);
+      if (initialSync !== undefined) window.clearTimeout(initialSync);
       window.clearInterval(interval);
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
   }, [enabled, synchronize]);
+
+  useEffect(() => {
+    if (!snapshot) return;
+    void saveCachedSnapshot(snapshot).catch(() => {
+      setError('Could not update offline storage on this device');
+      setStatus('error');
+    });
+  }, [snapshot]);
+
+  useEffect(() => {
+    if (enabled) void requestPersistentStorage();
+  }, [enabled]);
 
   const filteredArticles = useMemo(() => {
     if (!snapshot) return [];
@@ -114,52 +180,68 @@ export function useReader(enabled = true) {
   );
 
   const mutate = useCallback(async (article: Article, operation: ArticleMutation['operation'], value: boolean) => {
-    setSnapshot((current) => {
-      if (!current) return current;
-      if (operation === 'read') return applyReadStates(current, new Map([[article.id, value]]));
-      return {
-        ...current,
-        articles: current.articles.map((candidate) => candidate.id === article.id ? { ...candidate, starred: value } : candidate),
-      };
-    });
+    const mutation = { articleId: article.id, operation, value } satisfies ArticleMutation;
+    setSnapshot((current) => current ? applyMutation(current, mutation) : current);
 
+    let queued: Awaited<ReturnType<typeof enqueueArticleMutation>> | null = null;
     try {
-      await sendArticleMutation({ articleId: article.id, operation, value });
+      queued = await enqueueArticleMutation(mutation);
+      await refreshPendingCount();
+      if (!navigator.onLine) {
+        setStatus('offline');
+        setError(null);
+        return;
+      }
+      await sendArticleMutation(mutation);
+      await removeQueuedArticleMutation(queued);
+      await refreshPendingCount();
     } catch (mutationError) {
-      setSnapshot((current) => {
-        if (!current) return current;
-        if (operation === 'read') return applyReadStates(current, new Map([[article.id, !value]]));
-        return {
-          ...current,
-          articles: current.articles.map((candidate) => candidate.id === article.id ? { ...candidate, starred: !value } : candidate),
-        };
-      });
+      if (queued && shouldQueue(mutationError)) {
+        setError('Change saved on this device and will retry automatically');
+        setStatus(navigator.onLine ? 'error' : 'offline');
+        return;
+      }
+      if (queued) await removeQueuedArticleMutation(queued).catch(() => undefined);
+      await refreshPendingCount().catch(() => undefined);
+      setSnapshot((current) => current ? applyMutation(current, { ...mutation, value: !value }) : current);
       setError(mutationError instanceof Error ? mutationError.message : 'Could not save change');
       setStatus(navigator.onLine ? 'error' : 'offline');
     }
-  }, []);
+  }, [refreshPendingCount]);
 
   const markAllRead = useCallback(async (candidates: Article[]) => {
     const unread = candidates.filter((article) => !article.read);
     if (unread.length === 0) return 0;
-    const optimisticStates = new Map(unread.map((article) => [article.id, true] as const));
-    setSnapshot((current) => current ? applyReadStates(current, optimisticStates) : current);
+    const mutations = unread.map((article) => ({ articleId: article.id, operation: 'read' as const, value: true }));
+    setSnapshot((current) => current ? applyReadStates(current, new Map(unread.map((article) => [article.id, true]))) : current);
 
+    let queued = [] as Awaited<ReturnType<typeof enqueueArticleMutation>>[];
     try {
-      await sendArticleMutations(unread.map((article) => ({
-        articleId: article.id,
-        operation: 'read',
-        value: true,
-      })));
+      queued = await Promise.all(mutations.map(enqueueArticleMutation));
+      await refreshPendingCount();
+      if (!navigator.onLine) {
+        setStatus('offline');
+        setError(null);
+        return unread.length;
+      }
+      await sendArticleMutations(mutations);
+      await Promise.all(queued.map(removeQueuedArticleMutation));
+      await refreshPendingCount();
       return unread.length;
     } catch (mutationError) {
-      const rollbackStates = new Map(unread.map((article) => [article.id, false] as const));
-      setSnapshot((current) => current ? applyReadStates(current, rollbackStates) : current);
+      if (queued.length > 0 && shouldQueue(mutationError)) {
+        setError('Changes saved on this device and will retry automatically');
+        setStatus(navigator.onLine ? 'error' : 'offline');
+        return unread.length;
+      }
+      await Promise.all(queued.map((mutation) => removeQueuedArticleMutation(mutation).catch(() => undefined)));
+      await refreshPendingCount().catch(() => undefined);
+      setSnapshot((current) => current ? applyReadStates(current, new Map(unread.map((article) => [article.id, false]))) : current);
       setError(mutationError instanceof Error ? mutationError.message : 'Could not mark articles as read');
       setStatus(navigator.onLine ? 'error' : 'offline');
       throw mutationError;
     }
-  }, []);
+  }, [refreshPendingCount]);
 
   const clear = useCallback(() => {
     activeRequest.current?.abort();
@@ -167,6 +249,7 @@ export function useReader(enabled = true) {
     setSelectedId(null);
     setFilter({ kind: 'inbox' });
     setError(null);
+    setPendingMutations(0);
     setStatus(navigator.onLine ? 'current' : 'offline');
   }, []);
 
@@ -180,6 +263,7 @@ export function useReader(enabled = true) {
     query,
     status,
     error,
+    pendingMutations,
     setFilter,
     setQuery,
     selectArticle: setSelectedId,

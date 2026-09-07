@@ -28,6 +28,12 @@ import {
 } from './api';
 import { type ReaderFilter, type SyncStatus, useReader } from './useReader';
 import { buildFeedGroups, type FeedSortOrder, feedFaviconUrl } from './feedTree';
+import {
+  clearOfflineData,
+  loadOfflineSession,
+  offlineStorageSummary,
+  saveOfflineSession,
+} from './offlineStore';
 
 type MobileScreen = 'list' | 'reader';
 const FEED_SORT_ORDER_KEY = 'chadashot.feedSortOrder';
@@ -185,11 +191,15 @@ function formatAge(publishedAt: string) {
   return `${Math.floor(hours / 24)}d`;
 }
 
-function syncLabel(status: SyncStatus) {
-  if (status === 'syncing') return 'Syncing';
-  if (status === 'offline') return 'Offline';
-  if (status === 'error') return 'Action needed';
-  return 'Up to date';
+function syncLabel(status: SyncStatus, pendingMutations = 0) {
+  const base = status === 'syncing'
+    ? 'Syncing'
+    : status === 'offline'
+      ? 'Offline'
+      : status === 'error'
+        ? 'Action needed'
+        : 'Up to date';
+  return pendingMutations > 0 ? `${base} · ${pendingMutations} pending` : base;
 }
 
 function FeedIcon({ subscription }: { subscription: Subscription }) {
@@ -852,11 +862,12 @@ export function AccountSecurityPanel({ onClose }: { onClose: () => void }) {
   );
 }
 
-function SettingsPanel({ session, onClose, onConnected, onRssDisconnected, onLogout }: {
+function SettingsPanel({ session, onClose, onConnected, onRssDisconnected, onClearOfflineData, onLogout }: {
   session: SessionState;
   onClose: () => void;
   onConnected: () => Promise<void>;
   onRssDisconnected: () => Promise<void> | void;
+  onClearOfflineData: () => Promise<void>;
   onLogout: () => Promise<void>;
 }) {
   const [status, setStatus] = useState<IntegrationStatus | null>(null);
@@ -869,14 +880,33 @@ function SettingsPanel({ session, onClose, onConnected, onRssDisconnected, onLog
   const [error, setError] = useState<string | null>(null);
   const [logsOpen, setLogsOpen] = useState(false);
   const [securityOpen, setSecurityOpen] = useState(false);
+  const [offlineSummary, setOfflineSummary] = useState<{ articles: number; queuedChanges: number; estimatedBytes: number } | null>(null);
+  const [clearingOfflineData, setClearingOfflineData] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
-    getIntegrationStatus(controller.signal).then(setStatus).catch((statusError: unknown) => {
-      if (!controller.signal.aborted) setError(statusError instanceof Error ? statusError.message : 'Could not load connection status');
+    void Promise.all([
+      getIntegrationStatus(controller.signal).then(setStatus),
+      offlineStorageSummary().then(setOfflineSummary),
+    ]).catch((statusError: unknown) => {
+      if (!controller.signal.aborted) setError(statusError instanceof Error ? statusError.message : 'Could not load settings');
     });
     return () => controller.abort();
   }, []);
+
+  async function removeOfflineData() {
+    if (!window.confirm('Clear articles and pending changes stored on this device? The cache will rebuild after the next synchronization.')) return;
+    setClearingOfflineData(true);
+    setError(null);
+    try {
+      await onClearOfflineData();
+      setOfflineSummary({ articles: 0, queuedChanges: 0, estimatedBytes: 0 });
+    } catch (storageError) {
+      setError(storageError instanceof Error ? storageError.message : 'Could not clear offline data');
+    } finally {
+      setClearingOfflineData(false);
+    }
+  }
 
   async function saveBirchfeed() {
     setConnecting(true);
@@ -981,6 +1011,14 @@ function SettingsPanel({ session, onClose, onConnected, onRssDisconnected, onLog
         <div className="setting-section">
           <h2>Diagnostics</h2>
           <div className="setting-line"><div><strong>Application logs</strong><span>Review recent activity, warnings, and errors stored by this server.</span></div><button type="button" onClick={() => setLogsOpen(true)}>View logs</button></div>
+        </div>
+        <div className="setting-section">
+          <h2>Offline storage</h2>
+          <div className="setting-line">
+            <div><strong>{offlineSummary?.articles ?? 0} cached articles</strong><span>{formatLogFileSize(offlineSummary?.estimatedBytes ?? 0)} on this device · {offlineSummary?.queuedChanges ?? 0} pending changes</span></div>
+            <button type="button" disabled={clearingOfflineData} onClick={() => void removeOfflineData()}>{clearingOfflineData ? 'Clearing…' : 'Clear data'}</button>
+          </div>
+          <p className="setting-help">The cache is limited to the newest 200 articles and rebuilds on the next synchronization.</p>
         </div>
         <div className="setting-section">
           <h2>Access</h2>
@@ -1097,13 +1135,26 @@ export function App() {
   const reader = useReader(Boolean(session?.authenticated));
 
   async function refreshSession() {
-    setSession(await getSession());
+    const nextSession = await getSession();
+    setSession(nextSession);
+    if (nextSession.authenticated) await saveOfflineSession(nextSession);
   }
 
   useEffect(() => {
     const controller = new AbortController();
-    getSession(controller.signal).then(setSession).catch((error: unknown) => {
-      if (!controller.signal.aborted) setSessionError(error instanceof Error ? error.message : 'Could not load session');
+    getSession(controller.signal).then((nextSession) => {
+      setSession(nextSession);
+      if (nextSession.authenticated) void saveOfflineSession(nextSession);
+    }).catch(async (error: unknown) => {
+      if (controller.signal.aborted) return;
+      if (!navigator.onLine) {
+        const cachedSession = await loadOfflineSession().catch(() => null);
+        if (cachedSession) {
+          setSession(cachedSession);
+          return;
+        }
+      }
+      setSessionError(error instanceof Error ? error.message : 'Could not load session');
     });
     return () => controller.abort();
   }, []);
@@ -1222,7 +1273,7 @@ export function App() {
         </div>
         <label className="search-box" htmlFor="article-search"><span aria-hidden="true">⌕</span><input id="article-search" type="search" value={reader.query} onChange={(event) => reader.setQuery(event.target.value)} placeholder="Search your reading" /></label>
         <div className="topbar-actions">
-          <span className="topbar-status"><span className={`status-dot ${reader.status}`}></span>{syncLabel(reader.status)}</span>
+          <span className="topbar-status"><span className={`status-dot ${reader.status}`}></span>{syncLabel(reader.status, reader.pendingMutations)}</span>
           <button aria-label="Refresh" onClick={() => void reader.synchronize()}>↻</button>
           <button aria-label="Open preferences" onClick={() => setPreferencesOpen(true)}>☷</button>
           <button aria-label="Open settings" onClick={() => setSettingsOpen(true)}>⚙</button>
@@ -1330,8 +1381,10 @@ export function App() {
           reader.clear();
           if (session.mode === 'development') await reader.synchronize();
         }}
+        onClearOfflineData={clearOfflineData}
         onLogout={async () => {
           await logout();
+          await clearOfflineData();
           reader.clear();
           setSettingsOpen(false);
           await refreshSession();

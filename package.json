@@ -25,6 +25,7 @@
     "express": "5.2.1",
     "express-rate-limit": "8.7.0",
     "helmet": "8.2.0",
+    "idb": "8.0.3",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "zod": "4.1.12"
@@ -44,6 +45,7 @@
     "eslint": "9.39.4",
     "eslint-plugin-react-hooks": "7.0.1",
     "eslint-plugin-react-refresh": "0.5.2",
+    "fake-indexeddb": "6.2.5",
     "globals": "17.3.0",
     "jsdom": "29.0.0",
     "supertest": "7.2.2",

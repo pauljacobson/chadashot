@@ -808,6 +808,7 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 .setting-section { padding: 20px 24px; border-bottom: 1px solid var(--border); }
 .setting-section:last-child { border-bottom: 0; }
 .setting-section h2 { margin: 0 0 13px; font-size: 13px; letter-spacing: .04em; text-transform: uppercase; }
+.setting-help { margin: 12px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
 .setting-line { display: flex; align-items: center; gap: 14px; }
 .setting-line > div { flex: 1; }
 .setting-line strong, .setting-line span { display: block; }

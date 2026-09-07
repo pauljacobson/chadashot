@@ -6,6 +6,13 @@ import type {
   AuthenticationResponseJSON,
 } from '@simplewebauthn/browser';
 
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     credentials: 'same-origin',
@@ -19,7 +26,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: `Request failed (${response.status})` }));
-    throw new Error(typeof body.error === 'string' ? body.error : `Request failed (${response.status})`);
+    throw new ApiError(typeof body.error === 'string' ? body.error : `Request failed (${response.status})`, response.status);
   }
 
   if (response.status === 204) return undefined as T;
