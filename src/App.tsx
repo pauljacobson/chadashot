@@ -162,7 +162,7 @@ function Navigation({
 }) {
   const unread = snapshot?.articles.filter((article) => !article.read).length ?? 0;
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" id="reader-sidebar">
       <nav aria-label="Reader navigation">
         <div className="nav-group">
           <button className={`nav-item ${filter.kind === 'inbox' ? 'active' : ''}`} onClick={() => onFilter({ kind: 'inbox' })}>
@@ -678,12 +678,20 @@ export function App() {
   return (
     <div className={`app-shell ${sidebarOpen ? '' : 'sidebar-collapsed'} mobile-${mobileScreen}`}>
       <header className="topbar">
-        <div className="wordmark"><span className="app-mark">ח</span><span>Chadashot</span></div>
+        <div className="wordmark">
+          <button
+            className="sidebar-toggle brand-sidebar-toggle"
+            aria-label={sidebarOpen ? 'Collapse navigation sidebar' : 'Expand navigation sidebar'}
+            aria-controls="reader-sidebar"
+            aria-expanded={sidebarOpen}
+            onClick={() => setSidebarOpen((current) => !current)}
+          >☰</button>
+          <span className="app-mark">ח</span><span>Chadashot</span>
+        </div>
         <label className="search-box" htmlFor="article-search"><span aria-hidden="true">⌕</span><input id="article-search" type="search" value={reader.query} onChange={(event) => reader.setQuery(event.target.value)} placeholder="Search your reading" /></label>
         <div className="topbar-actions">
           <span className="topbar-status"><span className={`status-dot ${reader.status}`}></span>{syncLabel(reader.status)}</span>
           <button aria-label="Refresh" onClick={() => void reader.synchronize()}>↻</button>
-          <button className="sidebar-toggle" aria-label="Toggle sidebar" onClick={() => setSidebarOpen((current) => !current)}>☰</button>
           <button aria-label="Open preferences" onClick={() => setPreferencesOpen(true)}>☷</button>
           <button aria-label="Open settings" onClick={() => setSettingsOpen(true)}>⚙</button>
         </div>
