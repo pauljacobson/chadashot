@@ -22,8 +22,7 @@ const subscriptionListSchema = z.object({
   })),
 });
 
-const streamSchema = z.object({
-  items: z.array(z.object({
+const streamItemSchema = z.object({
     id: z.string(),
     title: z.string().default('Untitled'),
     author: z.string().optional(),
@@ -36,8 +35,14 @@ const streamSchema = z.object({
     summary: z.object({ content: z.string() }).optional(),
     content: z.object({ content: z.string() }).optional(),
     origin: z.object({ streamId: z.string(), title: z.string().optional(), htmlUrl: z.string().optional() }),
-  })),
 });
+
+const streamSchema = z.object({
+  items: z.array(streamItemSchema),
+  continuation: z.coerce.string().min(1).optional(),
+});
+
+const STREAM_PAGE_SIZE = 1_000;
 
 const quickAddSchema = z.object({
   numResults: z.number(),
@@ -64,7 +69,7 @@ function plainText(html: string) {
     .trim();
 }
 
-function publishedAt(item: z.infer<typeof streamSchema>['items'][number]) {
+function publishedAt(item: z.infer<typeof streamItemSchema>) {
   if (item.published) return new Date(item.published * 1000).toISOString();
   if (item.updated) return new Date(item.updated * 1000).toISOString();
   if (item.timestampUsec) return new Date(Number(item.timestampUsec) / 1000).toISOString();
@@ -134,14 +139,45 @@ export class GoogleReaderClient {
     await this.authenticate();
   }
 
+  private async allStreamItems(auth: string) {
+    const items = [] as z.infer<typeof streamItemSchema>[];
+    const itemIds = new Set<string>();
+    const continuationTokens = new Set<string>();
+    let continuation: string | undefined;
+
+    do {
+      const query = new URLSearchParams({ output: 'json', n: String(STREAM_PAGE_SIZE) });
+      if (continuation) query.set('c', continuation);
+      const response = await this.authorizedRequest(
+        `/reader/api/0/stream/contents/user/-/state/com.google/reading-list?${query}`,
+        auth,
+      );
+      const page = streamSchema.parse(await response.json());
+      for (const item of page.items) {
+        if (itemIds.has(item.id)) continue;
+        itemIds.add(item.id);
+        items.push(item);
+      }
+
+      const nextContinuation = page.continuation;
+      if (!nextContinuation) break;
+      if (continuationTokens.has(nextContinuation)) {
+        throw new Error('RSS service returned a repeating continuation token');
+      }
+      continuationTokens.add(nextContinuation);
+      continuation = nextContinuation;
+    } while (continuation);
+
+    return items;
+  }
+
   async snapshot(): Promise<ReaderSnapshot> {
     const auth = await this.authenticate();
-    const [subscriptionsResponse, streamResponse] = await Promise.all([
+    const [subscriptionsResponse, streamItems] = await Promise.all([
       this.authorizedRequest('/reader/api/0/subscription/list?output=json', auth),
-      this.authorizedRequest('/reader/api/0/stream/contents/user/-/state/com.google/reading-list?output=json&n=300', auth),
+      this.allStreamItems(auth),
     ]);
     const subscriptionsResult = subscriptionListSchema.parse(await subscriptionsResponse.json());
-    const streamResult = streamSchema.parse(await streamResponse.json());
 
     const subscriptions = subscriptionsResult.subscriptions.map((subscription) => ({
       id: subscription.id,
@@ -154,7 +190,7 @@ export class GoogleReaderClient {
     }));
     const subscriptionsById = new Map(subscriptions.map((subscription) => [subscription.id, subscription]));
 
-    const articles = streamResult.items.map((item) => {
+    const articles = streamItems.map((item) => {
       const html = item.content?.content ?? item.summary?.content ?? '';
       const text = plainText(html);
       const subscription = subscriptionsById.get(item.origin.streamId);
