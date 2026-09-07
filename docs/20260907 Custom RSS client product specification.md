@@ -57,7 +57,8 @@ The first release is intentionally single-user and single-provider. The design s
 - **All:** all synchronized items, newest first.
 - **Starred:** items starred in Birchfeed.
 - **Feeds:** an expandable tree of Birchfeed folders/labels with their feeds nested beneath them; feeds without a recognized folder appear under Uncategorized. A toggle above the tree limits it to feeds containing unread items and hides folders left empty by that filter.
-- **Settings:** connection, passkeys, Readwise, offline storage, and application information.
+- **Preferences:** personal interface choices, including system appearance and alphabetical or most-recent folder/feed ordering.
+- **Settings:** service connections, passkeys, offline storage, and application information.
 
 “Read later” should not be invented as a separate state in the first release. Starred remains the portable saved-item state supported by the RSS service. Saving to Reader is an explicit outbound action rather than another local queue.
 
@@ -77,7 +78,7 @@ Use one primary pane at a time:
 
 - Inbox/list is the initial screen.
 - Selecting an item pushes the reading screen into view.
-- A bottom navigation bar exposes Inbox, Starred, Feeds, and Settings.
+- A bottom navigation bar exposes Inbox, Starred, Feeds, Preferences, and Settings.
 - The reading screen uses a compact top bar for Back, Star, Save to Reader, and More.
 - Selecting article text opens a small contextual action bar: Highlight, Add note, and Copy.
 
@@ -98,7 +99,7 @@ Swiping an article may mark it read or star it, but every gesture must have an e
 #### Reading and navigation
 
 - Opening an unread article marks it read after either two seconds of visible reading or a meaningful scroll, whichever happens first.
-- The user can disable automatic marking in Settings.
+- The user can disable automatic marking in Preferences.
 - Article-list position and reading position are restored when navigating back.
 - The desktop client supports keyboard navigation: `j`/`k` for next/previous, `Enter` to open, `m` to toggle read, `s` to toggle star, `/` to search, and `?` for shortcut help.
 - A progress indicator is shown only while reading a long article.

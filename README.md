@@ -6,7 +6,7 @@ The previous FreshRSS deployment wrapper has been moved to a local, Git-ignored 
 
 ## Project status
 
-The initial review version includes the responsive reading interface, an expandable folder/feed tree with favicons, fixture-backed local use, live Birchfeed synchronization, manual feed subscriptions, read and star mutations, encrypted service credentials, production passkey onboarding, and both Readwise actions. The product specification, deployment guide, and supporting research are in [`docs/`](docs/).
+The initial review version includes the responsive reading interface, an expandable folder/feed tree with favicons and persistent ordering preferences, fixture-backed local use, live Birchfeed synchronization, manual feed subscriptions, read and star mutations, encrypted service credentials, production passkey onboarding, and both Readwise actions. The product specification, deployment guide, and supporting research are in [`docs/`](docs/).
 
 ## Run locally
 

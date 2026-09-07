@@ -16,9 +16,18 @@ import {
   verifyLogin,
 } from './api';
 import { type ReaderFilter, type SyncStatus, useReader } from './useReader';
-import { buildFeedGroups, feedFaviconUrl } from './feedTree';
+import { buildFeedGroups, type FeedSortOrder, feedFaviconUrl } from './feedTree';
 
 type MobileScreen = 'list' | 'reader';
+const FEED_SORT_ORDER_KEY = 'chadashot.feedSortOrder';
+
+function savedFeedSortOrder(): FeedSortOrder {
+  try {
+    return localStorage.getItem(FEED_SORT_ORDER_KEY) === 'recent' ? 'recent' : 'alphabetical';
+  } catch {
+    return 'alphabetical';
+  }
+}
 
 const filterLabels: Record<ReaderFilter['kind'], string> = {
   inbox: 'Inbox',
@@ -60,10 +69,11 @@ function FeedIcon({ subscription }: { subscription: Subscription }) {
   return <img className="feed-icon" src={source} alt="" aria-hidden="true" loading="lazy" onError={() => setFailedSource(source)} />;
 }
 
-function FeedTree({ snapshot, filter, unreadOnly, onFilter, onSubscribe, onFeedSelection, onUnreadOnlyChange, showHeading = true }: {
+function FeedTree({ snapshot, filter, unreadOnly, sortOrder, onFilter, onSubscribe, onFeedSelection, onUnreadOnlyChange, showHeading = true }: {
   snapshot: ReturnType<typeof useReader>['snapshot'];
   filter: ReaderFilter;
   unreadOnly: boolean;
+  sortOrder: FeedSortOrder;
   onFilter: (filter: ReaderFilter) => void;
   onSubscribe: () => void;
   onFeedSelection?: () => void;
@@ -71,7 +81,7 @@ function FeedTree({ snapshot, filter, unreadOnly, onFilter, onSubscribe, onFeedS
   showHeading?: boolean;
 }) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
-  const feedGroups = buildFeedGroups(snapshot, unreadOnly);
+  const feedGroups = buildFeedGroups(snapshot, { unreadOnly, sortOrder });
 
   function toggleFolder(folderId: string) {
     setExpandedFolders((current) => {
@@ -134,6 +144,7 @@ function Navigation({
   onSettings,
   onSubscribe,
   unreadOnly,
+  sortOrder,
   onUnreadOnlyChange,
   status,
 }: {
@@ -143,6 +154,7 @@ function Navigation({
   onSettings: () => void;
   onSubscribe: () => void;
   unreadOnly: boolean;
+  sortOrder: FeedSortOrder;
   onUnreadOnlyChange: (unreadOnly: boolean) => void;
   status: SyncStatus;
 }) {
@@ -161,7 +173,7 @@ function Navigation({
             <span aria-hidden="true">☆</span><span>Starred</span>
           </button>
         </div>
-        <FeedTree snapshot={snapshot} filter={filter} unreadOnly={unreadOnly} onFilter={onFilter} onSubscribe={onSubscribe} onUnreadOnlyChange={onUnreadOnlyChange} />
+        <FeedTree snapshot={snapshot} filter={filter} unreadOnly={unreadOnly} sortOrder={sortOrder} onFilter={onFilter} onSubscribe={onSubscribe} onUnreadOnlyChange={onUnreadOnlyChange} />
       </nav>
       <div className="connection-status">
         <span className={`status-dot ${status}`}></span>{syncLabel(status)}
@@ -171,10 +183,11 @@ function Navigation({
   );
 }
 
-function MobileFeedsPanel({ snapshot, filter, unreadOnly, onFilter, onSubscribe, onUnreadOnlyChange, onClose }: {
+function MobileFeedsPanel({ snapshot, filter, unreadOnly, sortOrder, onFilter, onSubscribe, onUnreadOnlyChange, onClose }: {
   snapshot: ReturnType<typeof useReader>['snapshot'];
   filter: ReaderFilter;
   unreadOnly: boolean;
+  sortOrder: FeedSortOrder;
   onFilter: (filter: ReaderFilter) => void;
   onSubscribe: () => void;
   onUnreadOnlyChange: (unreadOnly: boolean) => void;
@@ -184,7 +197,7 @@ function MobileFeedsPanel({ snapshot, filter, unreadOnly, onFilter, onSubscribe,
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <section className="mobile-feeds-panel" role="dialog" aria-modal="true" aria-labelledby="mobile-feeds-title">
         <header><h1 id="mobile-feeds-title">Feeds</h1><button onClick={onSubscribe}>＋ Add feed</button><button aria-label="Close feeds" onClick={onClose}>×</button></header>
-        <FeedTree snapshot={snapshot} filter={filter} unreadOnly={unreadOnly} onFilter={onFilter} onFeedSelection={onClose} onSubscribe={onSubscribe} onUnreadOnlyChange={onUnreadOnlyChange} showHeading={false} />
+        <FeedTree snapshot={snapshot} filter={filter} unreadOnly={unreadOnly} sortOrder={sortOrder} onFilter={onFilter} onFeedSelection={onClose} onSubscribe={onSubscribe} onUnreadOnlyChange={onUnreadOnlyChange} showHeading={false} />
       </section>
     </div>
   );
@@ -368,6 +381,39 @@ function ReaderPane({
   );
 }
 
+function PreferencesPanel({ sortOrder, onSortOrderChange, onClose }: {
+  sortOrder: FeedSortOrder;
+  onSortOrderChange: (sortOrder: FeedSortOrder) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+      <section className="preferences-panel" role="dialog" aria-modal="true" aria-labelledby="preferences-title">
+        <header><div><div className="eyebrow">Chadashot</div><h1 id="preferences-title">Preferences</h1></div><button aria-label="Close preferences" onClick={onClose}>×</button></header>
+        <div className="setting-section">
+          <h2>Feed organization</h2>
+          <fieldset className="preference-options">
+            <legend>Folder and feed order</legend>
+            <label className="preference-option">
+              <input type="radio" name="feed-sort-order" value="alphabetical" checked={sortOrder === 'alphabetical'} onChange={() => onSortOrderChange('alphabetical')} />
+              <span><strong>Alphabetical</strong><small>Sort folders and the feeds inside them from A to Z.</small></span>
+            </label>
+            <label className="preference-option">
+              <input type="radio" name="feed-sort-order" value="recent" checked={sortOrder === 'recent'} onChange={() => onSortOrderChange('recent')} />
+              <span><strong>Most recent</strong><small>Put the folders and feeds with the newest synchronized articles first.</small></span>
+            </label>
+          </fieldset>
+        </div>
+        <div className="setting-section">
+          <h2>Appearance</h2>
+          <div className="setting-line"><div><strong>Follow system</strong><span>The interface changes with the device light or dark theme.</span></div><span className="setting-state">Automatic</span></div>
+        </div>
+        <p className="preferences-note">Preferences are saved in this browser.</p>
+      </section>
+    </div>
+  );
+}
+
 function SettingsPanel({ session, onClose, onConnected }: { session: SessionState; onClose: () => void; onConnected: () => Promise<void> }) {
   const [status, setStatus] = useState<IntegrationStatus | null>(null);
   const [serverUrl, setServerUrl] = useState('https://birchfeed.app/api/greader.php');
@@ -449,10 +495,6 @@ function SettingsPanel({ session, onClose, onConnected }: { session: SessionStat
           <h2>Access</h2>
           <div className="setting-line"><div><strong>{session.mode === 'development' ? 'Local development identity' : 'Passkey'}</strong><span>{session.mode === 'development' ? 'Available only from loopback in development.' : 'Passkeys protect this deployment.'}</span></div><span className="setting-state">{session.user?.displayName}</span></div>
         </div>
-        <div className="setting-section">
-          <h2>Appearance</h2>
-          <div className="setting-line"><div><strong>Follow system</strong><span>The interface changes with the device light or dark theme.</span></div><span className="setting-state">Automatic</span></div>
-        </div>
       </section>
     </div>
   );
@@ -511,9 +553,11 @@ export function App() {
   const [session, setSession] = useState<SessionState | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [subscribeOpen, setSubscribeOpen] = useState(false);
   const [feedsOpen, setFeedsOpen] = useState(false);
   const [unreadFeedsOnly, setUnreadFeedsOnly] = useState(false);
+  const [feedSortOrder, setFeedSortOrder] = useState<FeedSortOrder>(savedFeedSortOrder);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileScreen, setMobileScreen] = useState<MobileScreen>('list');
   const [notice, setNotice] = useState('');
@@ -536,6 +580,14 @@ export function App() {
     const timeout = window.setTimeout(() => setNotice(''), 2600);
     return () => window.clearTimeout(timeout);
   }, [notice]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(FEED_SORT_ORDER_KEY, feedSortOrder);
+    } catch {
+      // The preference remains available for this session if storage is unavailable.
+    }
+  }, [feedSortOrder]);
 
   useEffect(() => {
     function handleKeydown(event: KeyboardEvent) {
@@ -587,11 +639,12 @@ export function App() {
           <span className="topbar-status"><span className={`status-dot ${reader.status}`}></span>{syncLabel(reader.status)}</span>
           <button aria-label="Refresh" onClick={() => void reader.synchronize()}>↻</button>
           <button className="sidebar-toggle" aria-label="Toggle sidebar" onClick={() => setSidebarOpen((current) => !current)}>☰</button>
+          <button aria-label="Open preferences" onClick={() => setPreferencesOpen(true)}>☷</button>
           <button aria-label="Open settings" onClick={() => setSettingsOpen(true)}>⚙</button>
         </div>
       </header>
       <div className="workspace">
-        <Navigation snapshot={reader.snapshot} filter={reader.filter} unreadOnly={unreadFeedsOnly} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} onSubscribe={() => setSubscribeOpen(true)} onUnreadOnlyChange={setUnreadFeedsOnly} status={reader.status} />
+        <Navigation snapshot={reader.snapshot} filter={reader.filter} unreadOnly={unreadFeedsOnly} sortOrder={feedSortOrder} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} onSubscribe={() => setSubscribeOpen(true)} onUnreadOnlyChange={setUnreadFeedsOnly} status={reader.status} />
         <ArticleList title={title} articles={reader.articles} selectedId={reader.selectedArticle?.id ?? null} onSelect={chooseArticle} onToggleStar={(article) => void reader.toggleStarred(article)} />
         <ReaderPane
           key={reader.selectedArticle?.id ?? 'empty-reader'}
@@ -626,6 +679,7 @@ export function App() {
         <button className={reader.filter.kind === 'inbox' ? 'active' : ''} onClick={() => chooseFilter({ kind: 'inbox' })}><span>●</span>Inbox</button>
         <button className={reader.filter.kind === 'starred' ? 'active' : ''} onClick={() => chooseFilter({ kind: 'starred' })}><span>☆</span>Starred</button>
         <button onClick={() => setFeedsOpen(true)}><span>⌁</span>Feeds</button>
+        <button onClick={() => setPreferencesOpen(true)}><span>☷</span>Prefs</button>
         <button onClick={() => setSettingsOpen(true)}><span>⚙</span>Settings</button>
       </nav>
       {notice && <div className="toast" role="status" aria-live="polite">{notice}</div>}
@@ -634,11 +688,13 @@ export function App() {
         snapshot={reader.snapshot}
         filter={reader.filter}
         unreadOnly={unreadFeedsOnly}
+        sortOrder={feedSortOrder}
         onFilter={chooseFilter}
         onSubscribe={() => { setFeedsOpen(false); setSubscribeOpen(true); }}
         onUnreadOnlyChange={setUnreadFeedsOnly}
         onClose={() => setFeedsOpen(false)}
       />}
+      {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} onSortOrderChange={setFeedSortOrder} onClose={() => setPreferencesOpen(false)} />}
       {subscribeOpen && <SubscribePanel
         onClose={() => setSubscribeOpen(false)}
         onSubscribed={async (feedUrl) => {
