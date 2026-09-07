@@ -1,4 +1,4 @@
-import type { AccountSecurityState, AppLogLevel, AppLogResult, ArticleMutation, IntegrationStatus, ReaderSnapshot, SessionState } from '../shared/reader';
+import type { AccountSecurityState, AppLogLevel, AppLogResult, ArticleMutation, IntegrationStatus, ReaderSnapshot, SavedHighlight, SessionState } from '../shared/reader';
 import type {
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
@@ -156,11 +156,18 @@ export function createReadwiseHighlight(article: {
   title: string;
   author: string | null;
   canonicalUrl: string;
+  startOffset: number;
+  endOffset: number;
 }) {
-  return request<{ id: string; synchronized: true }>('/api/readwise/highlights', {
+  return request<{ highlight: SavedHighlight; synchronized: boolean; warning?: string }>('/api/readwise/highlights', {
     method: 'POST',
     body: JSON.stringify(article),
   });
+}
+
+export function getArticleHighlights(articleId: string, signal?: AbortSignal) {
+  const query = new URLSearchParams({ articleId });
+  return request<{ highlights: SavedHighlight[] }>(`/api/highlights?${query.toString()}`, { signal });
 }
 
 export function saveReadwiseDocument(article: {

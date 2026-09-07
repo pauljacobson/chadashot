@@ -1,7 +1,7 @@
 import DOMPurify from 'dompurify';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
-import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
-import type { AccountSecurityState, AppLogLevel, AppLogResult, Article, IntegrationStatus, SessionState, Subscription } from '../shared/reader';
+import { type CSSProperties, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import type { AccountSecurityState, AppLogLevel, AppLogResult, Article, IntegrationStatus, SavedHighlight, SessionState, Subscription } from '../shared/reader';
 import {
   appLogExportUrl,
   connectBirchfeed,
@@ -11,6 +11,7 @@ import {
   disconnectRssService,
   getAccountSecurity,
   getAdditionalPasskeyOptions,
+  getArticleHighlights,
   getBootstrapOptions,
   getAppLogs,
   getIntegrationStatus,
@@ -457,7 +458,46 @@ function ArticleList({
   );
 }
 
-function ReaderPane({
+type SelectionAnchor = {
+  text: string;
+  startOffset: number;
+  endOffset: number;
+};
+
+function renderHighlightMarks(root: HTMLElement, highlights: SavedHighlight[]) {
+  root.querySelectorAll('mark[data-chadashot-highlight]').forEach((mark) => mark.replaceWith(...mark.childNodes));
+  root.normalize();
+
+  for (const highlight of [...highlights].sort((first, second) => second.startOffset - first.startOffset)) {
+    if (highlight.startOffset < 0 || highlight.endOffset <= highlight.startOffset || highlight.endOffset > (root.textContent?.length ?? 0)) continue;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const segments: { node: Text; start: number; end: number }[] = [];
+    let documentOffset = 0;
+    let node = walker.nextNode();
+    while (node) {
+      const textNode = node as Text;
+      const nodeEnd = documentOffset + textNode.data.length;
+      const start = Math.max(highlight.startOffset, documentOffset) - documentOffset;
+      const end = Math.min(highlight.endOffset, nodeEnd) - documentOffset;
+      if (start < end) segments.push({ node: textNode, start, end });
+      documentOffset = nodeEnd;
+      node = walker.nextNode();
+    }
+
+    for (const segment of segments.reverse()) {
+      const range = document.createRange();
+      range.setStart(segment.node, segment.start);
+      range.setEnd(segment.node, segment.end);
+      const mark = document.createElement('mark');
+      mark.dataset.chadashotHighlight = highlight.id;
+      mark.dataset.syncStatus = highlight.readwiseStatus;
+      if (highlight.readwiseError) mark.title = highlight.readwiseError;
+      range.surroundContents(mark);
+    }
+  }
+}
+
+export function ReaderPane({
   article,
   onBack,
   onToggleStar,
@@ -471,34 +511,64 @@ function ReaderPane({
   onToggleStar: (article: Article) => void;
   onToggleRead: (article: Article) => void;
   onNotify: (message: string) => void;
-  onHighlight: (article: Article, text: string, note?: string) => Promise<void>;
+  onHighlight: (article: Article, selection: SelectionAnchor, note?: string) => Promise<{ highlight: SavedHighlight; synchronized: boolean; warning?: string }>;
   onSaveToReader: (article: Article) => Promise<void>;
 }) {
   const contentRef = useRef<HTMLDivElement>(null);
-  const [selection, setSelection] = useState('');
+  const [selection, setSelection] = useState<SelectionAnchor | null>(null);
+  const [highlights, setHighlights] = useState<SavedHighlight[]>([]);
   const [noteOpen, setNoteOpen] = useState(false);
   const [note, setNote] = useState('');
   const [savingAction, setSavingAction] = useState<'highlight' | 'document' | null>(null);
   const sanitized = useMemo(() => DOMPurify.sanitize(article?.contentHtml ?? ''), [article?.contentHtml]);
 
+  useEffect(() => {
+    setHighlights([]);
+    if (!article) return;
+    const controller = new AbortController();
+    getArticleHighlights(article.id, controller.signal)
+      .then((result) => setHighlights(result.highlights))
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [article]);
+
+  useLayoutEffect(() => {
+    if (contentRef.current) renderHighlightMarks(contentRef.current, highlights);
+  }, [highlights, sanitized]);
+
   function captureSelection() {
     const current = window.getSelection();
     if (!current || current.isCollapsed || !contentRef.current) {
-      setSelection('');
+      setSelection(null);
       return;
     }
     const range = current.getRangeAt(0);
-    if (!contentRef.current.contains(range.commonAncestorContainer)) return;
-    setSelection(current.toString().trim().slice(0, 8191));
+    if (!contentRef.current.contains(range.startContainer) || !contentRef.current.contains(range.endContainer)) return;
+    const rawText = current.toString();
+    const text = rawText.trim().slice(0, 8191);
+    if (!text) {
+      setSelection(null);
+      return;
+    }
+    const leadingWhitespace = rawText.length - rawText.trimStart().length;
+    const prefix = document.createRange();
+    prefix.selectNodeContents(contentRef.current);
+    prefix.setEnd(range.startContainer, range.startOffset);
+    const startOffset = prefix.toString().length + leadingWhitespace;
+    setSelection({ text, startOffset, endOffset: startOffset + text.length });
   }
 
   async function saveHighlight() {
     if (!selection || !article) return;
     setSavingAction('highlight');
     try {
-      await onHighlight(article, selection, note || undefined);
+      const result = await onHighlight(article, selection, note || undefined);
+      setHighlights((current) => [...current.filter((highlight) => highlight.id !== result.highlight.id), result.highlight]);
+      if (result.warning) onNotify(`Highlight kept in Chadashot. ${result.warning}`);
       setNoteOpen(false);
-      setSelection('');
+      setSelection(null);
+      setNote('');
+      window.getSelection()?.removeAllRanges();
     } catch (error) {
       onNotify(error instanceof Error ? error.message : 'Could not save highlight');
     } finally {
@@ -549,13 +619,13 @@ function ReaderPane({
       </div>
       {selection && (
         <div className="selection-panel" role="toolbar" aria-label="Selected text actions">
-          <div className="selection-preview">“{selection}”</div>
+          <div className="selection-preview">“{selection.text}”</div>
           {noteOpen && <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Why does this matter?" aria-label="Highlight note" autoFocus />}
           <div className="selection-actions">
             <button className="primary-action" disabled={savingAction !== null} onClick={() => void saveHighlight()}>{savingAction === 'highlight' ? 'Saving…' : noteOpen ? 'Save highlight + note' : 'Highlight'}</button>
             {!noteOpen && <button onClick={() => setNoteOpen(true)}>Add note</button>}
-            <button onClick={() => { void navigator.clipboard.writeText(selection); onNotify('Copied selection'); }}>Copy</button>
-            <button aria-label="Close selection actions" onClick={() => setSelection('')}>×</button>
+            <button onClick={() => { void navigator.clipboard.writeText(selection.text); onNotify('Copied selection'); }}>Copy</button>
+            <button aria-label="Close selection actions" onClick={() => setSelection(null)}>×</button>
           </div>
         </div>
       )}
@@ -1323,16 +1393,17 @@ export function App() {
           onToggleRead={(article) => void reader.toggleRead(article)}
           onToggleStar={(article) => void reader.toggleStarred(article)}
           onNotify={setNotice}
-          onHighlight={async (article, text, note) => {
-            await createReadwiseHighlight({
+          onHighlight={async (article, selection, note) => {
+            const result = await createReadwiseHighlight({
               articleId: article.id,
-              text,
+              ...selection,
               note,
               title: article.title,
               author: article.author,
               canonicalUrl: article.canonicalUrl,
             });
-            setNotice(note ? 'Highlight and note saved to Readwise' : 'Highlight saved to Readwise');
+            if (result.synchronized) setNotice(note ? 'Highlight and note saved to Readwise' : 'Highlight saved to Readwise');
+            return result;
           }}
           onSaveToReader={async (article) => {
             await saveReadwiseDocument({

@@ -809,6 +809,8 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 .setting-section:last-child { border-bottom: 0; }
 .setting-section h2 { margin: 0 0 13px; font-size: 13px; letter-spacing: .04em; text-transform: uppercase; }
 .setting-help { margin: 12px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.article-content mark[data-chadashot-highlight] { background: color-mix(in srgb, var(--accent) 35%, transparent); color: inherit; border-radius: 2px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+.article-content mark[data-sync-status="failed"], .article-content mark[data-sync-status="pending"] { text-decoration: underline dotted var(--accent); text-underline-offset: 3px; }
 .setting-line { display: flex; align-items: center; gap: 14px; }
 .setting-line > div { flex: 1; }
 .setting-line strong, .setting-line span { display: block; }

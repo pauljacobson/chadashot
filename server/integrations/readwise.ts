@@ -8,6 +8,7 @@ export type ReadwiseHighlight = {
   author: string | null;
   sourceUrl: string;
   note?: string;
+  location?: number;
 };
 
 export type ReaderDocument = {
@@ -55,10 +56,14 @@ export class ReadwiseClient {
         source_type: 'rss',
         category: 'articles',
         note: highlight.note || undefined,
+        location: highlight.location,
+        location_type: highlight.location === undefined ? undefined : 'offset',
       }] }),
     });
     const result = await response.json().catch(() => null) as unknown;
-    if (Array.isArray(result) && typeof result[0]?.id === 'number') return String(result[0].id);
+    if (Array.isArray(result) && Array.isArray(result[0]?.modified_highlights) && typeof result[0].modified_highlights[0] === 'number') {
+      return String(result[0].modified_highlights[0]);
+    }
     return null;
   }
 

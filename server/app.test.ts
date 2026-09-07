@@ -187,7 +187,7 @@ describe('application API', () => {
     const fetchImplementation = async (input: string | URL | Request) => {
       const url = String(input);
       if (url.endsWith('/api/v2/auth/')) return new Response(null, { status: 204 });
-      if (url.endsWith('/api/v2/highlights/')) return new Response(JSON.stringify([{ id: 42 }]), { status: 200 });
+      if (url.endsWith('/api/v2/highlights/')) return new Response(JSON.stringify([{ id: 42, modified_highlights: [99] }]), { status: 200 });
       if (url.endsWith('/api/v3/save/')) return new Response(JSON.stringify({ id: 'doc-1', url: 'https://readwise.io/reader/doc-1' }), { status: 201 });
       return new Response('', { status: 404 });
     };
@@ -200,11 +200,43 @@ describe('application API', () => {
       author: 'Author',
       canonicalUrl: 'https://example.test/article',
     };
-    const highlight = await request(readwiseApp).post('/api/readwise/highlights').send({ ...article, text: 'Important text', note: 'Keep this' });
+    const highlight = await request(readwiseApp).post('/api/readwise/highlights').send({
+      ...article,
+      text: 'Important text',
+      note: 'Keep this',
+      startOffset: 12,
+      endOffset: 26,
+    });
+    const persistedHighlights = await request(readwiseApp).get('/api/highlights').query({ articleId: 'article-1' });
     const document = await request(readwiseApp).post('/api/readwise/documents').send(article);
     expect(highlight.status).toBe(201);
+    expect(highlight.body).toMatchObject({
+      synchronized: true,
+      highlight: { text: 'Important text', startOffset: 12, endOffset: 26, readwiseStatus: 'saved', readwiseId: '99' },
+    });
+    expect(persistedHighlights.body.highlights).toHaveLength(1);
     expect(document.status).toBe(201);
     expect(document.body.document.id).toBe('doc-1');
     expect(database.prepare('SELECT readwise_status FROM highlights').get()).toEqual({ readwise_status: 'saved' });
+  });
+
+  it('retains a local highlight when Readwise is not connected', async () => {
+    const localApp = createApp(config, { database: openMemoryDatabase() });
+    const response = await request(localApp).post('/api/readwise/highlights').send({
+      articleId: 'article-local',
+      title: 'Article',
+      author: null,
+      canonicalUrl: 'https://example.test/article',
+      text: 'Keep this locally',
+      startOffset: 4,
+      endOffset: 21,
+    });
+
+    expect(response.status).toBe(201);
+    expect(response.body).toMatchObject({
+      synchronized: false,
+      highlight: { text: 'Keep this locally', readwiseStatus: 'pending', startOffset: 4, endOffset: 21 },
+    });
+    expect(response.body.warning).toContain('connect Readwise');
   });
 });

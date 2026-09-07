@@ -47,6 +47,19 @@ export type ArticleMutation = {
   value: boolean;
 };
 
+export type SavedHighlight = {
+  id: string;
+  articleId: string;
+  text: string;
+  note: string | null;
+  startOffset: number;
+  endOffset: number;
+  readwiseStatus: 'pending' | 'saved' | 'failed';
+  readwiseId: string | null;
+  readwiseError: string | null;
+  createdAt: string;
+};
+
 export type SessionState = {
   authenticated: boolean;
   mode: 'development' | 'passkey';

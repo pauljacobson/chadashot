@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import express, { type ErrorRequestHandler, type RequestHandler } from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
-import type { ArticleMutation } from '../shared/reader.js';
+import type { ArticleMutation, SavedHighlight } from '../shared/reader.js';
 import type { AppConfig } from './config.js';
 import { developmentSession, requireDevelopmentUser } from './auth/development.js';
 import { createPasskeyAuthentication } from './auth/passkeys.js';
@@ -45,12 +45,18 @@ export function normalizeReaderServerUrl(value: string, config: AppConfig) {
 const readwiseConnectionSchema = z.object({ token: z.string().min(1).max(512) });
 const highlightSchema = z.object({
   articleId: z.string().min(1),
-  text: z.string().trim().min(1).max(8192),
+  text: z.string().trim().min(1).max(8191),
   note: z.string().trim().max(5000).optional(),
   title: z.string().min(1).max(1000),
   author: z.string().max(500).nullable(),
   canonicalUrl: z.url(),
+  startOffset: z.number().int().min(0),
+  endOffset: z.number().int().positive(),
+}).refine((value) => value.endOffset > value.startOffset, {
+  message: 'Highlight end must be after its start',
+  path: ['endOffset'],
 });
+const highlightQuerySchema = z.object({ articleId: z.string().min(1) });
 const readerDocumentSchema = z.object({
   articleId: z.string().min(1),
   title: z.string().min(1).max(1000),
@@ -195,16 +201,66 @@ export function createApp(config: AppConfig, dependencies: {
     res.type('application/x-ndjson').send(readLogExport(config));
   });
 
+  function highlightFromRow(row: {
+    id: string;
+    article_id: string;
+    text: string;
+    note: string | null;
+    start_offset: number;
+    end_offset: number;
+    readwise_status: SavedHighlight['readwiseStatus'];
+    readwise_id: string | null;
+    readwise_error: string | null;
+    created_at: string;
+  }): SavedHighlight {
+    return {
+      id: row.id,
+      articleId: row.article_id,
+      text: row.text,
+      note: row.note,
+      startOffset: row.start_offset,
+      endOffset: row.end_offset,
+      readwiseStatus: row.readwise_status,
+      readwiseId: row.readwise_id,
+      readwiseError: row.readwise_error,
+      createdAt: row.created_at,
+    };
+  }
+
+  function readHighlight(id: string) {
+    return highlightFromRow(database.prepare(`
+      SELECT id, article_id, text, note, start_offset, end_offset, readwise_status, readwise_id, readwise_error, created_at
+      FROM highlights WHERE id = ?
+    `).get(id) as Parameters<typeof highlightFromRow>[0]);
+  }
+
+  app.get('/api/highlights', requireUser, (req, res) => {
+    const { articleId } = highlightQuerySchema.parse(req.query);
+    const rows = database.prepare(`
+      SELECT id, article_id, text, note, start_offset, end_offset, readwise_status, readwise_id, readwise_error, created_at
+      FROM highlights
+      WHERE article_id = ? AND start_offset IS NOT NULL AND end_offset IS NOT NULL
+      ORDER BY start_offset ASC, created_at ASC
+    `).all(articleId) as Parameters<typeof highlightFromRow>[0][];
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ highlights: rows.map(highlightFromRow) });
+  });
+
   app.post('/api/readwise/highlights', requireUser, async (req, res) => {
     const body = highlightSchema.parse(req.body);
     const credentials = loadReadwise(database, config);
-    if (!credentials) return res.status(409).json({ error: 'Connect Readwise in Settings before saving highlights' });
     const id = newId();
     const timestamp = nowIso();
     database.prepare(`
-      INSERT INTO highlights (id, article_id, text, note, readwise_status, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'pending', ?, ?)
-    `).run(id, body.articleId, body.text, body.note ?? null, timestamp, timestamp);
+      INSERT INTO highlights (id, article_id, text, note, readwise_status, start_offset, end_offset, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
+    `).run(id, body.articleId, body.text, body.note ?? null, body.startOffset, body.endOffset, timestamp, timestamp);
+    if (!credentials) {
+      const message = 'Saved in Chadashot; connect Readwise to synchronize future highlights';
+      database.prepare('UPDATE highlights SET readwise_error = ?, updated_at = ? WHERE id = ?').run(message, nowIso(), id);
+      logger.info('Highlight saved locally without Readwise connection', { hasNote: Boolean(body.note) });
+      return res.status(201).json({ highlight: readHighlight(id), synchronized: false, warning: message });
+    }
     try {
       const readwiseId = await new ReadwiseClient(credentials, fetchImplementation).createHighlight({
         text: body.text,
@@ -212,15 +268,17 @@ export function createApp(config: AppConfig, dependencies: {
         title: body.title,
         author: body.author,
         sourceUrl: body.canonicalUrl,
+        location: body.startOffset,
       });
       database.prepare("UPDATE highlights SET readwise_status = 'saved', readwise_id = ?, updated_at = ? WHERE id = ?")
         .run(readwiseId, nowIso(), id);
       logger.info('Readwise highlight saved', { hasNote: Boolean(body.note) });
-      return res.status(201).json({ id, synchronized: true });
+      return res.status(201).json({ highlight: readHighlight(id), synchronized: true });
     } catch (error) {
-      database.prepare("UPDATE highlights SET readwise_status = 'failed', updated_at = ? WHERE id = ?").run(nowIso(), id);
+      const message = error instanceof Error ? error.message : 'Could not save highlight to Readwise';
+      database.prepare("UPDATE highlights SET readwise_status = 'failed', readwise_error = ?, updated_at = ? WHERE id = ?").run(message, nowIso(), id);
       logger.error('Readwise highlight synchronization failed', error);
-      return res.status(502).json({ error: error instanceof Error ? error.message : 'Could not save highlight to Readwise' });
+      return res.status(201).json({ highlight: readHighlight(id), synchronized: false, warning: message });
     }
   });
 
