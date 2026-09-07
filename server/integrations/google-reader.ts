@@ -80,6 +80,14 @@ export class GoogleReaderClient {
     return this.credentials.serverUrl.replace(/\/+$/, '');
   }
 
+  private async request(url: string, init?: RequestInit) {
+    try {
+      return await this.fetchImplementation(url, init);
+    } catch {
+      throw new Error('Could not reach the RSS service. Check the server URL and try again.');
+    }
+  }
+
   private async authenticate() {
     const body = new URLSearchParams({
       Email: this.credentials.email,
@@ -88,7 +96,7 @@ export class GoogleReaderClient {
       service: 'reader',
       source: 'chadashot',
     });
-    const response = await this.fetchImplementation(`${this.baseUrl}/accounts/ClientLogin`, {
+    const response = await this.request(`${this.baseUrl}/accounts/ClientLogin`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
@@ -100,7 +108,7 @@ export class GoogleReaderClient {
   }
 
   private async authorizedRequest(path: string, auth: string, init?: RequestInit) {
-    const response = await this.fetchImplementation(`${this.baseUrl}${path}`, {
+    const response = await this.request(`${this.baseUrl}${path}`, {
       ...init,
       headers: {
         Authorization: `GoogleLogin auth=${auth}`,
@@ -196,7 +204,7 @@ export class GoogleReaderClient {
     const auth = await this.authenticate();
     const token = await (await this.authorizedRequest('/reader/api/0/token', auth)).text();
     const quickAddBody = new URLSearchParams({ quickadd: feedUrl, T: token });
-    const quickAddResponse = await this.fetchImplementation(`${this.baseUrl}/reader/api/0/subscription/quickadd?output=json`, {
+    const quickAddResponse = await this.request(`${this.baseUrl}/reader/api/0/subscription/quickadd?output=json`, {
       method: 'POST',
       headers: {
         Authorization: `GoogleLogin auth=${auth}`,

@@ -111,9 +111,13 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
     }
     const credentials = { ...parsedCredentials, serverUrl };
     const client = new GoogleReaderClient(credentials, fetchImplementation);
-    await client.validateCredentials();
-    saveIntegration(database, config, 'birchfeed', credentials);
-    return res.json({ provider: 'google-reader', configured: true, serverUrl: credentials.serverUrl });
+    try {
+      await client.validateCredentials();
+      saveIntegration(database, config, 'birchfeed', credentials);
+      return res.json({ provider: 'google-reader', configured: true, serverUrl: credentials.serverUrl });
+    } catch (error) {
+      return res.status(502).json({ error: error instanceof Error ? error.message : 'Could not connect RSS service' });
+    }
   });
 
   app.put('/api/settings/readwise', requireUser, async (req, res) => {

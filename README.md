@@ -20,7 +20,7 @@ npm run dev
 
 Open `http://localhost:5173`. Local development authentication only accepts loopback requests and cannot be enabled when `NODE_ENV=production`.
 
-The fixture reader works without secrets. To connect Birchfeed or Readwise locally, add a generated `ENCRYPTION_KEY` to `.env`; enter the service credentials in the app's Settings panel rather than in the environment file.
+The fixture reader works without secrets. Local development automatically creates a private encryption key under the ignored `data/` directory when one is not supplied. Enter Birchfeed and Readwise credentials in the app's Settings panel rather than in the environment file. Production always requires an explicit `ENCRYPTION_KEY`.
 
 Run all verification checks with:
 

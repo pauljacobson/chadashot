@@ -329,6 +329,7 @@ function SettingsPanel({ session, onClose, onConnected }: { session: SessionStat
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <section className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <header><div><div className="eyebrow">Chadashot</div><h1 id="settings-title">Settings</h1></div><button aria-label="Close settings" onClick={onClose}>×</button></header>
+        {error && <div className="settings-error-banner" role="alert"><strong>Connection problem</strong><span>{error}</span></div>}
         <div className="setting-section">
           <h2>RSS service</h2>
           <div className="setting-line"><div><strong>Birchfeed or compatible service</strong><span>Google Reader compatible synchronization.</span></div><span className="setting-state">{status?.rss.configured ? 'Connected' : 'Not connected'}</span></div>
@@ -360,7 +361,6 @@ function SettingsPanel({ session, onClose, onConnected }: { session: SessionStat
           <h2>Appearance</h2>
           <div className="setting-line"><div><strong>Follow system</strong><span>The interface changes with the device light or dark theme.</span></div><span className="setting-state">Automatic</span></div>
         </div>
-        {error && <div className="auth-error" role="alert">{error}</div>}
       </section>
     </div>
   );

@@ -6,6 +6,13 @@ function jsonResponse(value: unknown) {
 }
 
 describe('Google Reader compatible Birchfeed client', () => {
+  it('turns transport failures into an actionable connection error', async () => {
+    const client = new GoogleReaderClient({
+      serverUrl: 'https://reader.example.test/api/greader.php', email: 'reader@example.test', apiKey: 'secret',
+    }, async () => { throw new TypeError('fetch failed'); });
+    await expect(client.validateCredentials()).rejects.toThrow('Could not reach the RSS service. Check the server URL and try again.');
+  });
+
   it('maps subscriptions, folders and items into the reader model', async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
