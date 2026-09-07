@@ -2,4 +2,9 @@
 .gitignore
 .env
 .env.*
-README.md
+node_modules
+dist
+coverage
+archive
+docs
+*.log
