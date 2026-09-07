@@ -23,7 +23,6 @@ export default defineRailway(() => {
       AUTH_MODE: "passkey",
       DATA_DIR: "/data",
       PORT: "8787",
-      BOOTSTRAP_TOKEN: preserve(),
       ENCRYPTION_KEY: preserve(),
     },
   });
