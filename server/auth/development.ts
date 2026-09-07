@@ -26,6 +26,7 @@ export function requireDevelopmentUser(config: AppConfig) {
       res.status(401).json({ error: 'Authentication required' });
       return;
     }
+    res.locals.user = { id: 'development-user', displayName: 'Paul' };
     next();
   };
 }

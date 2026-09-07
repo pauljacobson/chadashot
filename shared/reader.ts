@@ -62,3 +62,35 @@ export type IntegrationStatus = {
 export type ApiErrorBody = {
   error: string;
 };
+
+export type AppLogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+export type AppLogEntry = {
+  timestamp: string;
+  level: AppLogLevel;
+  message: string;
+  requestId?: string;
+  userId?: string;
+  path?: string;
+  method?: string;
+  error?: {
+    name: string;
+    message: string;
+    stack?: string;
+  };
+  data?: Record<string, unknown>;
+};
+
+export type AppLogResult = {
+  entries: AppLogEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+  stats: {
+    debug: number;
+    info: number;
+    warn: number;
+    error: number;
+    fileSizeBytes: number;
+  };
+};

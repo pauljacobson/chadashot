@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import express, { type ErrorRequestHandler } from 'express';
+import express, { type ErrorRequestHandler, type RequestHandler } from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
 import type { ArticleMutation } from '../shared/reader.js';
@@ -12,6 +12,7 @@ import { fixtureSnapshot } from './fixtures.js';
 import { BIRCHFEED_API_URL, GoogleReaderClient } from './integrations/google-reader.js';
 import { deleteIntegration, hasIntegration, loadBirchfeed, loadReadwise, saveIntegration } from './integrations/settings.js';
 import { ReadwiseClient } from './integrations/readwise.js';
+import { AppLogger, readAppLogs, readLogExport, requestLogger } from './logging.js';
 
 const mutationSchema = z.object({
   articleId: z.string().min(1),
@@ -57,6 +58,12 @@ const readerDocumentSchema = z.object({
   canonicalUrl: z.url(),
 });
 const subscriptionSchema = z.object({ feedUrl: z.url() });
+const logQuerySchema = z.object({
+  level: z.enum(['debug', 'info', 'warn', 'error']).optional(),
+  search: z.string().trim().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+  offset: z.coerce.number().int().min(0).default(0),
+});
 
 function normalizeFeedUrl(value: string) {
   const url = new URL(value);
@@ -67,11 +74,17 @@ function normalizeFeedUrl(value: string) {
   return url.toString();
 }
 
-export function createApp(config: AppConfig, dependencies: { database?: AppDatabase; fetchImplementation?: typeof fetch } = {}) {
+export function createApp(config: AppConfig, dependencies: {
+  database?: AppDatabase;
+  fetchImplementation?: typeof fetch;
+  logger?: AppLogger;
+} = {}) {
   const app = express();
   const database = dependencies.database ?? openDatabase(config.dataDir);
   const fetchImplementation = dependencies.fetchImplementation ?? fetch;
+  const logger = dependencies.logger ?? new AppLogger(config);
   app.disable('x-powered-by');
+  app.use(requestLogger(logger));
   app.use(helmet({
     contentSecurityPolicy: config.nodeEnv === 'production' ? {
       directives: {
@@ -91,7 +104,18 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
     res.json(passkeys ? passkeys.sessionState(req) : developmentSession(req, config));
   });
 
-  const requireUser = passkeys?.requireUser ?? requireDevelopmentUser(config);
+  const authenticateUser = passkeys?.requireUser ?? requireDevelopmentUser(config);
+  const requireUser: RequestHandler = (req, res, next) => {
+    authenticateUser(req, res, (error?: unknown) => {
+      if (error) {
+        next(error);
+        return;
+      }
+      const user = res.locals.user as { id?: string } | undefined;
+      if (user?.id) logger.updateContext({ userId: user.id });
+      next();
+    });
+  };
 
   app.get('/api/settings/status', requireUser, (_req, res) => {
     const readerCredentials = loadBirchfeed(database, config);
@@ -121,14 +145,17 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
     try {
       await client.validateCredentials();
       saveIntegration(database, config, 'birchfeed', credentials);
+      logger.info('RSS service connected', { provider: 'google-reader', serverHost: new URL(credentials.serverUrl).hostname });
       return res.json({ provider: 'google-reader', configured: true, serverUrl: credentials.serverUrl });
     } catch (error) {
+      logger.warn('RSS service connection failed', { reason: error instanceof Error ? error.message : 'Unknown error' });
       return res.status(502).json({ error: error instanceof Error ? error.message : 'Could not connect RSS service' });
     }
   });
 
   app.delete('/api/settings/rss', requireUser, (_req, res) => {
     const removed = deleteIntegration(database, 'birchfeed');
+    logger.info('RSS service disconnected', { removed });
     res.json({ provider: 'google-reader', configured: false, removed });
   });
 
@@ -141,15 +168,30 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
     try {
       await client.validateCredentials();
       saveIntegration(database, config, 'readwise', credentials);
+      logger.info('Readwise connected');
       return res.json({ configured: true });
     } catch (error) {
+      logger.warn('Readwise connection failed', { reason: error instanceof Error ? error.message : 'Unknown error' });
       return res.status(502).json({ error: error instanceof Error ? error.message : 'Could not connect Readwise' });
     }
   });
 
   app.delete('/api/settings/readwise', requireUser, (_req, res) => {
     const removed = deleteIntegration(database, 'readwise');
+    logger.info('Readwise disconnected', { removed });
     res.json({ configured: false, removed });
+  });
+
+  app.get('/api/logs', requireUser, (req, res) => {
+    const query = logQuerySchema.parse(req.query);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(readAppLogs(config, query));
+  });
+
+  app.get('/api/logs/export', requireUser, (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.attachment(`chadashot-logs-${new Date().toISOString().slice(0, 10)}.ndjson`);
+    res.type('application/x-ndjson').send(readLogExport(config));
   });
 
   app.post('/api/readwise/highlights', requireUser, async (req, res) => {
@@ -172,9 +214,11 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
       });
       database.prepare("UPDATE highlights SET readwise_status = 'saved', readwise_id = ?, updated_at = ? WHERE id = ?")
         .run(readwiseId, nowIso(), id);
+      logger.info('Readwise highlight saved', { hasNote: Boolean(body.note) });
       return res.status(201).json({ id, synchronized: true });
     } catch (error) {
       database.prepare("UPDATE highlights SET readwise_status = 'failed', updated_at = ? WHERE id = ?").run(nowIso(), id);
+      logger.error('Readwise highlight synchronization failed', error);
       return res.status(502).json({ error: error instanceof Error ? error.message : 'Could not save highlight to Readwise' });
     }
   });
@@ -189,8 +233,10 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
         title: body.title,
         author: body.author,
       });
+      logger.info('Document saved to Readwise Reader');
       return res.status(201).json({ articleId: body.articleId, document });
     } catch (error) {
+      logger.error('Readwise Reader document save failed', error);
       return res.status(502).json({ error: error instanceof Error ? error.message : 'Could not save document to Readwise Reader' });
     }
   });
@@ -198,7 +244,9 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
   app.get('/api/reader/snapshot', requireUser, async (_req, res) => {
     const credentials = loadBirchfeed(database, config);
     if (credentials) {
-      return res.json(await new GoogleReaderClient(credentials, fetchImplementation).snapshot());
+      const snapshot = await new GoogleReaderClient(credentials, fetchImplementation).snapshot();
+      logger.debug('RSS snapshot synchronized', { articles: snapshot.articles.length, subscriptions: snapshot.subscriptions.length });
+      return res.json(snapshot);
     }
     if (config.nodeEnv === 'production') {
       return res.status(409).json({ error: 'Connect Birchfeed in Settings before synchronizing' });
@@ -210,6 +258,7 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
     const mutation = mutationSchema.parse(req.body) satisfies ArticleMutation;
     const credentials = loadBirchfeed(database, config);
     if (credentials) await new GoogleReaderClient(credentials, fetchImplementation).mutate(mutation);
+    logger.debug('Article state synchronized', { operation: mutation.operation, value: mutation.value });
     res.status(200).json({ mutation, synchronized: true });
   });
 
@@ -217,6 +266,7 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
     const { mutations } = batchMutationSchema.parse(req.body) satisfies { mutations: ArticleMutation[] };
     const credentials = loadBirchfeed(database, config);
     if (credentials) await new GoogleReaderClient(credentials, fetchImplementation).mutateMany(mutations);
+    logger.debug('Article state batch synchronized', { mutations: mutations.length });
     res.status(200).json({ mutations, synchronized: true });
   });
 
@@ -232,8 +282,10 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
     }
     try {
       const subscription = await new GoogleReaderClient(credentials, fetchImplementation).subscribe(feedUrl);
+      logger.info('Feed subscribed', { feedHost: new URL(feedUrl).hostname });
       return res.status(201).json({ subscription, synchronized: true });
     } catch (error) {
+      logger.warn('Feed subscription failed', { reason: error instanceof Error ? error.message : 'Unknown error' });
       return res.status(502).json({ error: error instanceof Error ? error.message : 'Could not add feed' });
     }
   });
@@ -262,7 +314,7 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
       res.status(400).json({ error: 'Invalid request', issues: error.issues });
       return;
     }
-    console.error(error);
+    logger.error('Unhandled application error', error);
     res.status(500).json({ error: 'Internal server error' });
   };
   app.use(errorHandler);

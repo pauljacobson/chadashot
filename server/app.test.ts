@@ -1,8 +1,12 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import { createApp, normalizeReaderServerUrl } from './app.js';
 import { loadConfig } from './config.js';
 import { openMemoryDatabase } from './database.js';
+import { AppLogger } from './logging.js';
 
 const config = loadConfig({ NODE_ENV: 'test', AUTH_MODE: 'development' });
 
@@ -13,6 +17,35 @@ describe('application API', () => {
     const response = await request(app).get('/api/health');
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ status: 'ok' });
+    expect(response.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('returns and exports redacted application logs for an authenticated user', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'chadashot-api-logs-'));
+    const loggingConfig = loadConfig({
+      NODE_ENV: 'test',
+      AUTH_MODE: 'development',
+      LOG_LEVEL: 'debug',
+      LOG_OUTPUT: 'file',
+      LOG_FILE_PATH: path.join(directory, 'app.ndjson'),
+    });
+    const logger = new AppLogger(loggingConfig);
+    logger.error('Example integration failure', new Error('token=private-value'));
+    const loggingApp = createApp(loggingConfig, { database: openMemoryDatabase(), logger });
+
+    const response = await request(loggingApp).get('/api/logs').query({ level: 'error', search: 'integration' });
+    const exported = await request(loggingApp).get('/api/logs/export');
+
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.body.entries[0]).toMatchObject({
+      level: 'error',
+      message: 'Example integration failure',
+      error: { message: 'token=[REDACTED]' },
+    });
+    expect(exported.headers['content-disposition']).toContain('chadashot-logs-');
+    expect(exported.text).toContain('Example integration failure');
+    expect(exported.text).not.toContain('private-value');
   });
 
   it('returns the fixture-backed reader snapshot', async () => {

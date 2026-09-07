@@ -5,6 +5,8 @@ describe('loadConfig', () => {
   it('uses the local development identity outside production', () => {
     const config = loadConfig({ NODE_ENV: 'development' });
     expect(config.authMode).toBe('development');
+    expect(config.logOutput).toBe('both');
+    expect(config.logFilePath).toBe(`${config.dataDir}/logs/app.ndjson`);
   });
 
   it('uses passkeys in production', () => {

@@ -10,6 +10,10 @@ const environmentSchema = z.object({
   DATA_DIR: z.string().optional(),
   ENCRYPTION_KEY: z.string().optional(),
   BOOTSTRAP_TOKEN: z.string().optional(),
+  LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).optional(),
+  LOG_OUTPUT: z.enum(['console', 'file', 'both']).optional(),
+  LOG_FILE_PATH: z.string().optional(),
+  LOG_MAX_BYTES: z.coerce.number().int().min(64 * 1024).default(5 * 1024 * 1024),
 });
 
 export type AppConfig = {
@@ -22,6 +26,10 @@ export type AppConfig = {
   encryptionKey: string | null;
   bootstrapToken: string | null;
   relyingPartyId: string;
+  logLevel: 'debug' | 'info' | 'warn' | 'error';
+  logOutput: 'console' | 'file' | 'both';
+  logFilePath: string;
+  logMaxBytes: number;
 };
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -46,15 +54,21 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     }
   }
 
+  const dataDir = parsed.DATA_DIR ?? path.resolve(process.cwd(), 'data');
+
   return {
     nodeEnv: parsed.NODE_ENV,
     authMode,
     host: parsed.HOST,
     port: parsed.PORT,
     appOrigin,
-    dataDir: parsed.DATA_DIR ?? path.resolve(process.cwd(), 'data'),
+    dataDir,
     encryptionKey: parsed.ENCRYPTION_KEY ?? null,
     bootstrapToken: parsed.BOOTSTRAP_TOKEN ?? null,
     relyingPartyId: new URL(appOrigin).hostname,
+    logLevel: parsed.LOG_LEVEL ?? (parsed.NODE_ENV === 'test' ? 'error' : 'info'),
+    logOutput: parsed.LOG_OUTPUT ?? (parsed.NODE_ENV === 'test' ? 'console' : 'both'),
+    logFilePath: parsed.LOG_FILE_PATH ?? path.join(dataDir, 'logs', 'app.ndjson'),
+    logMaxBytes: parsed.LOG_MAX_BYTES,
   };
 }
