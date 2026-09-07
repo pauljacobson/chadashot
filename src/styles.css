@@ -725,7 +725,8 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   background: rgba(0, 0, 0, .38);
 }
 .settings-panel,
-.preferences-panel {
+.preferences-panel,
+.logs-panel {
   width: min(620px, 100%);
   max-height: min(780px, calc(100vh - 40px));
   overflow: auto;
@@ -775,11 +776,14 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 .dialog-actions button { min-height: 40px; padding: 0 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); cursor: pointer; }
 .dialog-actions .primary-action { background: var(--accent); }
 .settings-panel > header,
-.preferences-panel > header { display: flex; align-items: center; padding: 24px; border-bottom: 1px solid var(--border); }
+.preferences-panel > header,
+.logs-panel > header { display: flex; align-items: center; padding: 24px; border-bottom: 1px solid var(--border); }
 .settings-panel h1,
-.preferences-panel h1 { margin: 3px 0 0; font-size: 25px; }
+.preferences-panel h1,
+.logs-panel h1 { margin: 3px 0 0; font-size: 25px; }
 .settings-panel > header > button,
-.preferences-panel > header > button { margin-left: auto; width: 42px; height: 42px; border: 0; border-radius: 50%; background: transparent; font-size: 24px; cursor: pointer; }
+.preferences-panel > header > button,
+.logs-panel > header > button { margin-left: auto; width: 42px; height: 42px; border: 0; border-radius: 50%; background: transparent; font-size: 24px; cursor: pointer; }
 .settings-error-banner {
   display: grid;
   gap: 3px;
@@ -856,6 +860,50 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 }
 
 .preferences-note { margin: 0; padding: 15px 24px 18px; color: var(--faint); font-size: 11px; }
+
+.logs-panel { width: min(900px, 100%); height: min(780px, calc(100vh - 40px)); display: flex; flex-direction: column; overflow: hidden; }
+.logs-panel > header { flex: 0 0 auto; }
+.logs-panel > header p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
+.log-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; padding: 16px 24px 0; }
+.log-summary > div { padding: 10px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-muted); }
+.log-summary strong, .log-summary span { display: block; }
+.log-summary strong { font-size: 16px; }
+.log-summary span { margin-top: 2px; color: var(--muted); font-size: 10px; text-transform: uppercase; }
+.log-controls { display: grid; grid-template-columns: 150px minmax(180px, 1fr) auto auto; align-items: end; gap: 8px; padding: 14px 24px 8px; }
+.log-controls label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; font-weight: 650; }
+.log-controls select, .log-controls input, .log-controls button, .logs-panel footer a {
+  min-height: 38px;
+  padding: 0 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+.log-controls button { cursor: pointer; }
+.log-controls button[type="submit"] { border-color: var(--accent); background: var(--accent); color: var(--accent-contrast); }
+.log-options { display: flex; justify-content: space-between; gap: 12px; padding: 2px 24px 12px; color: var(--muted); font-size: 11px; }
+.log-options label { display: flex; align-items: center; gap: 6px; }
+.log-options input { accent-color: var(--accent); }
+.log-list { min-height: 0; flex: 1; overflow: auto; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); background: var(--background); }
+.log-entry { padding: 13px 24px; border-bottom: 1px solid var(--border); }
+.log-entry:last-child { border-bottom: 0; }
+.log-entry-main { display: grid; grid-template-columns: 58px minmax(0, 1fr) auto; align-items: center; gap: 10px; }
+.log-entry-main strong { min-width: 0; font-size: 13px; }
+.log-entry-main time { color: var(--faint); font-size: 10px; white-space: nowrap; }
+.log-level { padding: 4px 6px; border-radius: 5px; background: var(--surface-muted); color: var(--muted); font-size: 9px; font-weight: 750; letter-spacing: .05em; text-align: center; text-transform: uppercase; }
+.log-entry-error .log-level { background: color-mix(in srgb, var(--danger) 18%, var(--surface)); color: var(--danger); }
+.log-entry-warn .log-level { background: color-mix(in srgb, #c58524 18%, var(--surface)); color: color-mix(in srgb, #c58524 85%, var(--text)); }
+.log-entry-info .log-level { background: color-mix(in srgb, var(--accent) 15%, var(--surface)); color: var(--accent); }
+.log-entry-context { display: flex; align-items: baseline; gap: 7px; margin: 7px 0 0 68px; color: var(--muted); font-size: 11px; }
+.log-entry-context code { color: var(--text); }
+.log-entry details { margin: 8px 0 0 68px; color: var(--muted); font-size: 10px; }
+.log-entry summary { width: fit-content; cursor: pointer; }
+.log-entry pre { max-height: 220px; margin: 8px 0 0; padding: 10px; overflow: auto; border-radius: 7px; background: var(--surface-muted); color: var(--text); font-size: 10px; line-height: 1.5; white-space: pre-wrap; }
+.empty-logs { height: 100%; min-height: 180px; display: grid; place-content: center; gap: 5px; color: var(--muted); text-align: center; }
+.empty-logs strong { color: var(--text); }
+.logs-panel footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 24px; color: var(--faint); font-size: 10px; }
+.logs-panel footer a { min-height: 34px; display: inline-flex; align-items: center; text-decoration: none; white-space: nowrap; }
 
 .toast,
 .error-banner {
@@ -954,7 +1002,18 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   .mobile-navigation button span { font-size: 17px; }
   .mobile-navigation button.active { color: var(--accent); font-weight: 600; }
   .dialog-backdrop { padding: 0; place-items: end stretch; }
-  .settings-panel, .preferences-panel, .subscribe-panel, .mobile-feeds-panel { width: 100%; max-height: calc(100dvh - 28px); border-radius: 18px 18px 0 0; }
+  .settings-panel, .preferences-panel, .subscribe-panel, .mobile-feeds-panel, .logs-panel { width: 100%; max-height: calc(100dvh - 28px); border-radius: 18px 18px 0 0; }
+  .logs-panel { height: calc(100dvh - 28px); }
+  .log-summary { grid-template-columns: repeat(5, minmax(58px, 1fr)); padding: 12px 14px 0; overflow-x: auto; }
+  .log-controls { grid-template-columns: 120px 1fr; padding: 12px 14px 8px; }
+  .log-controls button { min-height: 42px; }
+  .log-options { padding: 3px 14px 11px; }
+  .log-entry { padding: 12px 14px; }
+  .log-entry-main { grid-template-columns: 54px minmax(0, 1fr); }
+  .log-entry-main time { grid-column: 2; }
+  .log-entry-context, .log-entry details { margin-left: 64px; }
+  .logs-panel footer { padding: 10px 14px max(10px, env(safe-area-inset-bottom)); }
+  .logs-panel footer > span { display: none; }
   .toast, .error-banner { right: 12px; bottom: 82px; }
   .error-banner { bottom: 132px; }
 }

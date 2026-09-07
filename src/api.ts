@@ -1,4 +1,4 @@
-import type { ArticleMutation, IntegrationStatus, ReaderSnapshot, SessionState } from '../shared/reader';
+import type { AppLogLevel, AppLogResult, ArticleMutation, IntegrationStatus, ReaderSnapshot, SessionState } from '../shared/reader';
 import type {
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
@@ -136,3 +136,12 @@ export function subscribeToFeed(feedUrl: string) {
     body: JSON.stringify({ feedUrl }),
   });
 }
+
+export function getAppLogs(filters: { level?: AppLogLevel; search?: string } = {}, signal?: AbortSignal) {
+  const query = new URLSearchParams({ limit: '200' });
+  if (filters.level) query.set('level', filters.level);
+  if (filters.search) query.set('search', filters.search);
+  return request<AppLogResult>(`/api/logs?${query.toString()}`, { signal });
+}
+
+export const appLogExportUrl = '/api/logs/export';

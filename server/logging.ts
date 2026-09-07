@@ -125,6 +125,8 @@ export function requestLogger(logger: AppLogger): RequestHandler {
     const startedAt = performance.now();
     res.setHeader('X-Request-Id', context.requestId ?? '');
     res.on('finish', () => {
+      const quietSuccessfulPath = res.statusCode < 400 && (context.path === '/api/health' || context.path?.startsWith('/api/logs'));
+      if (quietSuccessfulPath) return;
       const data = { statusCode: res.statusCode, durationMs: Math.round(performance.now() - startedAt) };
       logger.withContext(context, () => {
         if (res.statusCode >= 500) logger.error('Request failed', undefined, data);

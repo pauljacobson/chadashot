@@ -1,14 +1,16 @@
 import DOMPurify from 'dompurify';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react';
-import type { Article, IntegrationStatus, SessionState, Subscription } from '../shared/reader';
+import type { AppLogLevel, AppLogResult, Article, IntegrationStatus, SessionState, Subscription } from '../shared/reader';
 import {
+  appLogExportUrl,
   connectBirchfeed,
   connectReadwise,
   createReadwiseHighlight,
   disconnectReadwise,
   disconnectRssService,
   getBootstrapOptions,
+  getAppLogs,
   getIntegrationStatus,
   getLoginOptions,
   getSession,
@@ -592,6 +594,127 @@ function PreferencesPanel({ sortOrder, accentColor, onSortOrderChange, onAccentC
   );
 }
 
+function formatLogFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function LogsPanel({ onClose }: { onClose: () => void }) {
+  const [result, setResult] = useState<AppLogResult | null>(null);
+  const [level, setLevel] = useState<AppLogLevel | 'all'>('all');
+  const [search, setSearch] = useState('');
+  const [appliedSearch, setAppliedSearch] = useState('');
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    getAppLogs({
+      ...(level === 'all' ? {} : { level }),
+      ...(appliedSearch ? { search: appliedSearch } : {}),
+    }, controller.signal)
+      .then((logsResult) => {
+        setResult(logsResult);
+        setError(null);
+      })
+      .catch((logsError: unknown) => {
+        if (!controller.signal.aborted) setError(logsError instanceof Error ? logsError.message : 'Could not load application logs');
+      })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [level, appliedSearch, refreshKey]);
+
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const interval = window.setInterval(() => setRefreshKey((current) => current + 1), 15_000);
+    return () => window.clearInterval(interval);
+  }, [autoRefresh]);
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+      <section className="logs-panel" role="dialog" aria-modal="true" aria-labelledby="logs-title">
+        <header>
+          <div><div className="eyebrow">Settings</div><h1 id="logs-title">Application logs</h1><p>Review recent activity and errors without exposing stored credentials.</p></div>
+          <button aria-label="Back to settings" onClick={onClose}>×</button>
+        </header>
+        {error && <div className="settings-error-banner" role="alert"><strong>Logs unavailable</strong><span>{error}</span></div>}
+        <div className="log-summary" aria-label="Log summary">
+          {(['error', 'warn', 'info', 'debug'] as const).map((summaryLevel) => (
+            <div key={summaryLevel}><strong>{result?.stats[summaryLevel] ?? 0}</strong><span>{summaryLevel}</span></div>
+          ))}
+          <div><strong>{formatLogFileSize(result?.stats.fileSizeBytes ?? 0)}</strong><span>stored</span></div>
+        </div>
+        <form className="log-controls" onSubmit={(event) => {
+          event.preventDefault();
+          setLoading(true);
+          setError(null);
+          setAppliedSearch(search.trim());
+          setRefreshKey((current) => current + 1);
+        }}>
+          <label>Level
+            <select value={level} onChange={(event) => {
+              setLoading(true);
+              setError(null);
+              setLevel(event.target.value as AppLogLevel | 'all');
+            }}>
+              <option value="all">All levels</option>
+              <option value="error">Errors</option>
+              <option value="warn">Warnings</option>
+              <option value="info">Information</option>
+              <option value="debug">Debug</option>
+            </select>
+          </label>
+          <label className="log-search">Search
+            <input type="search" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Message, path, or request ID" />
+          </label>
+          <button type="submit">Search</button>
+          <button type="button" onClick={() => {
+            setLoading(true);
+            setError(null);
+            setRefreshKey((current) => current + 1);
+          }} disabled={loading}>{loading ? 'Loading…' : 'Refresh'}</button>
+        </form>
+        <div className="log-options">
+          <label><input type="checkbox" checked={autoRefresh} onChange={(event) => setAutoRefresh(event.target.checked)} /> Refresh every 15 seconds</label>
+          <span>{result ? `Showing ${result.entries.length} of ${result.total}` : 'Loading logs…'}</span>
+        </div>
+        <div className="log-list" aria-live="polite" aria-busy={loading}>
+          {!loading && !error && result?.entries.length === 0 && <div className="empty-logs"><strong>No matching logs</strong><span>Try another level or search term.</span></div>}
+          {result?.entries.map((entry, index) => (
+            <article className={`log-entry log-entry-${entry.level}`} key={`${entry.timestamp}-${entry.requestId ?? index}`}>
+              <div className="log-entry-main">
+                <span className="log-level">{entry.level}</span>
+                <strong>{entry.message}</strong>
+                <time dateTime={entry.timestamp}>{new Date(entry.timestamp).toLocaleString()}</time>
+              </div>
+              {(entry.method || entry.path || entry.error) && (
+                <div className="log-entry-context">
+                  {entry.method && <span>{entry.method}</span>}
+                  {entry.path && <code>{entry.path}</code>}
+                  {entry.error && <span>{entry.error.message}</span>}
+                </div>
+              )}
+              {(entry.data || entry.error?.stack || entry.requestId) && (
+                <details>
+                  <summary>Details</summary>
+                  <pre>{JSON.stringify({ requestId: entry.requestId, userId: entry.userId, error: entry.error, data: entry.data }, null, 2)}</pre>
+                </details>
+              )}
+            </article>
+          ))}
+        </div>
+        <footer>
+          <span>Logs are stored on this server and trimmed automatically.</span>
+          <a href={appLogExportUrl} download>Download NDJSON</a>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 function SettingsPanel({ session, onClose, onConnected, onRssDisconnected }: {
   session: SessionState;
   onClose: () => void;
@@ -606,6 +729,7 @@ function SettingsPanel({ session, onClose, onConnected, onRssDisconnected }: {
   const [connecting, setConnecting] = useState(false);
   const [disconnecting, setDisconnecting] = useState<'rss' | 'readwise' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [logsOpen, setLogsOpen] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -682,6 +806,8 @@ function SettingsPanel({ session, onClose, onConnected, onRssDisconnected }: {
     }
   }
 
+  if (logsOpen) return <LogsPanel onClose={() => setLogsOpen(false)} />;
+
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <section className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -711,6 +837,10 @@ function SettingsPanel({ session, onClose, onConnected, onRssDisconnected }: {
               <button className="primary-action" disabled={connecting || !readwiseToken} onClick={() => void saveReadwise()}>{connecting ? 'Checking…' : 'Connect Readwise'}</button>
             </div>
           )}
+        </div>
+        <div className="setting-section">
+          <h2>Diagnostics</h2>
+          <div className="setting-line"><div><strong>Application logs</strong><span>Review recent activity, warnings, and errors stored by this server.</span></div><button type="button" onClick={() => setLogsOpen(true)}>View logs</button></div>
         </div>
         <div className="setting-section">
           <h2>Access</h2>
