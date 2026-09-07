@@ -491,11 +491,14 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   min-height: 66px;
   display: flex;
   align-items: center;
+  gap: 12px;
   padding: 0 16px;
   border-bottom: 1px solid var(--border);
 }
 .list-header h1 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
-.list-header > span {
+.list-heading { min-width: 0; display: flex; align-items: center; }
+.list-heading h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list-heading > span {
   min-width: 24px;
   height: 21px;
   display: inline-flex;
@@ -508,6 +511,40 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   color: white;
   font-size: 11px;
 }
+.mark-all-button {
+  flex: none;
+  margin-left: auto;
+  padding: 7px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-size: 11px;
+  cursor: pointer;
+}
+.mark-all-button:hover { border-color: var(--accent); color: var(--accent); }
+.mark-all-confirmation {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-active);
+  color: var(--text);
+  font-size: 12px;
+}
+.mark-all-confirmation > span { flex: 1; }
+.mark-all-confirmation > div { display: flex; gap: 6px; }
+.mark-all-confirmation button {
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+}
+.mark-all-confirmation .primary-action { border-color: var(--accent); background: var(--accent); color: white; }
+.mark-all-confirmation button:disabled { opacity: .55; cursor: default; }
 .article-list-scroll { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; }
 .article-row { position: relative; border-bottom: 1px solid var(--border); }
 .article-row.active { background: var(--surface-active); box-shadow: inset 3px 0 var(--accent); }
@@ -536,11 +573,10 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   font-size: 12px;
   line-height: 1.45;
 }
-.unread-dot { position: absolute; right: 17px; top: 48px; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); }
+.row-read,
 .row-star {
   position: absolute;
   right: 7px;
-  bottom: 7px;
   width: 34px;
   height: 34px;
   border: 0;
@@ -549,6 +585,9 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   color: var(--muted);
   cursor: pointer;
 }
+.row-read { top: 7px; color: var(--accent); font-size: 13px; }
+.row-read[aria-pressed="true"] { color: var(--muted); }
+.row-star { bottom: 7px; }
 .row-star[aria-pressed="true"] { color: #b57a13; }
 .empty-list { padding: 32px 18px; color: var(--muted); text-align: center; }
 

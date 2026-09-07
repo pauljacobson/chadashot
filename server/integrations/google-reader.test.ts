@@ -57,6 +57,30 @@ describe('Google Reader compatible Birchfeed client', () => {
     expect(String(request?.[1]?.body)).toContain('a=user%2F-%2Fstate%2Fcom.google%2Fread');
   });
 
+  it('sends same-state article changes as one edit-tag request', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.endsWith('/token')) return new Response('csrf-token');
+      if (url.endsWith('/edit-tag')) return new Response('OK');
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const client = new GoogleReaderClient({
+      serverUrl: 'https://reader.example.test/api/greader.php', email: 'reader@example.test', apiKey: 'secret',
+    }, fetchMock);
+
+    await client.mutateMany([
+      { articleId: 'article-1', operation: 'read', value: true },
+      { articleId: 'article-2', operation: 'read', value: true },
+    ]);
+
+    const editRequests = fetchMock.mock.calls.filter(([input]) => String(input).endsWith('/edit-tag'));
+    expect(editRequests).toHaveLength(1);
+    const body = new URLSearchParams(String(editRequests[0][1]?.body));
+    expect(body.getAll('i')).toEqual(['article-1', 'article-2']);
+    expect(body.get('a')).toBe('user/-/state/com.google/read');
+  });
+
   it('subscribes through quickadd with the service write token', async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);

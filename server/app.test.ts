@@ -35,6 +35,19 @@ describe('application API', () => {
     expect(valid.body.synchronized).toBe(true);
   });
 
+  it('validates batch article mutations', async () => {
+    const invalid = await request(app).post('/api/reader/mutations/batch').send({ mutations: [] });
+    expect(invalid.status).toBe(400);
+
+    const mutations = [
+      { articleId: 'fixture-quiet-web', operation: 'read', value: true },
+      { articleId: 'fixture-careful-systems', operation: 'read', value: true },
+    ];
+    const valid = await request(app).post('/api/reader/mutations/batch').send({ mutations });
+    expect(valid.status).toBe(200);
+    expect(valid.body).toEqual({ mutations, synchronized: true });
+  });
+
   it('validates and encrypts a Birchfeed connection', async () => {
     const database = openMemoryDatabase();
     const encryptedConfig = loadConfig({

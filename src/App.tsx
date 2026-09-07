@@ -351,22 +351,54 @@ function SubscribePanel({ onClose, onSubscribed }: { onClose: () => void; onSubs
 function ArticleList({
   title,
   articles,
+  markAllCandidates,
   selectedId,
   onSelect,
+  onToggleRead,
   onToggleStar,
+  onMarkAllRead,
 }: {
   title: string;
   articles: Article[];
+  markAllCandidates?: Article[];
   selectedId: string | null;
   onSelect: (article: Article) => void;
+  onToggleRead: (article: Article) => void;
   onToggleStar: (article: Article) => void;
+  onMarkAllRead?: (articles: Article[]) => Promise<number>;
 }) {
+  const [confirmingMarkAll, setConfirmingMarkAll] = useState(false);
+  const [markingAll, setMarkingAll] = useState(false);
+  const unreadCount = markAllCandidates?.filter((article) => !article.read).length ?? 0;
+
+  async function confirmMarkAllRead() {
+    if (!onMarkAllRead || !markAllCandidates || markingAll) return;
+    setMarkingAll(true);
+    try {
+      await onMarkAllRead(markAllCandidates);
+      setConfirmingMarkAll(false);
+    } finally {
+      setMarkingAll(false);
+    }
+  }
+
   return (
     <section className="article-list" id="article-list" aria-label={`${title} articles`}>
       <header className="list-header">
-        <h1>{title}</h1>
-        <span>{articles.length}</span>
+        <div className="list-heading"><h1>{title}</h1><span>{articles.length}</span></div>
+        {onMarkAllRead && unreadCount > 0 && (
+          <button className="mark-all-button" onClick={() => setConfirmingMarkAll(true)}>✓ Mark all read</button>
+        )}
       </header>
+      {confirmingMarkAll && unreadCount > 0 && (
+        <div className="mark-all-confirmation" role="alertdialog" aria-label="Confirm mark all read">
+          <span>Mark {unreadCount} unread {unreadCount === 1 ? 'item' : 'items'} in this feed as read?</span>
+          <div>
+            <button disabled={markingAll} onClick={() => setConfirmingMarkAll(false)}>Cancel</button>
+            <button className="primary-action" disabled={markingAll} onClick={() => void confirmMarkAllRead()}>{markingAll ? 'Marking…' : 'Mark all read'}</button>
+          </div>
+        </div>
+      )}
       <div className="article-list-scroll">
         {articles.length === 0 ? <div className="empty-list">Nothing here right now.</div> : articles.map((article) => (
           <article key={article.id} className={`article-row ${selectedId === article.id ? 'active' : ''} ${article.read ? 'read' : ''}`}>
@@ -374,7 +406,9 @@ function ArticleList({
               <div className="article-meta"><strong>{article.source}</strong><span>· {article.readingMinutes} min</span><time>{formatAge(article.publishedAt)}</time></div>
               <h2>{article.title}</h2>
               <p>{article.summary}</p>
-              {!article.read && <span className="unread-dot" aria-label="Unread"></span>}
+            </button>
+            <button className="row-read" title={article.read ? 'Mark unread' : 'Mark read'} aria-label={article.read ? 'Mark article unread' : 'Mark article read'} aria-pressed={article.read} onClick={() => onToggleRead(article)}>
+              {article.read ? '○' : '●'}
             </button>
             <button className="row-star" aria-label={article.starred ? 'Remove star' : 'Star article'} aria-pressed={article.starred} onClick={() => onToggleStar(article)}>
               {article.starred ? '★' : '☆'}
@@ -855,7 +889,21 @@ export function App() {
           defaultValue={DEFAULT_PANEL_WIDTHS.sidebar}
           onResize={(sidebar) => setPanelWidths((current) => ({ ...current, sidebar }))}
         />
-        <ArticleList title={title} articles={reader.articles} selectedId={reader.selectedArticle?.id ?? null} onSelect={chooseArticle} onToggleStar={(article) => void reader.toggleStarred(article)} />
+        <ArticleList
+          key={activeFilter.kind === 'folder' || activeFilter.kind === 'feed' ? `${activeFilter.kind}:${activeFilter.id}` : activeFilter.kind}
+          title={title}
+          articles={reader.articles}
+          markAllCandidates={activeFilter.kind === 'feed' ? reader.filteredArticles : undefined}
+          selectedId={reader.selectedArticle?.id ?? null}
+          onSelect={chooseArticle}
+          onToggleRead={(article) => void reader.toggleRead(article)}
+          onToggleStar={(article) => void reader.toggleStarred(article)}
+          onMarkAllRead={activeFilter.kind === 'feed' ? async (articles) => {
+            const count = await reader.markAllRead(articles);
+            setNotice(`${count} ${count === 1 ? 'item' : 'items'} marked as read`);
+            return count;
+          } : undefined}
+        />
         <PanelResizer
           className="article-list-resizer"
           label="Resize article list"

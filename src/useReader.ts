@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Article, ArticleMutation, ReaderSnapshot } from '../shared/reader';
-import { getReaderSnapshot, sendArticleMutation } from './api';
+import { getReaderSnapshot, sendArticleMutation, sendArticleMutations } from './api';
+import { applyReadStates } from './readerState';
 
 export type ReaderFilter =
   | { kind: 'inbox' }
@@ -79,9 +80,8 @@ export function useReader(enabled = true) {
     };
   }, [enabled, synchronize]);
 
-  const articles = useMemo(() => {
+  const filteredArticles = useMemo(() => {
     if (!snapshot) return [];
-    const normalizedQuery = query.trim().toLocaleLowerCase();
     const knownFolderIds = new Set(snapshot.folders.map((folder) => folder.id));
     const uncategorizedFeedIds = new Set(snapshot.subscriptions
       .filter((subscription) => subscription.folderIds.length === 0 || !subscription.folderIds.some((folderId) => knownFolderIds.has(folderId)))
@@ -94,13 +94,19 @@ export function useReader(enabled = true) {
         || (filter.kind === 'uncategorized' && uncategorizedFeedIds.has(article.feedId))
         || (filter.kind === 'folder' && article.folderIds.includes(filter.id))
         || (filter.kind === 'feed' && article.feedId === filter.id);
-      if (!inFilter) return false;
-      if (!normalizedQuery) return true;
+      return inFilter;
+    });
+  }, [filter, snapshot]);
+
+  const articles = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    if (!normalizedQuery) return filteredArticles;
+    return filteredArticles.filter((article) => {
       return [article.title, article.source, article.author, article.summary]
         .filter(Boolean)
         .some((value) => value!.toLocaleLowerCase().includes(normalizedQuery));
     });
-  }, [filter, query, snapshot]);
+  }, [filteredArticles, query]);
 
   const selectedArticle = useMemo(
     () => snapshot?.articles.find((article) => article.id === selectedId) ?? articles[0] ?? null,
@@ -108,20 +114,50 @@ export function useReader(enabled = true) {
   );
 
   const mutate = useCallback(async (article: Article, operation: ArticleMutation['operation'], value: boolean) => {
-    setSnapshot((current) => current ? {
-      ...current,
-      articles: current.articles.map((candidate) => candidate.id === article.id ? { ...candidate, [operation]: value } : candidate),
-    } : current);
+    setSnapshot((current) => {
+      if (!current) return current;
+      if (operation === 'read') return applyReadStates(current, new Map([[article.id, value]]));
+      return {
+        ...current,
+        articles: current.articles.map((candidate) => candidate.id === article.id ? { ...candidate, starred: value } : candidate),
+      };
+    });
 
     try {
       await sendArticleMutation({ articleId: article.id, operation, value });
     } catch (mutationError) {
-      setSnapshot((current) => current ? {
-        ...current,
-        articles: current.articles.map((candidate) => candidate.id === article.id ? { ...candidate, [operation]: !value } : candidate),
-      } : current);
+      setSnapshot((current) => {
+        if (!current) return current;
+        if (operation === 'read') return applyReadStates(current, new Map([[article.id, !value]]));
+        return {
+          ...current,
+          articles: current.articles.map((candidate) => candidate.id === article.id ? { ...candidate, starred: !value } : candidate),
+        };
+      });
       setError(mutationError instanceof Error ? mutationError.message : 'Could not save change');
       setStatus(navigator.onLine ? 'error' : 'offline');
+    }
+  }, []);
+
+  const markAllRead = useCallback(async (candidates: Article[]) => {
+    const unread = candidates.filter((article) => !article.read);
+    if (unread.length === 0) return 0;
+    const optimisticStates = new Map(unread.map((article) => [article.id, true] as const));
+    setSnapshot((current) => current ? applyReadStates(current, optimisticStates) : current);
+
+    try {
+      await sendArticleMutations(unread.map((article) => ({
+        articleId: article.id,
+        operation: 'read',
+        value: true,
+      })));
+      return unread.length;
+    } catch (mutationError) {
+      const rollbackStates = new Map(unread.map((article) => [article.id, false] as const));
+      setSnapshot((current) => current ? applyReadStates(current, rollbackStates) : current);
+      setError(mutationError instanceof Error ? mutationError.message : 'Could not mark articles as read');
+      setStatus(navigator.onLine ? 'error' : 'offline');
+      throw mutationError;
     }
   }, []);
 
@@ -137,6 +173,7 @@ export function useReader(enabled = true) {
   return {
     snapshot,
     articles,
+    filteredArticles,
     selectedArticle,
     selectedId,
     filter,
@@ -150,5 +187,6 @@ export function useReader(enabled = true) {
     clear,
     toggleRead: (article: Article) => mutate(article, 'read', !article.read),
     toggleStarred: (article: Article) => mutate(article, 'starred', !article.starred),
+    markAllRead,
   };
 }

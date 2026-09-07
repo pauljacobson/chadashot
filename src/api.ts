@@ -40,6 +40,13 @@ export function sendArticleMutation(mutation: ArticleMutation) {
   });
 }
 
+export function sendArticleMutations(mutations: ArticleMutation[]) {
+  return request<{ mutations: ArticleMutation[]; synchronized: boolean }>('/api/reader/mutations/batch', {
+    method: 'POST',
+    body: JSON.stringify({ mutations }),
+  });
+}
+
 export function getBootstrapOptions(displayName: string, bootstrapToken: string) {
   return request<{ setupId: string; options: PublicKeyCredentialCreationOptionsJSON }>('/api/auth/bootstrap/options', {
     method: 'POST',

@@ -18,6 +18,9 @@ const mutationSchema = z.object({
   operation: z.enum(['read', 'starred']),
   value: z.boolean(),
 });
+const batchMutationSchema = z.object({
+  mutations: z.array(mutationSchema).min(1).max(300),
+});
 
 const birchfeedConnectionSchema = z.object({
   serverUrl: z.url(),
@@ -208,6 +211,13 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
     const credentials = loadBirchfeed(database, config);
     if (credentials) await new GoogleReaderClient(credentials, fetchImplementation).mutate(mutation);
     res.status(200).json({ mutation, synchronized: true });
+  });
+
+  app.post('/api/reader/mutations/batch', requireUser, async (req, res) => {
+    const { mutations } = batchMutationSchema.parse(req.body) satisfies { mutations: ArticleMutation[] };
+    const credentials = loadBirchfeed(database, config);
+    if (credentials) await new GoogleReaderClient(credentials, fetchImplementation).mutateMany(mutations);
+    res.status(200).json({ mutations, synchronized: true });
   });
 
   app.post('/api/subscriptions', requireUser, async (req, res) => {

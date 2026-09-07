@@ -199,17 +199,32 @@ export class GoogleReaderClient {
   }
 
   async mutate(mutation: ArticleMutation) {
+    await this.mutateMany([mutation]);
+  }
+
+  async mutateMany(mutations: ArticleMutation[]) {
     const auth = await this.authenticate();
     const token = await (await this.authorizedRequest('/reader/api/0/token', auth)).text();
-    const tag = mutation.operation === 'read'
-      ? 'user/-/state/com.google/read'
-      : 'user/-/state/com.google/starred';
-    const body = new URLSearchParams({ i: mutation.articleId, T: token, [mutation.value ? 'a' : 'r']: tag });
-    await this.authorizedRequest('/reader/api/0/edit-tag', auth, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body,
-    });
+    const groups = new Map<string, ArticleMutation[]>();
+    for (const mutation of mutations) {
+      const key = `${mutation.operation}:${mutation.value}`;
+      groups.set(key, [...(groups.get(key) ?? []), mutation]);
+    }
+
+    for (const group of groups.values()) {
+      const mutation = group[0];
+      if (!mutation) continue;
+      const tag = mutation.operation === 'read'
+        ? 'user/-/state/com.google/read'
+        : 'user/-/state/com.google/starred';
+      const body = new URLSearchParams({ T: token, [mutation.value ? 'a' : 'r']: tag });
+      for (const item of group) body.append('i', item.articleId);
+      await this.authorizedRequest('/reader/api/0/edit-tag', auth, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+      });
+    }
   }
 
   async subscribe(feedUrl: string) {
