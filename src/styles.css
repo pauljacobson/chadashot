@@ -17,9 +17,34 @@
   --accent: #39735d;
   --accent-strong: #285b48;
   --accent-soft: #dfece5;
+  --accent-contrast: #ffffff;
   --highlight: #ffe7a4;
   --danger: #a34343;
   --shadow: rgba(24, 44, 34, 0.14);
+}
+
+:root[data-accent="blue"] {
+  --accent: #356ca8;
+  --accent-strong: #255482;
+  --accent-soft: #e1ebf5;
+}
+
+:root[data-accent="violet"] {
+  --accent: #6952a3;
+  --accent-strong: #503b86;
+  --accent-soft: #ebe6f5;
+}
+
+:root[data-accent="amber"] {
+  --accent: #805500;
+  --accent-strong: #634100;
+  --accent-soft: #f4e8cd;
+}
+
+:root[data-accent="rose"] {
+  --accent: #93445c;
+  --accent-strong: #743247;
+  --accent-soft: #f4e3e8;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -38,9 +63,40 @@
     --accent: #6daf91;
     --accent-strong: #8ac4a8;
     --accent-soft: #243a30;
+    --accent-contrast: #171c19;
     --highlight: #715d28;
     --danger: #e18b8b;
     --shadow: rgba(0, 0, 0, 0.3);
+  }
+
+  :root[data-accent="green"] {
+    --accent: #78c7a4;
+    --accent-strong: #9bd6bd;
+    --accent-soft: #243a30;
+  }
+
+  :root[data-accent="blue"] {
+    --accent: #82baf0;
+    --accent-strong: #a9cff4;
+    --accent-soft: #1f3040;
+  }
+
+  :root[data-accent="violet"] {
+    --accent: #baa6f3;
+    --accent-strong: #d0c3f7;
+    --accent-soft: #302a43;
+  }
+
+  :root[data-accent="amber"] {
+    --accent: #e6b75b;
+    --accent-strong: #f0ce88;
+    --accent-soft: #3a3020;
+  }
+
+  :root[data-accent="rose"] {
+    --accent: #ee9db4;
+    --accent-strong: #f4bdcc;
+    --accent-soft: #402832;
   }
 }
 
@@ -192,7 +248,7 @@ textarea:focus-visible {
   place-items: center;
   border-radius: 8px 8px 8px 3px;
   background: var(--accent);
-  color: white;
+  color: var(--accent-contrast);
   font-size: 13px;
   font-weight: 600;
 }
@@ -396,7 +452,7 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   transition: transform .15s ease, background-color .15s ease;
 }
 .toggle-control input:checked + .toggle-track { border-color: var(--accent); background: var(--accent); }
-.toggle-control input:checked + .toggle-track > span { transform: translateX(12px); background: white; }
+.toggle-control input:checked + .toggle-track > span { transform: translateX(12px); background: var(--accent-contrast); }
 .toggle-control input:focus-visible + .toggle-track { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .nav-item {
@@ -508,7 +564,7 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   padding: 0 7px;
   border-radius: 11px;
   background: var(--accent);
-  color: white;
+  color: var(--accent-contrast);
   font-size: 11px;
 }
 .mark-all-button {
@@ -543,7 +599,7 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   color: var(--text);
   cursor: pointer;
 }
-.mark-all-confirmation .primary-action { border-color: var(--accent); background: var(--accent); color: white; }
+.mark-all-confirmation .primary-action { border-color: var(--accent); background: var(--accent); color: var(--accent-contrast); }
 .mark-all-confirmation button:disabled { opacity: .55; cursor: default; }
 .article-list-scroll { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; }
 .article-row { position: relative; border-bottom: 1px solid var(--border); }
@@ -656,7 +712,7 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   cursor: pointer;
 }
 .selection-actions .primary-action,
-.primary-action { border-color: var(--accent); background: var(--accent); color: white; }
+.primary-action { border-color: var(--accent); background: var(--accent); color: var(--accent-contrast); }
 .selection-actions button:last-child { margin-left: auto; }
 
 .dialog-backdrop {
@@ -764,6 +820,41 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 .preference-option small { display: block; }
 .preference-option strong { margin-bottom: 4px; font-size: 14px; }
 .preference-option small { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.accent-options { margin: 20px 0 0; padding: 0; border: 0; }
+.accent-options legend { margin-bottom: 10px; color: var(--muted); font-size: 12px; font-weight: 650; }
+.accent-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+.accent-option {
+  min-width: 0;
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  padding: 10px 5px 9px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.accent-option:has(input:checked) { border-color: var(--accent); background: var(--surface-active); color: var(--text); font-weight: 650; }
+.accent-option input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.accent-option:has(input:focus-visible) { outline: 3px solid color-mix(in srgb, var(--accent) 42%, transparent); outline-offset: 2px; }
+.accent-swatch { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; color: transparent; }
+.accent-option:has(input:checked) .accent-swatch { color: var(--accent-contrast); }
+.accent-option-green .accent-swatch { background: #39735d; }
+.accent-option-blue .accent-swatch { background: #356ca8; }
+.accent-option-violet .accent-swatch { background: #6952a3; }
+.accent-option-amber .accent-swatch { background: #805500; }
+.accent-option-rose .accent-swatch { background: #93445c; }
+.accent-options > small { display: block; margin-top: 10px; color: var(--faint); font-size: 11px; line-height: 1.45; }
+
+@media (prefers-color-scheme: dark) {
+  .accent-option-green .accent-swatch { background: #78c7a4; }
+  .accent-option-blue .accent-swatch { background: #82baf0; }
+  .accent-option-violet .accent-swatch { background: #baa6f3; }
+  .accent-option-amber .accent-swatch { background: #e6b75b; }
+  .accent-option-rose .accent-swatch { background: #ee9db4; }
+}
+
 .preferences-note { margin: 0; padding: 15px 24px 18px; color: var(--faint); font-size: 11px; }
 
 .toast,

@@ -22,6 +22,7 @@ import { buildFeedGroups, type FeedSortOrder, feedFaviconUrl } from './feedTree'
 
 type MobileScreen = 'list' | 'reader';
 const FEED_SORT_ORDER_KEY = 'chadashot.feedSortOrder';
+const ACCENT_COLOR_KEY = 'chadashot.accentColor';
 const PANEL_WIDTHS_KEY = 'chadashot.panelWidths';
 const DEFAULT_PANEL_WIDTHS = { sidebar: 220, articleList: 350 };
 const MIN_SIDEBAR_WIDTH = 160;
@@ -32,6 +33,14 @@ const MIN_READER_WIDTH = 300;
 const PANEL_RESIZER_WIDTH = 10;
 
 type PanelWidths = typeof DEFAULT_PANEL_WIDTHS;
+const ACCENT_COLORS = [
+  { id: 'green', label: 'Green' },
+  { id: 'blue', label: 'Blue' },
+  { id: 'violet', label: 'Violet' },
+  { id: 'amber', label: 'Amber' },
+  { id: 'rose', label: 'Rose' },
+] as const;
+type AccentColor = (typeof ACCENT_COLORS)[number]['id'];
 
 function clamp(value: number, minimum: number, maximum: number) {
   return Math.min(Math.max(value, minimum), maximum);
@@ -137,6 +146,15 @@ function savedFeedSortOrder(): FeedSortOrder {
     return localStorage.getItem(FEED_SORT_ORDER_KEY) === 'recent' ? 'recent' : 'alphabetical';
   } catch {
     return 'alphabetical';
+  }
+}
+
+function savedAccentColor(): AccentColor {
+  try {
+    const saved = localStorage.getItem(ACCENT_COLOR_KEY);
+    return ACCENT_COLORS.some((color) => color.id === saved) ? saved as AccentColor : 'green';
+  } catch {
+    return 'green';
   }
 }
 
@@ -526,9 +544,11 @@ function ReaderPane({
   );
 }
 
-function PreferencesPanel({ sortOrder, onSortOrderChange, onClose }: {
+function PreferencesPanel({ sortOrder, accentColor, onSortOrderChange, onAccentColorChange, onClose }: {
   sortOrder: FeedSortOrder;
+  accentColor: AccentColor;
   onSortOrderChange: (sortOrder: FeedSortOrder) => void;
+  onAccentColorChange: (accentColor: AccentColor) => void;
   onClose: () => void;
 }) {
   return (
@@ -552,6 +572,19 @@ function PreferencesPanel({ sortOrder, onSortOrderChange, onClose }: {
         <div className="setting-section">
           <h2>Appearance</h2>
           <div className="setting-line"><div><strong>Follow system</strong><span>The interface changes with the device light or dark theme.</span></div><span className="setting-state">Automatic</span></div>
+          <fieldset className="accent-options">
+            <legend>Accent color</legend>
+            <div className="accent-grid">
+              {ACCENT_COLORS.map((color) => (
+                <label className={`accent-option accent-option-${color.id}`} key={color.id}>
+                  <input type="radio" name="accent-color" value={color.id} checked={accentColor === color.id} onChange={() => onAccentColorChange(color.id)} />
+                  <span className="accent-swatch" aria-hidden="true"><span>✓</span></span>
+                  <span>{color.label}</span>
+                </label>
+              ))}
+            </div>
+            <small>Each option uses separate light and dark colors for readable text and controls.</small>
+          </fieldset>
         </div>
         <p className="preferences-note">Preferences are saved in this browser.</p>
       </section>
@@ -746,6 +779,7 @@ export function App() {
   const [feedsOpen, setFeedsOpen] = useState(false);
   const [unreadFeedsOnly, setUnreadFeedsOnly] = useState(false);
   const [feedSortOrder, setFeedSortOrder] = useState<FeedSortOrder>(savedFeedSortOrder);
+  const [accentColor, setAccentColor] = useState<AccentColor>(savedAccentColor);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileScreen, setMobileScreen] = useState<MobileScreen>('list');
   const [notice, setNotice] = useState('');
@@ -779,6 +813,15 @@ export function App() {
       // The preference remains available for this session if storage is unavailable.
     }
   }, [feedSortOrder]);
+
+  useEffect(() => {
+    document.documentElement.dataset.accent = accentColor;
+    try {
+      localStorage.setItem(ACCENT_COLOR_KEY, accentColor);
+    } catch {
+      // The preference remains available for this session if storage is unavailable.
+    }
+  }, [accentColor]);
 
   useEffect(() => {
     const workspace = workspaceRef.current;
@@ -962,7 +1005,7 @@ export function App() {
         onUnreadOnlyChange={setUnreadFeedsOnly}
         onClose={() => setFeedsOpen(false)}
       />}
-      {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} onSortOrderChange={setFeedSortOrder} onClose={() => setPreferencesOpen(false)} />}
+      {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} accentColor={accentColor} onSortOrderChange={setFeedSortOrder} onAccentColorChange={setAccentColor} onClose={() => setPreferencesOpen(false)} />}
       {subscribeOpen && <SubscribePanel
         onClose={() => setSubscribeOpen(false)}
         onSubscribed={async (feedUrl) => {
