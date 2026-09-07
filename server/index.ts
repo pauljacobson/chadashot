@@ -1,5 +1,8 @@
+import fs from 'node:fs';
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
+
+if (fs.existsSync('.env')) process.loadEnvFile('.env');
 
 const config = loadConfig();
 const app = createApp(config);

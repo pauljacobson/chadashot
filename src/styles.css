@@ -97,6 +97,25 @@ a { color: inherit; }
   color: var(--text);
 }
 
+.pwa-prompt {
+  position: fixed;
+  z-index: 30;
+  right: 18px;
+  bottom: 18px;
+  width: min(360px, calc(100vw - 36px));
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 14px 36px var(--shadow);
+  font-size: .86rem;
+}
+.pwa-prompt > div { margin-left: auto; display: flex; gap: 7px; }
+.pwa-prompt button { min-height: 34px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-muted); cursor: pointer; }
+
 button:focus-visible,
 a:focus-visible,
 input:focus-visible,
