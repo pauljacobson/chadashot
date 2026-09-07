@@ -77,3 +77,36 @@ export function connectBirchfeed(email: string, apiKey: string) {
     body: JSON.stringify({ email, apiKey }),
   });
 }
+
+export function connectReadwise(token: string) {
+  return request<{ configured: true }>('/api/settings/readwise', {
+    method: 'PUT',
+    body: JSON.stringify({ token }),
+  });
+}
+
+export function createReadwiseHighlight(article: {
+  articleId: string;
+  text: string;
+  note?: string;
+  title: string;
+  author: string | null;
+  canonicalUrl: string;
+}) {
+  return request<{ id: string; synchronized: true }>('/api/readwise/highlights', {
+    method: 'POST',
+    body: JSON.stringify(article),
+  });
+}
+
+export function saveReadwiseDocument(article: {
+  articleId: string;
+  title: string;
+  author: string | null;
+  canonicalUrl: string;
+}) {
+  return request<{ articleId: string; document: { id: string; url: string } }>('/api/readwise/documents', {
+    method: 'POST',
+    body: JSON.stringify(article),
+  });
+}

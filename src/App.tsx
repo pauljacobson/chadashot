@@ -2,7 +2,18 @@ import DOMPurify from 'dompurify';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Article, IntegrationStatus, SessionState } from '../shared/reader';
-import { connectBirchfeed, getBootstrapOptions, getIntegrationStatus, getLoginOptions, getSession, verifyBootstrap, verifyLogin } from './api';
+import {
+  connectBirchfeed,
+  connectReadwise,
+  createReadwiseHighlight,
+  getBootstrapOptions,
+  getIntegrationStatus,
+  getLoginOptions,
+  getSession,
+  saveReadwiseDocument,
+  verifyBootstrap,
+  verifyLogin,
+} from './api';
 import { type ReaderFilter, type SyncStatus, useReader } from './useReader';
 
 type MobileScreen = 'list' | 'reader';
@@ -128,17 +139,22 @@ function ReaderPane({
   onToggleStar,
   onToggleRead,
   onNotify,
+  onHighlight,
+  onSaveToReader,
 }: {
   article: Article | null;
   onBack: () => void;
   onToggleStar: (article: Article) => void;
   onToggleRead: (article: Article) => void;
   onNotify: (message: string) => void;
+  onHighlight: (article: Article, text: string, note?: string) => Promise<void>;
+  onSaveToReader: (article: Article) => Promise<void>;
 }) {
   const contentRef = useRef<HTMLDivElement>(null);
   const [selection, setSelection] = useState('');
   const [noteOpen, setNoteOpen] = useState(false);
   const [note, setNote] = useState('');
+  const [savingAction, setSavingAction] = useState<'highlight' | 'document' | null>(null);
   const sanitized = useMemo(() => DOMPurify.sanitize(article?.contentHtml ?? ''), [article?.contentHtml]);
 
   function captureSelection() {
@@ -152,10 +168,30 @@ function ReaderPane({
     setSelection(current.toString().trim().slice(0, 8191));
   }
 
-  function saveHighlight() {
-    if (!selection) return;
-    onNotify(note ? 'Highlight and note saved locally' : 'Highlight saved locally');
-    setNoteOpen(false);
+  async function saveHighlight() {
+    if (!selection || !article) return;
+    setSavingAction('highlight');
+    try {
+      await onHighlight(article, selection, note || undefined);
+      setNoteOpen(false);
+      setSelection('');
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : 'Could not save highlight');
+    } finally {
+      setSavingAction(null);
+    }
+  }
+
+  async function saveDocument() {
+    if (!article) return;
+    setSavingAction('document');
+    try {
+      await onSaveToReader(article);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : 'Could not save to Reader');
+    } finally {
+      setSavingAction(null);
+    }
   }
 
   if (!article) {
@@ -169,7 +205,7 @@ function ReaderPane({
         <button aria-label={article.read ? 'Mark unread' : 'Mark read'} onClick={() => onToggleRead(article)}>{article.read ? '○ Unread' : '● Read'}</button>
         <span className="toolbar-spacer"></span>
         <button aria-label={article.starred ? 'Remove star' : 'Star article'} aria-pressed={article.starred} onClick={() => onToggleStar(article)}>{article.starred ? '★ Starred' : '☆ Star'}</button>
-        <button onClick={() => onNotify('Reader connection will be configured in Settings')}>↗ Save to Reader</button>
+        <button disabled={savingAction !== null} onClick={() => void saveDocument()}>↗ {savingAction === 'document' ? 'Saving…' : 'Save to Reader'}</button>
         <a className="toolbar-link" href={article.canonicalUrl} target="_blank" rel="noreferrer">Open original</a>
       </header>
       <div className="reading-scroll">
@@ -192,7 +228,7 @@ function ReaderPane({
           <div className="selection-preview">“{selection}”</div>
           {noteOpen && <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Why does this matter?" aria-label="Highlight note" autoFocus />}
           <div className="selection-actions">
-            <button className="primary-action" onClick={saveHighlight}>{noteOpen ? 'Save highlight + note' : 'Highlight'}</button>
+            <button className="primary-action" disabled={savingAction !== null} onClick={() => void saveHighlight()}>{savingAction === 'highlight' ? 'Saving…' : noteOpen ? 'Save highlight + note' : 'Highlight'}</button>
             {!noteOpen && <button onClick={() => setNoteOpen(true)}>Add note</button>}
             <button onClick={() => { void navigator.clipboard.writeText(selection); onNotify('Copied selection'); }}>Copy</button>
             <button aria-label="Close selection actions" onClick={() => setSelection('')}>×</button>
@@ -207,6 +243,7 @@ function SettingsPanel({ session, onClose, onConnected }: { session: SessionStat
   const [status, setStatus] = useState<IntegrationStatus | null>(null);
   const [email, setEmail] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const [readwiseToken, setReadwiseToken] = useState('');
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -233,6 +270,20 @@ function SettingsPanel({ session, onClose, onConnected }: { session: SessionStat
     }
   }
 
+  async function saveReadwise() {
+    setConnecting(true);
+    setError(null);
+    try {
+      await connectReadwise(readwiseToken);
+      setStatus((current) => current ? { ...current, readwise: { configured: true } } : current);
+      setReadwiseToken('');
+    } catch (connectionError) {
+      setError(connectionError instanceof Error ? connectionError.message : 'Could not connect Readwise');
+    } finally {
+      setConnecting(false);
+    }
+  }
+
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <section className="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -250,7 +301,13 @@ function SettingsPanel({ session, onClose, onConnected }: { session: SessionStat
         </div>
         <div className="setting-section">
           <h2>Readwise</h2>
-          <div className="setting-line"><div><strong>Not connected</strong><span>Add a token to enable highlights and Save to Reader.</span></div><button>Connect</button></div>
+          <div className="setting-line"><div><strong>Readwise and Reader</strong><span>Highlights and saved documents remain separate actions.</span></div><span className="setting-state">{status?.readwise.configured ? 'Connected' : 'Not connected'}</span></div>
+          {!status?.readwise.configured && (
+            <div className="connection-form">
+              <label>Readwise access token<input type="password" value={readwiseToken} onChange={(event) => setReadwiseToken(event.target.value)} autoComplete="off" /></label>
+              <button className="primary-action" disabled={connecting || !readwiseToken} onClick={() => void saveReadwise()}>{connecting ? 'Checking…' : 'Connect Readwise'}</button>
+            </div>
+          )}
         </div>
         <div className="setting-section">
           <h2>Access</h2>
@@ -398,7 +455,34 @@ export function App() {
       <div className="workspace">
         <Navigation snapshot={reader.snapshot} filter={reader.filter} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} status={reader.status} />
         <ArticleList title={title} articles={reader.articles} selectedId={reader.selectedArticle?.id ?? null} onSelect={chooseArticle} onToggleStar={(article) => void reader.toggleStarred(article)} />
-        <ReaderPane key={reader.selectedArticle?.id ?? 'empty-reader'} article={reader.selectedArticle} onBack={() => setMobileScreen('list')} onToggleRead={(article) => void reader.toggleRead(article)} onToggleStar={(article) => void reader.toggleStarred(article)} onNotify={setNotice} />
+        <ReaderPane
+          key={reader.selectedArticle?.id ?? 'empty-reader'}
+          article={reader.selectedArticle}
+          onBack={() => setMobileScreen('list')}
+          onToggleRead={(article) => void reader.toggleRead(article)}
+          onToggleStar={(article) => void reader.toggleStarred(article)}
+          onNotify={setNotice}
+          onHighlight={async (article, text, note) => {
+            await createReadwiseHighlight({
+              articleId: article.id,
+              text,
+              note,
+              title: article.title,
+              author: article.author,
+              canonicalUrl: article.canonicalUrl,
+            });
+            setNotice(note ? 'Highlight and note saved to Readwise' : 'Highlight saved to Readwise');
+          }}
+          onSaveToReader={async (article) => {
+            await saveReadwiseDocument({
+              articleId: article.id,
+              title: article.title,
+              author: article.author,
+              canonicalUrl: article.canonicalUrl,
+            });
+            setNotice('Article saved to Readwise Reader');
+          }}
+        />
       </div>
       <nav className="mobile-navigation" aria-label="Primary navigation">
         <button className={reader.filter.kind === 'inbox' ? 'active' : ''} onClick={() => chooseFilter({ kind: 'inbox' })}><span>●</span>Inbox</button>

@@ -52,4 +52,35 @@ describe('application API', () => {
     const stored = database.prepare('SELECT encrypted_config FROM integrations WHERE kind = ?').get('birchfeed') as { encrypted_config: string };
     expect(stored.encrypted_config).not.toContain('birchfeed-secret');
   });
+
+  it('saves highlights and documents through separate Readwise actions', async () => {
+    const database = openMemoryDatabase();
+    const encryptedConfig = loadConfig({
+      NODE_ENV: 'test',
+      AUTH_MODE: 'development',
+      ENCRYPTION_KEY: Buffer.alloc(32, 3).toString('base64'),
+    });
+    const fetchImplementation = async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/api/v2/auth/')) return new Response(null, { status: 204 });
+      if (url.endsWith('/api/v2/highlights/')) return new Response(JSON.stringify([{ id: 42 }]), { status: 200 });
+      if (url.endsWith('/api/v3/save/')) return new Response(JSON.stringify({ id: 'doc-1', url: 'https://readwise.io/reader/doc-1' }), { status: 201 });
+      return new Response('', { status: 404 });
+    };
+    const readwiseApp = createApp(encryptedConfig, { database, fetchImplementation });
+    expect((await request(readwiseApp).put('/api/settings/readwise').send({ token: 'readwise-secret' })).status).toBe(200);
+
+    const article = {
+      articleId: 'article-1',
+      title: 'Article',
+      author: 'Author',
+      canonicalUrl: 'https://example.test/article',
+    };
+    const highlight = await request(readwiseApp).post('/api/readwise/highlights').send({ ...article, text: 'Important text', note: 'Keep this' });
+    const document = await request(readwiseApp).post('/api/readwise/documents').send(article);
+    expect(highlight.status).toBe(201);
+    expect(document.status).toBe(201);
+    expect(document.body.document.id).toBe('doc-1');
+    expect(database.prepare('SELECT readwise_status FROM highlights').get()).toEqual({ readwise_status: 'saved' });
+  });
 });

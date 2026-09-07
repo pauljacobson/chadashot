@@ -7,10 +7,11 @@ import type { ArticleMutation } from '../shared/reader.js';
 import type { AppConfig } from './config.js';
 import { developmentSession, requireDevelopmentUser } from './auth/development.js';
 import { createPasskeyAuthentication } from './auth/passkeys.js';
-import { openDatabase, type AppDatabase } from './database.js';
+import { newId, nowIso, openDatabase, type AppDatabase } from './database.js';
 import { fixtureSnapshot } from './fixtures.js';
 import { GoogleReaderClient } from './integrations/google-reader.js';
-import { hasIntegration, loadBirchfeed, saveIntegration } from './integrations/settings.js';
+import { hasIntegration, loadBirchfeed, loadReadwise, saveIntegration } from './integrations/settings.js';
+import { ReadwiseClient } from './integrations/readwise.js';
 
 const mutationSchema = z.object({
   articleId: z.string().min(1),
@@ -21,6 +22,22 @@ const mutationSchema = z.object({
 const birchfeedConnectionSchema = z.object({
   email: z.email(),
   apiKey: z.string().min(1).max(512),
+});
+
+const readwiseConnectionSchema = z.object({ token: z.string().min(1).max(512) });
+const highlightSchema = z.object({
+  articleId: z.string().min(1),
+  text: z.string().trim().min(1).max(8192),
+  note: z.string().trim().max(5000).optional(),
+  title: z.string().min(1).max(1000),
+  author: z.string().max(500).nullable(),
+  canonicalUrl: z.url(),
+});
+const readerDocumentSchema = z.object({
+  articleId: z.string().min(1),
+  title: z.string().min(1).max(1000),
+  author: z.string().max(500).nullable(),
+  canonicalUrl: z.url(),
 });
 
 export function createApp(config: AppConfig, dependencies: { database?: AppDatabase; fetchImplementation?: typeof fetch } = {}) {
@@ -61,6 +78,64 @@ export function createApp(config: AppConfig, dependencies: { database?: AppDatab
     await client.validateCredentials();
     saveIntegration(database, config, 'birchfeed', credentials);
     return res.json({ provider: 'birchfeed', configured: true });
+  });
+
+  app.put('/api/settings/readwise', requireUser, async (req, res) => {
+    if (!config.encryptionKey) {
+      return res.status(503).json({ error: 'Set ENCRYPTION_KEY before connecting Readwise' });
+    }
+    const credentials = readwiseConnectionSchema.parse(req.body);
+    const client = new ReadwiseClient(credentials, fetchImplementation);
+    try {
+      await client.validateCredentials();
+      saveIntegration(database, config, 'readwise', credentials);
+      return res.json({ configured: true });
+    } catch (error) {
+      return res.status(502).json({ error: error instanceof Error ? error.message : 'Could not connect Readwise' });
+    }
+  });
+
+  app.post('/api/readwise/highlights', requireUser, async (req, res) => {
+    const body = highlightSchema.parse(req.body);
+    const credentials = loadReadwise(database, config);
+    if (!credentials) return res.status(409).json({ error: 'Connect Readwise in Settings before saving highlights' });
+    const id = newId();
+    const timestamp = nowIso();
+    database.prepare(`
+      INSERT INTO highlights (id, article_id, text, note, readwise_status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, 'pending', ?, ?)
+    `).run(id, body.articleId, body.text, body.note ?? null, timestamp, timestamp);
+    try {
+      const readwiseId = await new ReadwiseClient(credentials, fetchImplementation).createHighlight({
+        text: body.text,
+        note: body.note,
+        title: body.title,
+        author: body.author,
+        sourceUrl: body.canonicalUrl,
+      });
+      database.prepare("UPDATE highlights SET readwise_status = 'saved', readwise_id = ?, updated_at = ? WHERE id = ?")
+        .run(readwiseId, nowIso(), id);
+      return res.status(201).json({ id, synchronized: true });
+    } catch (error) {
+      database.prepare("UPDATE highlights SET readwise_status = 'failed', updated_at = ? WHERE id = ?").run(nowIso(), id);
+      return res.status(502).json({ error: error instanceof Error ? error.message : 'Could not save highlight to Readwise' });
+    }
+  });
+
+  app.post('/api/readwise/documents', requireUser, async (req, res) => {
+    const body = readerDocumentSchema.parse(req.body);
+    const credentials = loadReadwise(database, config);
+    if (!credentials) return res.status(409).json({ error: 'Connect Readwise in Settings before saving to Reader' });
+    try {
+      const document = await new ReadwiseClient(credentials, fetchImplementation).saveDocument({
+        url: body.canonicalUrl,
+        title: body.title,
+        author: body.author,
+      });
+      return res.status(201).json({ articleId: body.articleId, document });
+    } catch (error) {
+      return res.status(502).json({ error: error instanceof Error ? error.message : 'Could not save document to Readwise Reader' });
+    }
   });
 
   app.get('/api/reader/snapshot', requireUser, async (_req, res) => {
