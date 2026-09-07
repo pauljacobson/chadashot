@@ -49,6 +49,7 @@ html, body, #root { min-width: 320px; min-height: 100%; margin: 0; }
 body { background: var(--background); color: var(--text); }
 button, input, textarea { font: inherit; }
 button { color: inherit; }
+button:disabled { opacity: .48; cursor: not-allowed !important; }
 a { color: inherit; }
 
 .auth-screen {
