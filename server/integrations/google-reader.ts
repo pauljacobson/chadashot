@@ -42,6 +42,18 @@ const streamSchema = z.object({
   continuation: z.coerce.string().min(1).optional(),
 });
 
+const itemIdsSchema = z.object({
+  itemRefs: z.array(z.object({ id: z.string() })),
+  continuation: z.coerce.string().min(1).optional(),
+});
+
+const unreadCountSchema = z.object({
+  unreadcounts: z.array(z.object({
+    id: z.string(),
+    count: z.coerce.number().int().nonnegative(),
+  })),
+});
+
 const STREAM_PAGE_SIZE = 1_000;
 
 const quickAddSchema = z.object({
@@ -74,6 +86,14 @@ function publishedAt(item: z.infer<typeof streamItemSchema>) {
   if (item.updated) return new Date(item.updated * 1000).toISOString();
   if (item.timestampUsec) return new Date(Number(item.timestampUsec) / 1000).toISOString();
   return new Date(0).toISOString();
+}
+
+function comparableItemId(id: string) {
+  const googleReaderPrefix = 'tag:google.com,2005:reader/item/';
+  if (!id.startsWith(googleReaderPrefix)) return id;
+  const hexadecimalId = id.slice(googleReaderPrefix.length);
+  if (!/^[0-9a-f]+$/i.test(hexadecimalId)) return id;
+  return BigInt(`0x${hexadecimalId}`).toString(10);
 }
 
 export class GoogleReaderClient {
@@ -171,13 +191,49 @@ export class GoogleReaderClient {
     return items;
   }
 
+  private async allStateItemIds(auth: string, state: 'unread' | 'starred') {
+    const itemIds = new Set<string>();
+    const continuationTokens = new Set<string>();
+    let continuation: string | undefined;
+
+    do {
+      const query = new URLSearchParams({
+        output: 'json',
+        n: String(STREAM_PAGE_SIZE),
+        s: state === 'unread'
+          ? 'user/-/state/com.google/reading-list'
+          : 'user/-/state/com.google/starred',
+      });
+      if (state === 'unread') query.set('xt', 'user/-/state/com.google/read');
+      if (continuation) query.set('c', continuation);
+      const response = await this.authorizedRequest(`/reader/api/0/stream/items/ids?${query}`, auth);
+      const page = itemIdsSchema.parse(await response.json());
+      for (const item of page.itemRefs) itemIds.add(comparableItemId(item.id));
+
+      const nextContinuation = page.continuation;
+      if (!nextContinuation) break;
+      if (continuationTokens.has(nextContinuation)) {
+        throw new Error('RSS service returned a repeating continuation token');
+      }
+      continuationTokens.add(nextContinuation);
+      continuation = nextContinuation;
+    } while (continuation);
+
+    return itemIds;
+  }
+
   async snapshot(): Promise<ReaderSnapshot> {
     const auth = await this.authenticate();
-    const [subscriptionsResponse, streamItems] = await Promise.all([
+    const [subscriptionsResponse, streamItems, unreadItemIds, starredItemIds, unreadCountResponse] = await Promise.all([
       this.authorizedRequest('/reader/api/0/subscription/list?output=json', auth),
       this.allStreamItems(auth),
+      this.allStateItemIds(auth, 'unread'),
+      this.allStateItemIds(auth, 'starred'),
+      this.authorizedRequest('/reader/api/0/unread-count?output=json', auth),
     ]);
     const subscriptionsResult = subscriptionListSchema.parse(await subscriptionsResponse.json());
+    const unreadCounts = new Map(unreadCountSchema.parse(await unreadCountResponse.json()).unreadcounts
+      .map((entry) => [entry.id, entry.count] as const));
 
     const subscriptions = subscriptionsResult.subscriptions.map((subscription) => ({
       id: subscription.id,
@@ -186,7 +242,7 @@ export class GoogleReaderClient {
       siteUrl: subscription.htmlUrl ?? null,
       iconUrl: this.iconUrl(subscription.iconUrl),
       folderIds: subscription.categories.map((category) => folderId(category.id)),
-      unreadCount: 0,
+      unreadCount: unreadCounts.get(subscription.id) ?? 0,
     }));
     const subscriptionsById = new Map(subscriptions.map((subscription) => [subscription.id, subscription]));
 
@@ -194,8 +250,7 @@ export class GoogleReaderClient {
       const html = item.content?.content ?? item.summary?.content ?? '';
       const text = plainText(html);
       const subscription = subscriptionsById.get(item.origin.streamId);
-      const read = item.categories.includes('user/-/state/com.google/read');
-      if (subscription && !read) subscription.unreadCount += 1;
+      const comparableId = comparableItemId(item.id);
       return {
         id: item.id,
         feedId: item.origin.streamId,
@@ -208,8 +263,8 @@ export class GoogleReaderClient {
         readingMinutes: Math.max(1, Math.ceil(text.split(/\s+/).filter(Boolean).length / 220)),
         summary: text.slice(0, 240),
         contentHtml: html,
-        read,
-        starred: item.categories.includes('user/-/state/com.google/starred'),
+        read: !unreadItemIds.has(comparableId),
+        starred: starredItemIds.has(comparableId),
       };
     });
 
@@ -220,7 +275,8 @@ export class GoogleReaderClient {
         folderMap.set(id, {
           id,
           title: category.label ?? category.id.split('/').at(-1) ?? 'Folder',
-          unreadCount: (folderMap.get(id)?.unreadCount ?? 0) + (subscriptionsById.get(source.id)?.unreadCount ?? 0),
+          unreadCount: unreadCounts.get(category.id)
+            ?? (folderMap.get(id)?.unreadCount ?? 0) + (subscriptionsById.get(source.id)?.unreadCount ?? 0),
         });
       }
     }

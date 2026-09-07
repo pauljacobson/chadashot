@@ -21,9 +21,17 @@ describe('Google Reader compatible Birchfeed client', () => {
         id: 'feed/https://example.test/feed', title: 'Example', url: 'https://example.test/feed', htmlUrl: 'https://example.test', iconUrl: '../f.php?h=abc',
         categories: [{ id: 'user/-/label/Tech', label: 'Tech' }],
       }] });
+      if (url.includes('/unread-count')) return jsonResponse({ unreadcounts: [
+        { id: 'feed/https://example.test/feed', count: 1 },
+        { id: 'user/-/label/Tech', count: 1 },
+      ] });
+      if (url.includes('/stream/items/ids')) {
+        const state = new URL(url).searchParams.get('s');
+        return jsonResponse({ itemRefs: state?.endsWith('/starred') ? [{ id: '2748' }] : [{ id: '2748' }] });
+      }
       if (url.includes('/stream/contents/')) return jsonResponse({ items: [{
-        id: 'tag:google.com,2005:reader/item/abc', title: 'A careful web', author: 'Author', published: 1_700_000_000,
-        categories: ['user/-/state/com.google/starred'], canonical: [{ href: 'https://example.test/article' }],
+        id: 'tag:google.com,2005:reader/item/0000000000000abc', title: 'A careful web', author: 'Author', published: 1_700_000_000,
+        categories: [], canonical: [{ href: 'https://example.test/article' }],
         content: { content: '<p>A useful article with a few words.</p>' },
         origin: { streamId: 'feed/https://example.test/feed', title: 'Example' },
       }] });
@@ -47,6 +55,11 @@ describe('Google Reader compatible Birchfeed client', () => {
       if (url.pathname.includes('/subscription/list')) return jsonResponse({ subscriptions: [{
         id: 'feed/1', title: 'Example', categories: [],
       }] });
+      if (url.pathname.includes('/unread-count')) return jsonResponse({ unreadcounts: [{ id: 'feed/1', count: 2 }] });
+      if (url.pathname.includes('/stream/items/ids')) {
+        const state = url.searchParams.get('s');
+        return jsonResponse({ itemRefs: state?.endsWith('/starred') ? [] : [{ id: '1' }, { id: '2' }] });
+      }
       if (url.pathname.includes('/stream/contents/')) {
         const continuation = url.searchParams.get('c');
         const article = (id: string) => ({
@@ -79,6 +92,8 @@ describe('Google Reader compatible Birchfeed client', () => {
       const url = String(input);
       if (url.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
       if (url.includes('/subscription/list')) return jsonResponse({ subscriptions: [] });
+      if (url.includes('/unread-count')) return jsonResponse({ unreadcounts: [] });
+      if (url.includes('/stream/items/ids')) return jsonResponse({ itemRefs: [] });
       if (url.includes('/stream/contents/')) return jsonResponse({ items: [], continuation: 'repeated' });
       throw new Error(`Unexpected URL: ${url}`);
     });
