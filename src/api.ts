@@ -1,4 +1,4 @@
-import type { AccountSecurityState, AppLogLevel, AppLogResult, ArticleMutation, IntegrationStatus, ReaderArticleBody, ReaderArticlePage, ReaderChangesPage, ReaderInitializationState, ReaderMarkReadJobRequest, ReaderMarkReadJobStatus, ReaderNavigation, ReaderSnapshot, ReaderSynchronizationStatus, SavedHighlight, SessionState } from '../shared/reader';
+import type { AccountSecurityState, AppLogLevel, AppLogResult, ArticleMutation, IntegrationStatus, ReaderArticleBody, ReaderArticlePage, ReaderChangesPage, ReaderInitializationState, ReaderMarkReadJobRequest, ReaderMarkReadJobStatus, ReaderNavigation, ReaderRuntimeConfig, ReaderSnapshot, ReaderSynchronizationStatus, SavedHighlight, SessionState } from '../shared/reader';
 import type {
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
@@ -52,6 +52,10 @@ export async function getReaderSnapshot(signal?: AbortSignal) {
       : `Reader cache is initializing${progress}; retry shortly`, 202);
   }
   return result as ReaderSnapshot;
+}
+
+export function getReaderRuntimeConfig(signal?: AbortSignal) {
+  return request<ReaderRuntimeConfig>('/api/reader/config', { signal });
 }
 
 export function getReaderNavigation(signal?: AbortSignal) {

@@ -15,6 +15,7 @@ const environmentSchema = z.object({
   LOG_FILE_PATH: z.string().optional(),
   LOG_MAX_BYTES: z.coerce.number().int().min(64 * 1024).default(5 * 1024 * 1024),
   READER_SYNC_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(10 * 60 * 1_000).default(120_000),
+  READER_CLIENT_PATH: z.enum(['paginated', 'snapshot']).default('paginated'),
   READER_CACHE_ENABLED: z.enum(['true', 'false']).default('true'),
   READER_SYNC_LEASE_MS: z.coerce.number().int().min(5_000).max(10 * 60 * 1_000).default(45_000),
   READER_ROUTINE_SYNC_INTERVAL_MS: z.coerce.number().int().min(0).max(60 * 60 * 1_000).default(180_000),
@@ -39,6 +40,7 @@ export type AppConfig = {
   logFilePath: string;
   logMaxBytes: number;
   readerSyncTimeoutMs: number;
+  readerClientPath: 'paginated' | 'snapshot';
   readerCacheEnabled: boolean;
   readerSyncLeaseMs: number;
   readerRoutineSyncIntervalMs: number;
@@ -86,6 +88,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     logFilePath: parsed.LOG_FILE_PATH ?? path.join(dataDir, 'logs', 'app.ndjson'),
     logMaxBytes: parsed.LOG_MAX_BYTES,
     readerSyncTimeoutMs: parsed.READER_SYNC_TIMEOUT_MS,
+    readerClientPath: parsed.READER_CLIENT_PATH,
     readerCacheEnabled: parsed.READER_CACHE_ENABLED === 'true',
     readerSyncLeaseMs: parsed.READER_SYNC_LEASE_MS,
     readerRoutineSyncIntervalMs: parsed.READER_ROUTINE_SYNC_INTERVAL_MS,

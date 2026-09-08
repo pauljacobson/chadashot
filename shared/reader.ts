@@ -80,6 +80,10 @@ export type ReaderSynchronizationStatus = {
   versions: ReaderVersions;
 };
 
+export type ReaderRuntimeConfig = {
+  path: 'paginated' | 'snapshot';
+};
+
 export type Subscription = {
   id: string;
   title: string;

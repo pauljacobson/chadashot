@@ -7,6 +7,8 @@ import {
   getReaderArticles,
   getReaderChanges,
   getReaderNavigation,
+  getReaderRuntimeConfig,
+  getReaderSnapshot,
   getReaderSynchronizationStatus,
   getMarkReadJobs,
   requestReaderRefresh,
@@ -25,6 +27,7 @@ import {
   queuedMarkReadJobs,
   reconcileSnapshotWithLocalMutations,
   requestPersistentStorage,
+  saveCachedSnapshot,
   saveReaderArticlePage,
   saveReaderBody,
   saveReaderChangeToken,
@@ -130,6 +133,7 @@ export function useReader(userId?: string) {
   const [loadedBodies, setLoadedBodies] = useState(() => new Map<string, string>());
   const [remoteUnreadCount, setRemoteUnreadCount] = useState<number | null>(null);
   const [markReadJobs, setMarkReadJobs] = useState<ReaderMarkReadJobStatus[]>([]);
+  const [readerPath, setReaderPath] = useState<'paginated' | 'snapshot' | null>(null);
   const lastSync = useRef(0);
   const activeRequest = useRef<AbortController | null>(null);
   const currentSnapshot = useRef<ReaderSnapshot | null>(null);
@@ -141,7 +145,11 @@ export function useReader(userId?: string) {
 
   const refreshPendingCount = useCallback(async () => {
     const accountKey = currentCache.current?.accountKey;
-    const [mutations, jobs] = await Promise.all([queuedArticleMutations(accountKey), queuedMarkReadJobs(accountKey)]);
+    const scopedAccountKey = accountKey?.startsWith('legacy:') ? undefined : accountKey;
+    const [mutations, jobs] = await Promise.all([
+      queuedArticleMutations(scopedAccountKey),
+      queuedMarkReadJobs(scopedAccountKey),
+    ]);
     setPendingMutations(mutations.length + jobs.length);
   }, []);
 
@@ -287,6 +295,55 @@ export function useReader(userId?: string) {
     activeRequest.current = controller;
     setStatus('syncing');
     try {
+      const runtime = await getReaderRuntimeConfig(controller.signal);
+      setReaderPath(runtime.path);
+      if (runtime.path === 'snapshot') {
+        const loaded = await loadReaderSnapshotWithoutWaitingForReplay(
+          () => getReaderSnapshot(controller.signal),
+          (serverSnapshot) => reconcileSnapshotWithLocalMutations(serverSnapshot),
+          () => replayPendingMutations(),
+        );
+        const versions = loaded.snapshot.cacheStatus?.versions ?? { collection: 0, state: 0, body: 0 };
+        const accountKey = `legacy:${userId}`;
+        const legacyCache: CachedReaderState = {
+          accountKey,
+          generation: `snapshot:${loaded.snapshot.generatedAt}`,
+          versions,
+          snapshot: loaded.snapshot,
+          coverage: {
+            loaded: loaded.snapshot.articles.length,
+            total: loaded.snapshot.articles.length,
+            complete: true,
+            nextCursor: null,
+            changeToken: null,
+            backfillInterrupted: false,
+          },
+        };
+        await saveCachedSnapshot(loaded.snapshot);
+        currentCache.current = legacyCache;
+        recordCollectionDiff(currentSnapshot.current, loaded.snapshot);
+        currentSnapshot.current = loaded.snapshot;
+        remotePageRef.current = null;
+        setRemotePage(null);
+        setActiveAccountKey(accountKey);
+        setCoverage(legacyCache.coverage);
+        setSnapshot(loaded.snapshot);
+        setSelectedId((current) => current ?? loaded.snapshot.articles[0]?.id ?? null);
+        setPendingMutations(loaded.pendingMutations);
+        window.requestAnimationFrame(() => {
+          markMilestone('first-server-backed-list', { articles: loaded.snapshot.articles.length });
+          markMilestone('synchronization-complete', { articles: loaded.snapshot.articles.length });
+        });
+        lastSync.current = Date.now();
+        setError(loaded.snapshot.cacheStatus?.error ?? null);
+        setStatus(loaded.snapshot.cacheStatus?.error ? 'error' : 'current');
+        void loaded.replayResult.then(reportOutboxResult).catch(() => {
+          setError('Queued changes remain on this device and will retry automatically');
+          setStatus(navigator.onLine ? 'error' : 'offline');
+        });
+        await refreshPendingCount();
+        return;
+      }
       const serverStatus = await waitForServerCache(controller, trigger === 'manual');
       if (serverStatus.state === 'empty' || serverStatus.state === 'initializing') {
         throw new Error(serverStatus.error ?? 'Reader cache is still initializing');
@@ -405,11 +462,11 @@ export function useReader(userId?: string) {
   }, [enabled]);
 
   useEffect(() => {
-    if (!enabled || !activeAccountKey || activeAccountKey.startsWith('legacy:') || !navigator.onLine) return;
+    if (readerPath !== 'paginated' || !enabled || !activeAccountKey || activeAccountKey.startsWith('legacy:') || !navigator.onLine) return;
     void refreshMarkReadJobs().catch(() => undefined);
     const interval = window.setInterval(() => void refreshMarkReadJobs().catch(() => undefined), 2_000);
     return () => window.clearInterval(interval);
-  }, [activeAccountKey, enabled, refreshMarkReadJobs]);
+  }, [activeAccountKey, enabled, readerPath, refreshMarkReadJobs]);
 
   useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedQuery(query.trim()), 250);
@@ -426,7 +483,7 @@ export function useReader(userId?: string) {
   ]), [activeAccountKey, debouncedQuery, filter, readFilter, remoteRevision]);
 
   useEffect(() => {
-    if (!enabled || !activeAccountKey || activeAccountKey.startsWith('legacy:') || !navigator.onLine) {
+    if (readerPath !== 'paginated' || !enabled || !activeAccountKey || activeAccountKey.startsWith('legacy:') || !navigator.onLine) {
       remotePageRef.current = null;
       setRemotePage(null);
       return;
@@ -456,10 +513,10 @@ export function useReader(userId?: string) {
       }
     });
     return () => controller.abort();
-  }, [activeAccountKey, debouncedQuery, enabled, filter, readFilter, remoteQueryKey]);
+  }, [activeAccountKey, debouncedQuery, enabled, filter, readFilter, readerPath, remoteQueryKey]);
 
   useEffect(() => {
-    if (!enabled || !activeAccountKey || activeAccountKey.startsWith('legacy:') || !navigator.onLine || debouncedQuery !== query.trim()) {
+    if (readerPath !== 'paginated' || !enabled || !activeAccountKey || activeAccountKey.startsWith('legacy:') || !navigator.onLine || debouncedQuery !== query.trim()) {
       setRemoteUnreadCount(null);
       return;
     }
@@ -474,9 +531,10 @@ export function useReader(userId?: string) {
       if (!controller.signal.aborted) setRemoteUnreadCount(null);
     });
     return () => controller.abort();
-  }, [activeAccountKey, debouncedQuery, enabled, filter, query]);
+  }, [activeAccountKey, debouncedQuery, enabled, filter, query, readerPath]);
 
   const loadMoreArticles = useCallback(async () => {
+    if (readerPath !== 'paginated') return;
     const current = remotePageRef.current;
     if (!current?.nextCursor || current.queryKey !== remoteQueryKey || loadingNextPage.current) return;
     loadingNextPage.current = true;
@@ -504,7 +562,7 @@ export function useReader(userId?: string) {
     } finally {
       loadingNextPage.current = false;
     }
-  }, [debouncedQuery, filter, readFilter, remoteQueryKey]);
+  }, [debouncedQuery, filter, readFilter, readerPath, remoteQueryKey]);
 
   const filteredArticles = useMemo(() => {
     if (!snapshot) return [];
@@ -588,7 +646,7 @@ export function useReader(userId?: string) {
   useEffect(() => {
     const account = currentCache.current;
     const article = selectedArticle;
-    if (!enabled || !account || !article || article.contentHtml) return;
+    if (readerPath !== 'paginated' || !enabled || !account || !article || article.contentHtml) return;
     const requestKey = `${account.accountKey}\0${article.id}\0${account.versions.body}`;
     let bodyRequest = bodyRequests.current.get(requestKey);
     if (!bodyRequest) {
@@ -609,7 +667,7 @@ export function useReader(userId?: string) {
       setLoadedBodies((current) => new Map(current).set(body.articleId, body.contentHtml));
     }).catch(() => undefined);
     return () => { active = false; };
-  }, [enabled, selectedArticle]);
+  }, [enabled, readerPath, selectedArticle]);
 
   const mutate = useCallback(async (article: Article, operation: ArticleMutation['operation'], value: boolean) => {
     const mutation = { articleId: article.id, operation, value } satisfies ArticleMutation;
@@ -728,6 +786,7 @@ export function useReader(userId?: string) {
     setRemotePage(null);
     setRemoteUnreadCount(null);
     setMarkReadJobs([]);
+    setReaderPath(null);
     remotePageRef.current = null;
     setStatus(navigator.onLine ? 'current' : 'offline');
   }, []);

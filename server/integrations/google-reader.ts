@@ -110,6 +110,32 @@ function folderId(categoryId: string) {
   return `folder:${categoryId}`;
 }
 
+function mapFolders(
+  sources: z.infer<typeof subscriptionListSchema>['subscriptions'],
+  unreadCounts: ReadonlyMap<string, number>,
+  subscriptionsById: ReadonlyMap<string, Subscription>,
+) {
+  const folders = new Map<string, { id: string; titles: Set<string>; unreadCount: number }>();
+  for (const source of sources) {
+    for (const category of source.categories) {
+      const id = folderId(category.id);
+      const existing = folders.get(id) ?? { id, titles: new Set<string>(), unreadCount: 0 };
+      existing.titles.add(category.label?.trim() || category.id.split('/').at(-1) || 'Folder');
+      existing.unreadCount = unreadCounts.get(category.id)
+        ?? existing.unreadCount + (subscriptionsById.get(source.id)?.unreadCount ?? 0);
+      folders.set(id, existing);
+    }
+  }
+  return [...folders.values()].map((folder) => ({
+    id: folder.id,
+    // Some compatible servers repeat category metadata per subscription and do
+    // not guarantee subscription order. Stable selection prevents false
+    // structure changes when equivalent responses arrive in a new order.
+    title: [...folder.titles].sort((first, second) => first.localeCompare(second))[0] ?? 'Folder',
+    unreadCount: folder.unreadCount,
+  }));
+}
+
 function plainText(html: string) {
   return html
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
@@ -478,22 +504,11 @@ export class GoogleReaderClient {
           starred: starredItemIds.has(comparableId),
         };
       });
-      const folderMap = new Map<string, { id: string; title: string; unreadCount: number }>();
-      for (const source of subscriptionsResult.subscriptions) {
-        for (const category of source.categories) {
-          const id = folderId(category.id);
-          folderMap.set(id, {
-            id,
-            title: category.label ?? category.id.split('/').at(-1) ?? 'Folder',
-            unreadCount: unreadCounts.get(category.id)
-              ?? (folderMap.get(id)?.unreadCount ?? 0) + (subscriptionsById.get(source.id)?.unreadCount ?? 0),
-          });
-        }
-      }
+      const folders = mapFolders(subscriptionsResult.subscriptions, unreadCounts, subscriptionsById);
       return {
         generatedAt: new Date().toISOString(),
         source: 'google-reader' as const,
-        folders: [...folderMap.values()],
+        folders,
         subscriptions,
         articles,
       };
@@ -538,19 +553,8 @@ export class GoogleReaderClient {
         unreadCount: unreadCounts.get(subscription.id) ?? 0,
       }));
       const subscriptionsById = new Map(subscriptions.map((subscription) => [subscription.id, subscription]));
-      const folderMap = new Map<string, Folder>();
-      for (const source of subscriptionsResult.subscriptions) {
-        for (const category of source.categories) {
-          const id = folderId(category.id);
-          folderMap.set(id, {
-            id,
-            title: category.label ?? category.id.split('/').at(-1) ?? 'Folder',
-            unreadCount: unreadCounts.get(category.id)
-              ?? (folderMap.get(id)?.unreadCount ?? 0) + (subscriptionsById.get(source.id)?.unreadCount ?? 0),
-          });
-        }
-      }
-      return { subscriptions, subscriptionsById, folders: [...folderMap.values()], unreadItemIds, starredItemIds };
+      const folders = mapFolders(subscriptionsResult.subscriptions, unreadCounts, subscriptionsById);
+      return { subscriptions, subscriptionsById, folders, unreadItemIds, starredItemIds };
     };
 
     const mappedContextPromise = contextPromise.then((context) => {
@@ -607,19 +611,8 @@ export class GoogleReaderClient {
       unreadCount: unreadCounts.get(subscription.id) ?? 0,
     }));
     const subscriptionsById = new Map(subscriptions.map((subscription) => [subscription.id, subscription]));
-    const folderMap = new Map<string, Folder>();
-    for (const source of subscriptionsResult.subscriptions) {
-      for (const category of source.categories) {
-        const id = folderId(category.id);
-        folderMap.set(id, {
-          id,
-          title: category.label ?? category.id.split('/').at(-1) ?? 'Folder',
-          unreadCount: unreadCounts.get(category.id)
-            ?? (folderMap.get(id)?.unreadCount ?? 0) + (subscriptionsById.get(source.id)?.unreadCount ?? 0),
-        });
-      }
-    }
-    return { subscriptions, subscriptionsById, folders: [...folderMap.values()] };
+    const folders = mapFolders(subscriptionsResult.subscriptions, unreadCounts, subscriptionsById);
+    return { subscriptions, subscriptionsById, folders };
   }
 
   private mapIncrementalItems(
