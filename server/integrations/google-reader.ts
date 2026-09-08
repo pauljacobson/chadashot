@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { ArticleMutation, ReaderSnapshot } from '../../shared/reader.js';
+import type { Article, ArticleMutation, Folder, ReaderSnapshot, Subscription } from '../../shared/reader.js';
 import type { ReaderPerformanceRun, ReaderPhase } from '../reader-performance.js';
 
 export const BIRCHFEED_API_URL = 'https://birchfeed.app/api/greader.php';
@@ -8,6 +8,11 @@ export type GoogleReaderCredentials = {
   serverUrl: string;
   email: string;
   apiKey: string;
+};
+
+export type GoogleReaderImportSink = {
+  stageStructure: (folders: Folder[], subscriptions: Subscription[]) => void | Promise<void>;
+  stageArticles: (articles: Article[]) => void | Promise<void>;
 };
 
 type FetchImplementation = typeof fetch;
@@ -189,8 +194,10 @@ export class GoogleReaderClient {
     await this.authenticate();
   }
 
-  private async allStreamItems(auth: string) {
-    const items = [] as z.infer<typeof streamItemSchema>[];
+  private async forEachStreamItemPage(
+    auth: string,
+    consume: (items: z.infer<typeof streamItemSchema>[]) => void | Promise<void>,
+  ) {
     const itemIds = new Set<string>();
     const continuationTokens = new Set<string>();
     let continuation: string | undefined;
@@ -207,11 +214,12 @@ export class GoogleReaderClient {
       const text = await this.responseText(response, 'contentPages');
       const page = streamSchema.parse(JSON.parse(text));
       this.performanceRun?.recordItems('contentPages', page.items.length, 1);
-      for (const item of page.items) {
-        if (itemIds.has(item.id)) continue;
+      const uniqueItems = page.items.filter((item) => {
+        if (itemIds.has(item.id)) return false;
         itemIds.add(item.id);
-        items.push(item);
-      }
+        return true;
+      });
+      await consume(uniqueItems);
 
       const nextContinuation = page.continuation;
       if (!nextContinuation) break;
@@ -222,6 +230,11 @@ export class GoogleReaderClient {
       continuation = nextContinuation;
     } while (continuation);
 
+  }
+
+  private async allStreamItems(auth: string) {
+    const items = [] as z.infer<typeof streamItemSchema>[];
+    await this.forEachStreamItemPage(auth, (page) => { items.push(...page); });
     return items;
   }
 
@@ -334,6 +347,93 @@ export class GoogleReaderClient {
       };
     };
     return this.performanceRun ? this.performanceRun.measureSync('mapping', mapSnapshot) : mapSnapshot();
+  }
+
+  /**
+   * Streams mapped article pages to durable storage. Provider requests remain
+   * concurrent, but only one content page is retained while its batch commits.
+   */
+  async importTo(sink: GoogleReaderImportSink) {
+    const measure = <T>(phase: ReaderPhase, operation: () => Promise<T>) => this.performanceRun
+      ? this.performanceRun.measure(phase, operation)
+      : operation();
+    const auth = await measure('authentication', () => this.authenticate('authentication'));
+    const contextPromise = Promise.all([
+      measure('subscriptions', async () => {
+        const [subscriptionsResponse, unreadCountResponse] = await Promise.all([
+          this.authorizedRequest('/reader/api/0/subscription/list?output=json', auth, undefined, 'subscriptions'),
+          this.authorizedRequest('/reader/api/0/unread-count?output=json', auth, undefined, 'subscriptions'),
+        ]);
+        const subscriptionsResult = subscriptionListSchema.parse(await this.responseJson(subscriptionsResponse, 'subscriptions'));
+        const unreadCountResult = unreadCountSchema.parse(await this.responseJson(unreadCountResponse, 'subscriptions'));
+        this.performanceRun?.recordItems('subscriptions', subscriptionsResult.subscriptions.length);
+        return { subscriptionsResult, unreadCountResult };
+      }),
+      measure('unreadIds', () => this.allStateItemIds(auth, 'unread')),
+      measure('starredIds', () => this.allStateItemIds(auth, 'starred')),
+    ]);
+
+    const mapContext = (providerContext: Awaited<typeof contextPromise>) => {
+      const [{ subscriptionsResult, unreadCountResult }, unreadItemIds, starredItemIds] = providerContext;
+      const unreadCounts = new Map(unreadCountResult.unreadcounts.map((entry) => [entry.id, entry.count] as const));
+      const subscriptions = subscriptionsResult.subscriptions.map((subscription) => ({
+        id: subscription.id,
+        title: subscription.title,
+        url: subscription.url ?? subscription.id.replace(/^feed\//, ''),
+        siteUrl: subscription.htmlUrl ?? null,
+        iconUrl: this.iconUrl(subscription.iconUrl),
+        folderIds: subscription.categories.map((category) => folderId(category.id)),
+        unreadCount: unreadCounts.get(subscription.id) ?? 0,
+      }));
+      const subscriptionsById = new Map(subscriptions.map((subscription) => [subscription.id, subscription]));
+      const folderMap = new Map<string, Folder>();
+      for (const source of subscriptionsResult.subscriptions) {
+        for (const category of source.categories) {
+          const id = folderId(category.id);
+          folderMap.set(id, {
+            id,
+            title: category.label ?? category.id.split('/').at(-1) ?? 'Folder',
+            unreadCount: unreadCounts.get(category.id)
+              ?? (folderMap.get(id)?.unreadCount ?? 0) + (subscriptionsById.get(source.id)?.unreadCount ?? 0),
+          });
+        }
+      }
+      return { subscriptions, subscriptionsById, folders: [...folderMap.values()], unreadItemIds, starredItemIds };
+    };
+
+    const mappedContextPromise = contextPromise.then((context) => {
+      return this.performanceRun
+        ? this.performanceRun.measureSync('mapping', () => mapContext(context))
+        : mapContext(context);
+    });
+    const structure = mappedContextPromise.then((context) => sink.stageStructure(context.folders, context.subscriptions));
+    const articles = measure('contentPages', () => this.forEachStreamItemPage(auth, async (items) => {
+      const context = await mappedContextPromise;
+      const mapArticles = () => items.map((item) => {
+        const html = item.content?.content ?? item.summary?.content ?? '';
+        const text = plainText(html);
+        const subscription = context.subscriptionsById.get(item.origin.streamId);
+        const comparableId = comparableItemId(item.id);
+        return {
+          id: item.id,
+          feedId: item.origin.streamId,
+          folderIds: subscription?.folderIds ?? [],
+          title: item.title,
+          author: item.author ?? null,
+          source: item.origin.title ?? subscription?.title ?? 'Unknown feed',
+          canonicalUrl: item.canonical?.[0]?.href ?? item.alternate?.[0]?.href ?? item.origin.htmlUrl ?? '#',
+          publishedAt: publishedAt(item),
+          readingMinutes: Math.max(1, Math.ceil(text.split(/\s+/).filter(Boolean).length / 220)),
+          summary: text.slice(0, 240),
+          contentHtml: html,
+          read: !context.unreadItemIds.has(comparableId),
+          starred: context.starredItemIds.has(comparableId),
+        } satisfies Article;
+      });
+      const mapped = this.performanceRun ? this.performanceRun.measureSync('mapping', mapArticles) : mapArticles();
+      await sink.stageArticles(mapped);
+    }));
+    await Promise.all([structure, articles]);
   }
 
   async mutate(mutation: ArticleMutation) {

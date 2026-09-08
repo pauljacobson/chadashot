@@ -20,6 +20,7 @@ function encryptedConfig(overrides: Partial<ReturnType<typeof loadConfig>> = {})
       AUTH_MODE: 'development',
       ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64'),
     }),
+    readerCacheEnabled: false,
     ...overrides,
   };
 }

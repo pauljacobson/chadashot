@@ -98,6 +98,154 @@ const migrations: Migration[] = [
       ALTER TABLE highlights ADD COLUMN readwise_error TEXT;
     `,
   },
+  {
+    version: 4,
+    name: 'transactional_reader_cache',
+    sql: `
+      CREATE TABLE reader_accounts (
+        account_key TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        provider_identity TEXT NOT NULL,
+        credential_generation TEXT NOT NULL,
+        current_generation_id TEXT,
+        collection_version INTEGER NOT NULL DEFAULT 0,
+        state_version INTEGER NOT NULL DEFAULT 0,
+        body_version INTEGER NOT NULL DEFAULT 0,
+        last_attempt_at TEXT,
+        last_success_at TEXT,
+        last_error TEXT,
+        invalidated_at TEXT
+      );
+
+      CREATE TABLE reader_cache_generations (
+        id TEXT PRIMARY KEY,
+        account_key TEXT NOT NULL REFERENCES reader_accounts(account_key) ON DELETE CASCADE,
+        generation_number INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('staging', 'committed', 'failed')),
+        fence_token INTEGER NOT NULL,
+        started_at TEXT NOT NULL,
+        committed_at TEXT,
+        failed_at TEXT,
+        error TEXT,
+        collection_version INTEGER,
+        state_version INTEGER,
+        body_version INTEGER,
+        UNIQUE(account_key, generation_number)
+      );
+
+      CREATE TABLE reader_folders (
+        generation_id TEXT NOT NULL REFERENCES reader_cache_generations(id) ON DELETE CASCADE,
+        id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        unread_count INTEGER NOT NULL,
+        PRIMARY KEY(generation_id, id)
+      ) WITHOUT ROWID;
+
+      CREATE TABLE reader_subscriptions (
+        generation_id TEXT NOT NULL REFERENCES reader_cache_generations(id) ON DELETE CASCADE,
+        id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        url TEXT NOT NULL,
+        site_url TEXT,
+        icon_url TEXT,
+        unread_count INTEGER NOT NULL,
+        PRIMARY KEY(generation_id, id)
+      ) WITHOUT ROWID;
+
+      CREATE TABLE reader_subscription_folders (
+        generation_id TEXT NOT NULL,
+        subscription_id TEXT NOT NULL,
+        folder_id TEXT NOT NULL,
+        PRIMARY KEY(generation_id, subscription_id, folder_id),
+        FOREIGN KEY(generation_id, subscription_id) REFERENCES reader_subscriptions(generation_id, id) ON DELETE CASCADE
+      ) WITHOUT ROWID;
+
+      CREATE TABLE reader_articles (
+        generation_id TEXT NOT NULL REFERENCES reader_cache_generations(id) ON DELETE CASCADE,
+        id TEXT NOT NULL,
+        feed_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        author TEXT,
+        source TEXT NOT NULL,
+        canonical_url TEXT NOT NULL,
+        published_at TEXT NOT NULL,
+        reading_minutes INTEGER NOT NULL,
+        summary TEXT NOT NULL,
+        PRIMARY KEY(generation_id, id)
+      ) WITHOUT ROWID;
+
+      CREATE TABLE reader_article_bodies (
+        generation_id TEXT NOT NULL,
+        article_id TEXT NOT NULL,
+        content_html TEXT NOT NULL,
+        PRIMARY KEY(generation_id, article_id),
+        FOREIGN KEY(generation_id, article_id) REFERENCES reader_articles(generation_id, id) ON DELETE CASCADE
+      ) WITHOUT ROWID;
+
+      CREATE TABLE reader_article_state (
+        generation_id TEXT NOT NULL,
+        article_id TEXT NOT NULL,
+        is_read INTEGER NOT NULL CHECK (is_read IN (0, 1)),
+        is_starred INTEGER NOT NULL CHECK (is_starred IN (0, 1)),
+        PRIMARY KEY(generation_id, article_id),
+        FOREIGN KEY(generation_id, article_id) REFERENCES reader_articles(generation_id, id) ON DELETE CASCADE
+      ) WITHOUT ROWID;
+
+      CREATE TABLE reader_article_folders (
+        generation_id TEXT NOT NULL,
+        article_id TEXT NOT NULL,
+        folder_id TEXT NOT NULL,
+        PRIMARY KEY(generation_id, article_id, folder_id),
+        FOREIGN KEY(generation_id, article_id) REFERENCES reader_articles(generation_id, id) ON DELETE CASCADE
+      ) WITHOUT ROWID;
+
+      CREATE TABLE reader_sync_runs (
+        id TEXT PRIMARY KEY,
+        account_key TEXT NOT NULL REFERENCES reader_accounts(account_key) ON DELETE CASCADE,
+        generation_id TEXT REFERENCES reader_cache_generations(id) ON DELETE SET NULL,
+        fence_token INTEGER NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'fenced')),
+        items_staged INTEGER NOT NULL DEFAULT 0,
+        started_at TEXT NOT NULL,
+        finished_at TEXT,
+        error TEXT
+      );
+
+      CREATE TABLE reader_sync_checkpoints (
+        account_key TEXT PRIMARY KEY REFERENCES reader_accounts(account_key) ON DELETE CASCADE,
+        generation_id TEXT NOT NULL REFERENCES reader_cache_generations(id) ON DELETE CASCADE,
+        collection_version INTEGER NOT NULL,
+        state_version INTEGER NOT NULL,
+        body_version INTEGER NOT NULL,
+        committed_at TEXT NOT NULL
+      );
+
+      CREATE TABLE reader_sync_leases (
+        account_key TEXT PRIMARY KEY REFERENCES reader_accounts(account_key) ON DELETE CASCADE,
+        owner_id TEXT NOT NULL,
+        fence_token INTEGER NOT NULL,
+        acquired_at TEXT NOT NULL,
+        heartbeat_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+      );
+
+      CREATE TABLE reader_state_overrides (
+        account_key TEXT NOT NULL REFERENCES reader_accounts(account_key) ON DELETE CASCADE,
+        article_id TEXT NOT NULL,
+        operation TEXT NOT NULL CHECK (operation IN ('read', 'starred')),
+        value INTEGER NOT NULL CHECK (value IN (0, 1)),
+        revision INTEGER NOT NULL,
+        confirmed_at TEXT NOT NULL,
+        PRIMARY KEY(account_key, article_id, operation)
+      ) WITHOUT ROWID;
+
+      CREATE INDEX reader_articles_scope ON reader_articles(generation_id, feed_id, published_at DESC, id);
+      CREATE INDEX reader_articles_published ON reader_articles(generation_id, published_at DESC, id);
+      CREATE INDEX reader_article_folders_scope ON reader_article_folders(generation_id, folder_id, article_id);
+      CREATE INDEX reader_generations_account_status ON reader_cache_generations(account_key, status, generation_number DESC);
+      CREATE INDEX reader_sync_runs_account_started ON reader_sync_runs(account_key, started_at DESC);
+    `,
+  },
 ];
 
 function ensureMigrationTable(database: AppDatabase) {

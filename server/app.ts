@@ -5,7 +5,7 @@ import compression from 'compression';
 import express, { type ErrorRequestHandler, type RequestHandler } from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
-import type { ArticleMutation, ReaderSnapshot, SavedHighlight } from '../shared/reader.js';
+import type { ArticleMutation, ReaderInitializationState, ReaderSnapshot, SavedHighlight } from '../shared/reader.js';
 import type { AppConfig } from './config.js';
 import { developmentSession, requireDevelopmentUser } from './auth/development.js';
 import { createPasskeyAuthentication } from './auth/passkeys.js';
@@ -27,6 +27,7 @@ import {
   SynchronizationCoordinator,
   SynchronizationTimeoutError,
 } from './synchronization-coordinator.js';
+import { ReaderCache, readerCacheIdentity, type ReaderCacheImport } from './reader-cache.js';
 
 const mutationSchema = z.object({
   articleId: z.string().min(1),
@@ -111,6 +112,8 @@ export function createApp(config: AppConfig, dependencies: {
     measurement: ReaderSynchronizationMeasurement;
     generation: string;
   }>(config.readerSyncTimeoutMs);
+  const readerCache = new ReaderCache(database, newId(), config.readerSyncLeaseMs);
+  const activeCacheImports = new Map<string, { work: Promise<void>; controller: AbortController }>();
   app.disable('x-powered-by');
   if (config.nodeEnv === 'production') app.set('trust proxy', 1);
   app.use(requestLogger(logger));
@@ -154,6 +157,87 @@ export function createApp(config: AppConfig, dependencies: {
     });
   };
 
+  function startReaderCacheImport(
+    comparisonKey: string,
+    integration: NonNullable<ReturnType<typeof loadBirchfeedWithGeneration>>,
+  ) {
+    const identity = readerCacheIdentity(comparisonKey, integration.credentials, integration.generation);
+    if (activeCacheImports.has(identity.accountKey)) return identity;
+
+    const controller = new AbortController();
+    const work = (async () => {
+      const lease = readerCache.acquireLease(identity);
+      if (!lease) return;
+      let importRun: ReaderCacheImport | null = null;
+      const performanceRun = new ReaderPerformanceRun();
+      let articleCount = 0;
+      let subscriptionCount = 0;
+      const timer = setTimeout(() => controller.abort(new SynchronizationTimeoutError(config.readerSyncTimeoutMs)), config.readerSyncTimeoutMs);
+      timer.unref();
+      const heartbeat = setInterval(() => {
+        try {
+          readerCache.heartbeat(lease);
+        } catch (error) {
+          controller.abort(error);
+        }
+      }, Math.max(1_000, Math.floor(config.readerSyncLeaseMs / 3)));
+      heartbeat.unref();
+      try {
+        importRun = readerCache.beginImport(lease);
+        const client = new GoogleReaderClient(integration.credentials, fetchImplementation, performanceRun, controller.signal);
+        await client.importTo({
+          stageStructure(folders, subscriptions) {
+            subscriptionCount = subscriptions.length;
+            readerCache.stageFolders(importRun!, folders);
+            readerCache.stageSubscriptions(importRun!, subscriptions);
+          },
+          stageArticles(articles) {
+            for (let offset = 0; offset < articles.length; offset += 500) {
+              const batch = articles.slice(offset, offset + 500);
+              readerCache.stageArticles(importRun!, batch);
+              articleCount += batch.length;
+            }
+          },
+        });
+        if (controller.signal.aborted) throw controller.signal.reason;
+        if (loadBirchfeedWithGeneration(database, config)?.generation !== integration.generation) {
+          throw new StaleSynchronizationError();
+        }
+        const versions = readerCache.publish(importRun);
+        logger.info('Reader cache import completed', {
+          synchronization: performanceRun.result({
+            articles: articleCount,
+            subscriptions: subscriptionCount,
+            changedItems: articleCount,
+            unchangedItems: 0,
+            comparison: 'no-prior-run',
+          }),
+          cache: { articles: articleCount, subscriptions: subscriptionCount, versions },
+        });
+      } catch (error) {
+        if (importRun) readerCache.fail(importRun, error);
+        logger.warn('Reader cache import failed', {
+          reason: error instanceof Error ? error.message : 'Unknown error',
+          synchronization: performanceRun.result({
+            articles: articleCount,
+            subscriptions: subscriptionCount,
+            changedItems: 0,
+            unchangedItems: 0,
+            comparison: 'no-prior-run',
+          }),
+        });
+      } finally {
+        clearTimeout(timer);
+        clearInterval(heartbeat);
+      }
+    })();
+    activeCacheImports.set(identity.accountKey, { work, controller });
+    void work.finally(() => {
+      if (activeCacheImports.get(identity.accountKey)?.work === work) activeCacheImports.delete(identity.accountKey);
+    }).catch((error) => logger.error('Reader cache coordinator failed', error));
+    return identity;
+  }
+
   app.get('/api/settings/status', requireUser, (_req, res) => {
     const readerCredentials = loadBirchfeed(database, config);
     res.json({
@@ -181,6 +265,13 @@ export function createApp(config: AppConfig, dependencies: {
     const client = new GoogleReaderClient(credentials, fetchImplementation);
     try {
       await client.validateCredentials();
+      const priorIntegration = loadBirchfeedWithGeneration(database, config);
+      const userId = (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user';
+      if (priorIntegration) {
+        const priorIdentity = readerCacheIdentity(userId, priorIntegration.credentials, priorIntegration.generation);
+        activeCacheImports.get(priorIdentity.accountKey)?.controller.abort(new StaleSynchronizationError());
+        readerCache.invalidate(priorIdentity);
+      }
       saveIntegration(database, config, 'birchfeed', credentials);
       readerSyncCoordinator.invalidateAll();
       logger.info('RSS service connected', { provider: 'google-reader', serverHost: new URL(credentials.serverUrl).hostname });
@@ -192,6 +283,13 @@ export function createApp(config: AppConfig, dependencies: {
   });
 
   app.delete('/api/settings/rss', requireUser, (_req, res) => {
+    const priorIntegration = loadBirchfeedWithGeneration(database, config);
+    const userId = (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user';
+    if (priorIntegration) {
+      const priorIdentity = readerCacheIdentity(userId, priorIntegration.credentials, priorIntegration.generation);
+      activeCacheImports.get(priorIdentity.accountKey)?.controller.abort(new StaleSynchronizationError());
+      readerCache.invalidate(priorIdentity);
+    }
     const removed = deleteIntegration(database, 'birchfeed');
     readerSyncCoordinator.invalidateAll();
     logger.info('RSS service disconnected', { removed });
@@ -336,6 +434,42 @@ export function createApp(config: AppConfig, dependencies: {
     const comparisonKey = (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user';
     const integration = loadBirchfeedWithGeneration(database, config);
     if (integration) {
+      if (config.readerCacheEnabled) {
+        const identity = readerCacheIdentity(comparisonKey, integration.credentials, integration.generation);
+        const performanceRun = new ReaderPerformanceRun();
+        const cached = performanceRun.measureSync('mapping', () => readerCache.readSnapshot(identity));
+        if (readerCache.shouldRefresh(identity, config.readerCacheRefreshIntervalMs)) {
+          startReaderCacheImport(comparisonKey, integration);
+        }
+        const cacheStatus = readerCache.status(identity);
+        if (cached) {
+          const snapshot = {
+            ...cached,
+            cacheStatus: {
+              state: cacheStatus.state === 'stale' ? 'stale' as const
+                : cacheStatus.state === 'refreshing' ? 'refreshing' as const
+                  : 'current' as const,
+              lastSuccessAt: cacheStatus.lastSuccessAt,
+              error: cacheStatus.error,
+              versions: cacheStatus.versions,
+            },
+          };
+          const collection = snapshotComparison.compare(comparisonKey, snapshot);
+          res.setHeader('X-Reader-Cache-Status', snapshot.cacheStatus.state);
+          res.setHeader('X-Reader-Collection-Version', String(cacheStatus.versions.collection));
+          res.setHeader('X-Reader-State-Version', String(cacheStatus.versions.state));
+          res.setHeader('X-Reader-Body-Version', String(cacheStatus.versions.body));
+          return sendMeasuredReaderSnapshot(res, logger, snapshot, performanceRun.result(collection));
+        }
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader('Retry-After', '2');
+        return res.status(202).json({
+          status: 'initializing',
+          progress: { itemsStaged: cacheStatus.itemsStaged },
+          retryAfterSeconds: 2,
+          error: cacheStatus.error,
+        } satisfies ReaderInitializationState);
+      }
       const performanceRun = new ReaderPerformanceRun();
       const coordinatorKey = `${comparisonKey}:${integration.generation}`;
       try {
@@ -387,16 +521,30 @@ export function createApp(config: AppConfig, dependencies: {
 
   app.post('/api/reader/mutations', requireUser, async (req, res) => {
     const mutation = mutationSchema.parse(req.body) satisfies ArticleMutation;
-    const credentials = loadBirchfeed(database, config);
-    if (credentials) await new GoogleReaderClient(credentials, fetchImplementation).mutate(mutation);
+    const integration = loadBirchfeedWithGeneration(database, config);
+    if (integration) {
+      await new GoogleReaderClient(integration.credentials, fetchImplementation).mutate(mutation);
+      const userId = (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user';
+      readerCache.applyConfirmedMutations(
+        readerCacheIdentity(userId, integration.credentials, integration.generation),
+        [mutation],
+      );
+    }
     logger.debug('Article state synchronized', { operation: mutation.operation, value: mutation.value });
     res.status(200).json({ mutation, synchronized: true });
   });
 
   app.post('/api/reader/mutations/batch', requireUser, async (req, res) => {
     const { mutations } = batchMutationSchema.parse(req.body) satisfies { mutations: ArticleMutation[] };
-    const credentials = loadBirchfeed(database, config);
-    if (credentials) await new GoogleReaderClient(credentials, fetchImplementation).mutateMany(mutations);
+    const integration = loadBirchfeedWithGeneration(database, config);
+    if (integration) {
+      await new GoogleReaderClient(integration.credentials, fetchImplementation).mutateMany(mutations);
+      const userId = (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user';
+      readerCache.applyConfirmedMutations(
+        readerCacheIdentity(userId, integration.credentials, integration.generation),
+        mutations,
+      );
+    }
     logger.debug('Article state batch synchronized', { mutations: mutations.length });
     res.status(200).json({ mutations, synchronized: true });
   });

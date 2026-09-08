@@ -6,7 +6,7 @@ The previous FreshRSS deployment wrapper has been moved to a local, Git-ignored 
 
 ## Project status
 
-The initial review version includes the responsive reading interface, an expandable folder/feed tree with favicons and persistent ordering preferences, fixture-backed local use, live Birchfeed synchronization, manual feed subscriptions, offline article caching and queued read/star changes, encrypted service credentials with explicit disconnect controls, production passkey onboarding with recovery codes and multiple passkeys, persistent Readwise highlights, Reader document saving, versioned database migrations, and optional Litestream replication to Cloudflare R2. The product specification, deployment guide, and supporting research are in [`docs/`](docs/).
+The initial review version includes the responsive reading interface, an expandable folder/feed tree with favicons and persistent ordering preferences, fixture-backed local use, a durable transactional server cache for live Birchfeed data, manual feed subscriptions, offline article caching and queued read/star changes, encrypted service credentials with explicit disconnect controls, production passkey onboarding with recovery codes and multiple passkeys, persistent Readwise highlights, Reader document saving, versioned database migrations, and optional Litestream replication to Cloudflare R2. The product specification, deployment guide, and supporting research are in [`docs/`](docs/).
 
 ## Run locally
 
@@ -29,6 +29,7 @@ npm run check
 ```
 
 The isolated 20,000-article benchmark and current baseline are documented in the [reader performance benchmark](docs/20260908%20Reader%20performance%20benchmark.md).
+The cache generation, lease, recovery, and rollback contract is documented in the [transactional reader cache design](docs/20260908%20Transactional%20reader%20cache.md).
 
 ## Deploy to Railway
 
