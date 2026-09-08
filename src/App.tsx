@@ -641,13 +641,19 @@ export function ReaderPane({
           <h1>{article.title}</h1>
           <div className="byline">{article.author ?? article.source} · {new Date(article.publishedAt).toLocaleDateString()} · {article.readingMinutes} min read</div>
           <div className="article-rule"></div>
-          <div
-            ref={contentRef}
-            className="article-content"
-            onMouseUp={captureSelection}
-            onTouchEnd={captureSelection}
-            dangerouslySetInnerHTML={{ __html: sanitized }}
-          />
+          {sanitized ? (
+            <div
+              ref={contentRef}
+              className="article-content"
+              onMouseUp={captureSelection}
+              onTouchEnd={captureSelection}
+              dangerouslySetInnerHTML={{ __html: sanitized }}
+            />
+          ) : (
+            <div ref={contentRef} className="article-content article-content-missing" role="status">
+              Article content is not cached yet. Chadashot will load it when a connection is available.
+            </div>
+          )}
         </article>
       </div>
       {selection && (
@@ -1235,7 +1241,7 @@ export function App() {
   const [panelWidths, setPanelWidths] = useState<PanelWidths>(savedPanelWidths);
   const [workspaceWidth, setWorkspaceWidth] = useState(0);
   const workspaceRef = useRef<HTMLDivElement>(null);
-  const reader = useReader(Boolean(session?.authenticated));
+  const reader = useReader(session?.authenticated ? session.user?.id : undefined);
 
   useLayoutEffect(() => {
     if (!session?.authenticated) return;
@@ -1383,7 +1389,13 @@ export function App() {
         </div>
         <label className="search-box" htmlFor="article-search"><span aria-hidden="true">⌕</span><input id="article-search" type="search" value={reader.query} onChange={(event) => reader.setQuery(event.target.value)} placeholder="Search your reading" /></label>
         <div className="topbar-actions">
-          <span className="topbar-status"><span className={`status-dot ${reader.status}`}></span>{syncLabel(reader.status, reader.pendingMutations)}</span>
+          <span className="topbar-status">
+            <span className={`status-dot ${reader.status}`}></span>
+            {syncLabel(reader.status, reader.pendingMutations)}
+            {reader.coverage && !reader.coverage.complete
+              ? ` · ${reader.coverage.loaded.toLocaleString()} of ${reader.coverage.total.toLocaleString()} cached`
+              : ''}
+          </span>
           <button aria-label="Refresh" onClick={() => void reader.synchronize()}>↻</button>
           <button aria-label="Open preferences" onClick={() => setPreferencesOpen(true)}>☷</button>
           <button aria-label="Open settings" onClick={() => setSettingsOpen(true)}>⚙</button>

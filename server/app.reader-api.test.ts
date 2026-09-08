@@ -74,6 +74,7 @@ describe('paginated reader HTTP contract', () => {
 
     const page = await request(app).get('/api/reader/articles?scope=all&read=all&limit=100');
     expect(page.status).toBe(200);
+    expect(page.body.accountKey).toEqual(expect.any(String));
     expect(page.body.total).toBe(125);
     expect(page.body.articles).toHaveLength(100);
     expect(page.body.nextCursor).toEqual(expect.any(String));
@@ -90,9 +91,16 @@ describe('paginated reader HTTP contract', () => {
     const articleId = encodeURIComponent('tag:google.com,2005:reader/item/abc');
     const body = await request(app).get(`/api/reader/articles/${articleId}/body`);
     expect(body.status).toBe(200);
-    expect(body.body).toMatchObject({ articleId: 'tag:google.com,2005:reader/item/abc', contentHtml: '<p>Private body 0</p>' });
+    expect(body.body).toMatchObject({ accountKey: page.body.accountKey, articleId: 'tag:google.com,2005:reader/item/abc', contentHtml: '<p>Private body 0</p>' });
     expect((await request(app).get(`/api/reader/articles/${articleId}/body`).set('If-None-Match', body.headers.etag)).status).toBe(304);
     expect((await request(app).get('/api/reader/status')).body).toMatchObject({ state: 'current' });
+
+    const mismatchedMutation = await request(app)
+      .post('/api/reader/mutations')
+      .set('X-Reader-Account-Key', 'another-account')
+      .send({ articleId: 'article-001', operation: 'read', value: true });
+    expect(mismatchedMutation.status).toBe(409);
+    expect(mismatchedMutation.body).toMatchObject({ error: 'reader_account_changed', preserveQueuedWrites: true });
   });
 
   it('returns recoverable reset responses for stale cursors and delta tokens', async () => {

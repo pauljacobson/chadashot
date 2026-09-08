@@ -1,22 +1,29 @@
 // @vitest-environment jsdom
 import 'fake-indexeddb/auto';
 import { beforeEach, describe, expect, it } from 'vitest';
-import type { ReaderSnapshot, SessionState } from '../shared/reader';
+import type { ReaderArticlePage, ReaderNavigation, ReaderSnapshot, SessionState } from '../shared/reader';
 import {
   acknowledgeQueuedArticleMutations,
   acknowledgedArticleMutations,
+  applyReaderChanges,
   applyQueuedArticleMutations,
   clearOfflineData,
   enqueueArticleMutation,
   enqueueArticleMutations,
+  loadCachedReader,
   loadCachedSnapshot,
   loadOfflineSession,
+  loadReaderBody,
   offlineStorageSummary,
   queuedArticleMutations,
   reconcileSnapshotWithLocalMutations,
   removeQueuedArticleMutation,
   saveCachedSnapshot,
   saveOfflineSession,
+  saveReaderArticlePage,
+  saveReaderBody,
+  saveReaderChangeToken,
+  saveReaderNavigation,
 } from './offlineStore';
 
 const snapshot: ReaderSnapshot = {
@@ -40,6 +47,45 @@ const session: SessionState = {
   setupRequired: false,
   user: { id: 'user-1', displayName: 'Paul' },
 };
+
+function navigation(accountKey = 'account-1', generation = 'generation-1'): ReaderNavigation {
+  return {
+    accountKey,
+    generation,
+    versions: { collection: 1, state: 1, body: 1 },
+    counts: { all: 2, inbox: 2, starred: 0, uncategorized: 2 },
+    folders: [],
+    feeds: [{
+      id: 'feed-1', title: 'Feed', url: 'https://example.test/feed', siteUrl: null, iconUrl: null,
+      folderIds: [], unreadCount: 2, totalCount: 2, latestPublishedAt: '2026-09-08T00:00:00.000Z',
+    }],
+  };
+}
+
+function page(options: {
+  accountKey?: string;
+  generation?: string;
+  articleId?: string;
+  nextCursor?: string | null;
+  total?: number;
+  bodyVersion?: number;
+} = {}): ReaderArticlePage {
+  const accountKey = options.accountKey ?? 'account-1';
+  const generation = options.generation ?? 'generation-1';
+  const articleId = options.articleId ?? 'article-1';
+  return {
+    accountKey,
+    generation,
+    versions: { collection: 1, state: 1, body: options.bodyVersion ?? 1 },
+    total: options.total ?? 1,
+    nextCursor: options.nextCursor ?? null,
+    articles: [{
+      id: articleId, feedId: 'feed-1', folderIds: [], title: articleId, author: null, source: 'Feed',
+      canonicalUrl: `https://example.test/${articleId}`, publishedAt: '2026-09-08T00:00:00.000Z',
+      readingMinutes: 1, summary: articleId, read: false, starred: false,
+    }],
+  };
+}
 
 describe('offline reader storage', () => {
   beforeEach(async () => {
@@ -138,5 +184,91 @@ describe('offline reader storage', () => {
     expect(await loadOfflineSession()).toBeNull();
     expect(await queuedArticleMutations()).toEqual([]);
     expect(await acknowledgedArticleMutations()).toEqual([]);
+  });
+
+  it('hydrates normalized metadata before bodies and resumes an interrupted backfill', async () => {
+    await saveReaderNavigation('user-1', navigation());
+    await saveReaderArticlePage('user-1', page({ nextCursor: 'page-2', total: 2 }), true);
+    await saveReaderChangeToken('account-1', 'baseline-token');
+
+    const interrupted = await loadCachedReader('user-1');
+    expect(interrupted?.snapshot.articles).toEqual([
+      expect.objectContaining({ id: 'article-1', contentHtml: '' }),
+    ]);
+    expect(interrupted?.coverage).toMatchObject({ complete: false, nextCursor: 'page-2', changeToken: 'baseline-token' });
+
+    await saveReaderArticlePage('user-1', page({ articleId: 'article-2', total: 2 }));
+    const complete = await loadCachedReader('user-1');
+    expect(complete?.snapshot.articles.map(({ id }) => id).sort()).toEqual(['article-1', 'article-2']);
+    expect(complete?.coverage).toMatchObject({ loaded: 2, total: 2, complete: true, nextCursor: null });
+  });
+
+  it('loads bodies on demand and rejects a cached body from an older body version', async () => {
+    await saveReaderNavigation('user-1', navigation());
+    await saveReaderArticlePage('user-1', page(), true);
+    await saveReaderBody({ accountKey: 'account-1', articleId: 'article-1', contentHtml: '<p>Body</p>', bodyVersion: 1 });
+
+    expect(await loadReaderBody('account-1', 'article-1', 1)).toMatchObject({ contentHtml: '<p>Body</p>' });
+    expect(await loadReaderBody('account-1', 'article-1', 2)).toBeNull();
+  });
+
+  it('isolates a replacement provider while preserving pending mutations', async () => {
+    await saveReaderNavigation('user-1', navigation());
+    await saveReaderArticlePage('user-1', page(), true);
+    const queued = await enqueueArticleMutation({ articleId: 'article-1', operation: 'read', value: true });
+
+    await saveReaderNavigation('user-1', navigation('account-2', 'generation-2'));
+    await saveReaderArticlePage('user-1', page({ accountKey: 'account-2', generation: 'generation-2', articleId: 'other-article' }), true);
+
+    expect((await loadCachedReader('user-1'))?.accountKey).toBe('account-2');
+    expect((await loadCachedReader('user-1'))?.snapshot.articles.map(({ id }) => id)).toEqual(['other-article']);
+    expect(await queuedArticleMutations()).toEqual([queued]);
+  });
+
+  it('migrates the legacy snapshot without dropping an in-flight revision', async () => {
+    await saveCachedSnapshot(snapshot);
+    const queued = await enqueueArticleMutation({ articleId: 'article-1', operation: 'starred', value: true });
+
+    const migrated = await loadCachedReader('another-user');
+
+    expect(migrated?.accountKey).toBe('legacy:another-user');
+    expect(migrated?.snapshot.articles[0]).toMatchObject({ id: 'article-1', contentHtml: '<p>One</p>' });
+    expect(await queuedArticleMutations()).toEqual([queued]);
+  });
+
+  it('keeps provider-specific revisions separate even when article IDs match', async () => {
+    const first = await enqueueArticleMutation({ articleId: 'same-article', operation: 'read', value: true }, 'account-1');
+    const second = await enqueueArticleMutation({ articleId: 'same-article', operation: 'read', value: false }, 'account-2');
+
+    expect(await queuedArticleMutations('account-1')).toEqual([first]);
+    expect(await queuedArticleMutations('account-2')).toEqual([second]);
+    expect(await queuedArticleMutations()).toEqual([first, second]);
+  });
+
+  it('applies record-level deltas and invalidates only a changed article body', async () => {
+    await saveReaderNavigation('user-1', navigation());
+    await saveReaderArticlePage('user-1', page(), true);
+    await saveReaderBody({ accountKey: 'account-1', articleId: 'article-1', contentHtml: '<p>Old</p>', bodyVersion: 1 });
+
+    await applyReaderChanges({
+      accountKey: 'account-1',
+      hasMore: false,
+      token: 'next-token',
+      versions: { collection: 1, state: 2, body: 2 },
+      changes: [{
+        sequence: 1,
+        kind: 'upsert',
+        articleId: 'article-1',
+        metadataChanged: false,
+        stateChanged: true,
+        bodyChanged: true,
+        deleted: false,
+        versions: { collection: 1, state: 2, body: 2 },
+        payload: { ...page().articles[0], read: true },
+      }],
+    });
+
+    expect((await loadCachedReader('user-1'))?.snapshot.articles[0]).toMatchObject({ read: true, contentHtml: '' });
+    expect(await loadReaderBody('account-1', 'article-1', 1)).toBeNull();
   });
 });

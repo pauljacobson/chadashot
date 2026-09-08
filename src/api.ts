@@ -1,4 +1,4 @@
-import type { AccountSecurityState, AppLogLevel, AppLogResult, ArticleMutation, IntegrationStatus, ReaderInitializationState, ReaderSnapshot, SavedHighlight, SessionState } from '../shared/reader';
+import type { AccountSecurityState, AppLogLevel, AppLogResult, ArticleMutation, IntegrationStatus, ReaderArticleBody, ReaderArticlePage, ReaderChangesPage, ReaderInitializationState, ReaderNavigation, ReaderSnapshot, ReaderSynchronizationStatus, SavedHighlight, SessionState } from '../shared/reader';
 import type {
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
@@ -16,13 +16,13 @@ export class ApiError extends Error {
 
 async function request<T>(path: string, init?: RequestInit, measureReaderResponse = false): Promise<T> {
   const response = await fetch(path, {
+    ...init,
     credentials: 'same-origin',
     headers: {
       Accept: 'application/json',
       ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
       ...init?.headers,
     },
-    ...init,
   });
 
   if (!response.ok) {
@@ -54,17 +54,54 @@ export async function getReaderSnapshot(signal?: AbortSignal) {
   return result as ReaderSnapshot;
 }
 
-export function sendArticleMutation(mutation: ArticleMutation) {
+export function getReaderNavigation(signal?: AbortSignal) {
+  return request<ReaderNavigation>('/api/reader/navigation', { signal }, true);
+}
+
+export function getReaderArticles(options: {
+  cursor?: string;
+  limit?: number;
+  signal?: AbortSignal;
+} = {}) {
+  const query = new URLSearchParams({ scope: 'all', read: 'all', limit: String(options.limit ?? 100) });
+  if (options.cursor) query.set('cursor', options.cursor);
+  return request<ReaderArticlePage>(`/api/reader/articles?${query.toString()}`, { signal: options.signal }, true);
+}
+
+export function getReaderArticleBody(articleId: string, signal?: AbortSignal) {
+  return request<ReaderArticleBody>(`/api/reader/articles/${encodeURIComponent(articleId)}/body`, { signal }, true);
+}
+
+export function getReaderChanges(token?: string, signal?: AbortSignal) {
+  const query = new URLSearchParams({ limit: '500' });
+  if (token) query.set('token', token);
+  return request<ReaderChangesPage>(`/api/reader/changes?${query.toString()}`, { signal }, true);
+}
+
+export function getReaderSynchronizationStatus(signal?: AbortSignal) {
+  return request<ReaderSynchronizationStatus>('/api/reader/status', { signal });
+}
+
+export function requestReaderRefresh(signal?: AbortSignal) {
+  return request<{ status: 'scheduled'; synchronization: Omit<ReaderSynchronizationStatus, 'accountKey'> }>(
+    '/api/reader/refresh',
+    { method: 'POST', signal },
+  );
+}
+
+export function sendArticleMutation(mutation: ArticleMutation, accountKey?: string) {
   return request<{ mutation: ArticleMutation; synchronized: boolean }>('/api/reader/mutations', {
     method: 'POST',
     body: JSON.stringify(mutation),
+    headers: accountKey ? { 'X-Reader-Account-Key': accountKey } : undefined,
   });
 }
 
-export function sendArticleMutations(mutations: ArticleMutation[]) {
+export function sendArticleMutations(mutations: ArticleMutation[], accountKey?: string) {
   return request<{ mutations: ArticleMutation[]; synchronized: boolean }>('/api/reader/mutations/batch', {
     method: 'POST',
     body: JSON.stringify({ mutations }),
+    headers: accountKey ? { 'X-Reader-Account-Key': accountKey } : undefined,
   });
 }
 

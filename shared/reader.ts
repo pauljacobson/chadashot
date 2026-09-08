@@ -26,6 +26,7 @@ export type ReaderVersions = {
 };
 
 export type ReaderArticlePage = {
+  accountKey: string;
   generation: string;
   versions: ReaderVersions;
   total: number;
@@ -34,9 +35,49 @@ export type ReaderArticlePage = {
 };
 
 export type ReaderArticleBody = {
+  accountKey: string;
   articleId: string;
   contentHtml: string;
   bodyVersion: number;
+};
+
+export type ReaderNavigation = {
+  accountKey: string;
+  generation: string;
+  versions: ReaderVersions;
+  counts: { all: number; inbox: number; starred: number; uncategorized: number };
+  folders: Array<Folder & { totalCount: number; latestPublishedAt: string | null }>;
+  feeds: Array<Subscription & { totalCount: number; latestPublishedAt: string | null }>;
+};
+
+export type ReaderChange = {
+  sequence: number;
+  kind: 'navigation' | 'delete' | 'upsert';
+  articleId: string | null;
+  metadataChanged: boolean;
+  stateChanged: boolean;
+  bodyChanged: boolean;
+  deleted: boolean;
+  versions: ReaderVersions;
+  payload: unknown;
+};
+
+export type ReaderChangesPage = {
+  accountKey: string;
+  changes: ReaderChange[];
+  hasMore: boolean;
+  token: string;
+  versions: ReaderVersions;
+};
+
+export type ReaderSynchronizationStatus = {
+  accountKey: string;
+  state: 'empty' | 'initializing' | 'refreshing' | 'current' | 'stale';
+  itemsStaged: number;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  error: string | null;
+  versions: ReaderVersions;
 };
 
 export type Subscription = {

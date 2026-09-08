@@ -243,6 +243,7 @@ export class ReaderApi {
       articleId: last.id,
     }) : null;
     return {
+      accountKey: identity.accountKey,
       generation: context.generation,
       versions: context.versions,
       total,
@@ -267,6 +268,7 @@ export class ReaderApi {
     `).get(context.generation, articleId) as { content_html: string } | undefined;
     if (!row) return null;
     return {
+      accountKey: identity.accountKey,
       articleId,
       contentHtml: row.content_html,
       bodyVersion: context.versions.body,
@@ -337,7 +339,11 @@ export class ReaderApi {
         latestPublishedAt: feed.latest_published_at,
       })),
     };
-    return { ...result, etag: `"reader-navigation-${hash([context.versions.collection, context.versions.state])}"` };
+    return {
+      accountKey: identity.accountKey,
+      ...result,
+      etag: `"reader-navigation-${hash([context.versions.collection, context.versions.state])}"`,
+    };
   }
 
   changes(identity: ReaderCacheIdentity, token: string | undefined, limit: number) {
@@ -347,6 +353,7 @@ export class ReaderApi {
     `).get(identity.accountKey) as { value: number }).value;
     if (!token) {
       return {
+        accountKey: identity.accountKey,
         changes: [],
         hasMore: false,
         token: encode({
@@ -389,6 +396,7 @@ export class ReaderApi {
     const page = hasMore ? rows.slice(0, limit) : rows;
     const afterSequence = page.at(-1)?.sequence ?? targetSequence;
     return {
+      accountKey: identity.accountKey,
       changes: page.map((row) => ({
         sequence: row.sequence,
         kind: row.article_id === null ? 'navigation' : row.deleted ? 'delete' : 'upsert',
