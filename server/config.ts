@@ -14,6 +14,7 @@ const environmentSchema = z.object({
   LOG_OUTPUT: z.enum(['console', 'file', 'both']).optional(),
   LOG_FILE_PATH: z.string().optional(),
   LOG_MAX_BYTES: z.coerce.number().int().min(64 * 1024).default(5 * 1024 * 1024),
+  READER_SYNC_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(10 * 60 * 1_000).default(120_000),
 });
 
 export type AppConfig = {
@@ -30,6 +31,7 @@ export type AppConfig = {
   logOutput: 'console' | 'file' | 'both';
   logFilePath: string;
   logMaxBytes: number;
+  readerSyncTimeoutMs: number;
 };
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -69,5 +71,6 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     logOutput: parsed.LOG_OUTPUT ?? (parsed.NODE_ENV === 'test' ? 'console' : 'both'),
     logFilePath: parsed.LOG_FILE_PATH ?? path.join(dataDir, 'logs', 'app.ndjson'),
     logMaxBytes: parsed.LOG_MAX_BYTES,
+    readerSyncTimeoutMs: parsed.READER_SYNC_TIMEOUT_MS,
   };
 }

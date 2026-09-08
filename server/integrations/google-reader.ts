@@ -102,6 +102,7 @@ export class GoogleReaderClient {
     private readonly credentials: GoogleReaderCredentials,
     private readonly fetchImplementation: FetchImplementation = fetch,
     private readonly performanceRun?: ReaderPerformanceRun,
+    private readonly signal?: AbortSignal,
   ) {}
 
   private get baseUrl() {
@@ -120,10 +121,14 @@ export class GoogleReaderClient {
 
   private async request(url: string, init?: RequestInit, phase?: ReaderPhase) {
     if (phase) this.performanceRun?.providerRequestStarted(phase);
+    const signal = init?.signal && this.signal
+      ? AbortSignal.any([init.signal, this.signal])
+      : init?.signal ?? this.signal;
     try {
-      return await this.fetchImplementation(url, init);
+      return await this.fetchImplementation(url, { ...init, signal });
     } catch {
       if (phase) this.performanceRun?.providerResponseIncomplete(phase);
+      if (signal?.aborted && signal.reason instanceof Error) throw signal.reason;
       throw new Error('Could not reach the RSS service. Check the server URL and try again.');
     }
   }

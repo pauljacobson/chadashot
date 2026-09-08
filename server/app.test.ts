@@ -49,12 +49,26 @@ describe('application API', () => {
   });
 
   it('returns the fixture-backed reader snapshot', async () => {
-    const response = await request(app).get('/api/reader/snapshot');
+    const response = await request(app).get('/api/reader/snapshot').set('Accept-Encoding', 'identity');
     expect(response.status).toBe(200);
     expect(response.headers['x-reader-run-id']).toMatch(/^[0-9a-f-]{36}$/);
     expect(Number(response.headers['content-length'])).toBeGreaterThan(0);
     expect(response.body.source).toBe('fixture');
     expect(response.body.articles).toHaveLength(4);
+  });
+
+  it('negotiates Brotli or gzip while preserving the identity snapshot contract', async () => {
+    const identity = await request(app).get('/api/reader/snapshot').set('Accept-Encoding', 'identity');
+    const gzip = await request(app).get('/api/reader/snapshot').set('Accept-Encoding', 'gzip');
+    const brotli = await request(app).get('/api/reader/snapshot').set('Accept-Encoding', 'br');
+
+    expect(identity.headers['content-encoding']).toBeUndefined();
+    expect(gzip.headers['content-encoding']).toBe('gzip');
+    expect(brotli.headers['content-encoding']).toBe('br');
+    expect(gzip.headers.vary).toContain('Accept-Encoding');
+    expect(brotli.headers.vary).toContain('Accept-Encoding');
+    expect({ ...gzip.body, generatedAt: undefined }).toEqual({ ...identity.body, generatedAt: undefined });
+    expect({ ...brotli.body, generatedAt: undefined }).toEqual({ ...identity.body, generatedAt: undefined });
   });
 
   it('validates article mutations', async () => {

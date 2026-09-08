@@ -7,6 +7,7 @@ describe('loadConfig', () => {
     expect(config.authMode).toBe('development');
     expect(config.logOutput).toBe('both');
     expect(config.logFilePath).toBe(`${config.dataDir}/logs/app.ndjson`);
+    expect(config.readerSyncTimeoutMs).toBe(120_000);
   });
 
   it('uses passkeys in production', () => {

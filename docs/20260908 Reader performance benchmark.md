@@ -113,3 +113,21 @@ Every synthetic reader response was 52,616,357 decoded identity bytes, so the �
 - Run the same scenarios on a named physical Android device and record its model, Android version, browser version, viewport, and results. No physical Android device was available for this baseline.
 - Add populated-server-cache, unchanged-refresh, small-incremental-update, and uncached-body results when their owning issues provide those states.
 - Any proposed budget adjustment must be supported by those measurements and recorded explicitly in parent issue #1.
+
+## Issue #3 safeguard results
+
+The refresh coordinator is intentionally process-local for the current Railway deployment model. Its key combines the authenticated user with a one-way generation derived from the encrypted integration record. Equivalent callers in the same Node.js process share one promise and provider run. Credential replacement or disconnection invalidates all old runs, and every completed result is checked against the current generation before it can be returned. The default provider deadline is 120 seconds and is configurable through `READER_SYNC_TIMEOUT_MS`.
+
+This guard does not coordinate separate Node.js processes and does not survive a restart. Production must therefore remain a single application process until issue #5 moves ownership and recovery to the durable cache design. A restart safely loses only in-flight ownership; it does not publish a stale result.
+
+A controlled burst of ten fixture-backed API requests produced one authentication, one content traversal, one shared run ID, and a coalesced-trigger count of nine. A rejected run released ownership for the next request, a deliberately non-settling provider returned 504 at its configured test deadline, and changing credentials caused the old request to return 409 while the new generation synchronized successfully.
+
+Compression retains the decoded legacy snapshot contract and negotiates Brotli, gzip, or identity with `Vary: Accept-Encoding`. The byte counter runs after encoding and records process CPU used between response start and completion. Process CPU is diagnostic rather than exclusive per-request CPU when responses overlap.
+
+| Encoding | Encoded bytes | Reduction from 52,616,357 decoded bytes | Response phase | Process CPU |
+| --- | ---: | ---: | ---: | ---: |
+| Identity | 52,616,357 | 0% | 25.96 ms | 20,474 µs user + 4,754 µs system |
+| Gzip level 6 | 820,746 | 98.44% | 112.62 ms | 145,615 µs user + 2,802 µs system |
+| Brotli quality 4 | 357,165 | 99.32% | 59.54 ms | 89,393 µs user + 3,399 µs system |
+
+These unusually large ratios reflect deliberately repetitive synthetic bodies. They demonstrate correct encoding and measurement, not a forecast for real feeds. An aborted Brotli request logged 49,152 partial bytes while leaving completed encoded bytes unknown, confirming that disconnects do not become false transfer totals. Compression reduces browser transfer but does not remove the 50-request, 61-second live provider traversal measured above.
