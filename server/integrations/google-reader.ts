@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { z } from 'zod';
 import type { Article, ArticleMutation, Folder, ReaderSnapshot, Subscription } from '../../shared/reader.js';
 import type { ReaderPerformanceRun, ReaderPhase } from '../reader-performance.js';
@@ -61,6 +62,41 @@ const unreadCountSchema = z.object({
 });
 
 const STREAM_PAGE_SIZE = 1_000;
+const SESSION_CACHE_LIMIT = 32;
+const AUTH_TTL_MS = 5 * 60 * 1_000;
+const WRITE_TOKEN_TTL_MS = 2 * 60 * 1_000;
+const MAX_REQUEST_ATTEMPTS = 3;
+const MAX_RETRY_DELAY_MS = 5_000;
+
+type SessionCacheEntry = {
+  auth?: { value: string; expiresAt: number };
+  authPromise?: Promise<string>;
+  writeToken?: { value: string; expiresAt: number };
+  writeTokenPromise?: Promise<string>;
+};
+
+const sessionCache = new Map<string, SessionCacheEntry>();
+
+export function clearGoogleReaderSessionCache() {
+  sessionCache.clear();
+}
+
+function cachedSession(key: string) {
+  const existing = sessionCache.get(key);
+  if (existing) {
+    sessionCache.delete(key);
+    sessionCache.set(key, existing);
+    return existing;
+  }
+  const created: SessionCacheEntry = {};
+  sessionCache.set(key, created);
+  while (sessionCache.size > SESSION_CACHE_LIMIT) {
+    const oldest = sessionCache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    sessionCache.delete(oldest);
+  }
+  return created;
+}
 
 const quickAddSchema = z.object({
   numResults: z.number(),
@@ -94,7 +130,7 @@ function publishedAt(item: z.infer<typeof streamItemSchema>) {
   return new Date(0).toISOString();
 }
 
-function comparableItemId(id: string) {
+export function normalizeGoogleReaderItemId(id: string) {
   const googleReaderPrefix = 'tag:google.com,2005:reader/item/';
   if (!id.startsWith(googleReaderPrefix)) return id;
   const hexadecimalId = id.slice(googleReaderPrefix.length);
@@ -114,6 +150,37 @@ export class GoogleReaderClient {
     return this.credentials.serverUrl.replace(/\/+$/, '');
   }
 
+  private get sessionKey() {
+    return crypto.createHash('sha256').update(JSON.stringify([
+      this.baseUrl,
+      this.credentials.email.trim().toLocaleLowerCase(),
+      this.credentials.apiKey,
+    ])).digest('base64url');
+  }
+
+  private retryDelay(response: Response, attempt: number) {
+    const retryAfter = response.headers.get('retry-after');
+    if (retryAfter) {
+      const seconds = Number(retryAfter);
+      if (Number.isFinite(seconds)) return Math.min(MAX_RETRY_DELAY_MS, Math.max(0, seconds * 1_000));
+      const timestamp = Date.parse(retryAfter);
+      if (Number.isFinite(timestamp)) return Math.min(MAX_RETRY_DELAY_MS, Math.max(0, timestamp - Date.now()));
+    }
+    const ceiling = Math.min(MAX_RETRY_DELAY_MS, 250 * (2 ** attempt));
+    return Math.floor(Math.random() * ceiling);
+  }
+
+  private async waitForRetry(milliseconds: number, signal?: AbortSignal) {
+    if (milliseconds === 0) return;
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, milliseconds);
+      signal?.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      }, { once: true });
+    });
+  }
+
   private iconUrl(iconUrl: string | undefined) {
     if (!iconUrl) return null;
     try {
@@ -125,17 +192,31 @@ export class GoogleReaderClient {
   }
 
   private async request(url: string, init?: RequestInit, phase?: ReaderPhase) {
-    if (phase) this.performanceRun?.providerRequestStarted(phase);
     const signal = init?.signal && this.signal
       ? AbortSignal.any([init.signal, this.signal])
       : init?.signal ?? this.signal;
-    try {
-      return await this.fetchImplementation(url, { ...init, signal });
-    } catch {
-      if (phase) this.performanceRun?.providerResponseIncomplete(phase);
-      if (signal?.aborted && signal.reason instanceof Error) throw signal.reason;
-      throw new Error('Could not reach the RSS service. Check the server URL and try again.');
+    for (let attempt = 0; attempt < MAX_REQUEST_ATTEMPTS; attempt += 1) {
+      if (phase) this.performanceRun?.providerRequestStarted(phase);
+      try {
+        const response = await this.fetchImplementation(url, { ...init, signal });
+        const retryable = response.status === 429 || response.status >= 500;
+        if (!retryable || attempt === MAX_REQUEST_ATTEMPTS - 1) return response;
+        if (phase) {
+          this.performanceRun?.providerResponseIncomplete(phase, false);
+          this.performanceRun?.recordRetry();
+        }
+        await this.waitForRetry(this.retryDelay(response, attempt), signal);
+      } catch {
+        if (phase) this.performanceRun?.providerResponseIncomplete(phase, attempt === MAX_REQUEST_ATTEMPTS - 1);
+        if (signal?.aborted && signal.reason instanceof Error) throw signal.reason;
+        if (attempt === MAX_REQUEST_ATTEMPTS - 1) {
+          throw new Error('Could not reach the RSS service. Check the server URL and try again.');
+        }
+        if (phase) this.performanceRun?.recordRetry();
+        await this.waitForRetry(Math.floor(Math.random() * Math.min(MAX_RETRY_DELAY_MS, 250 * (2 ** attempt))), signal);
+      }
     }
+    throw new Error('Could not reach the RSS service. Check the server URL and try again.');
   }
 
   private async responseText(response: Response, phase?: ReaderPhase, options: { pages?: number; items?: number } = {}) {
@@ -154,6 +235,21 @@ export class GoogleReaderClient {
   }
 
   private async authenticate(phase?: ReaderPhase) {
+    const session = cachedSession(this.sessionKey);
+    if (session.auth && session.auth.expiresAt > Date.now()) return session.auth.value;
+    if (session.authPromise) return session.authPromise;
+    const operation = this.authenticateUncached(phase);
+    session.authPromise = operation;
+    try {
+      const auth = await operation;
+      session.auth = { value: auth, expiresAt: Date.now() + AUTH_TTL_MS };
+      return auth;
+    } finally {
+      session.authPromise = undefined;
+    }
+  }
+
+  private async authenticateUncached(phase?: ReaderPhase) {
     const body = new URLSearchParams({
       Email: this.credentials.email,
       Passwd: this.credentials.apiKey,
@@ -176,18 +272,45 @@ export class GoogleReaderClient {
   }
 
   private async authorizedRequest(path: string, auth: string, init?: RequestInit, phase?: ReaderPhase) {
-    const response = await this.request(`${this.baseUrl}${path}`, {
-      ...init,
-      headers: {
-        Authorization: `GoogleLogin auth=${auth}`,
-        ...init?.headers,
-      },
-    }, phase);
+    const send = (currentAuth: string) => this.request(`${this.baseUrl}${path}`, {
+        ...init,
+        headers: {
+          Authorization: `GoogleLogin auth=${currentAuth}`,
+          ...init?.headers,
+        },
+      }, phase);
+    let response = await send(auth);
+    if (response.status === 401 || response.status === 403) {
+      const session = cachedSession(this.sessionKey);
+      if (session.auth?.value === auth) session.auth = undefined;
+      session.writeToken = undefined;
+      session.writeTokenPromise = undefined;
+      response = await send(await this.authenticate(phase));
+    }
     if (!response.ok) {
       if (phase) this.performanceRun?.providerResponseIncomplete(phase);
       throw new Error(`RSS service request failed (${response.status})`);
     }
     return response;
+  }
+
+  private async writeToken(auth: string) {
+    const session = cachedSession(this.sessionKey);
+    if (session.writeToken && session.writeToken.expiresAt > Date.now()) return session.writeToken.value;
+    if (session.writeTokenPromise) return session.writeTokenPromise;
+    const operation = (async () => {
+      const token = await (await this.authorizedRequest('/reader/api/0/token', auth)).text();
+      if (!token) throw new Error('The RSS service returned an invalid write token');
+      return token;
+    })();
+    session.writeTokenPromise = operation;
+    try {
+      const token = await operation;
+      session.writeToken = { value: token, expiresAt: Date.now() + WRITE_TOKEN_TTL_MS };
+      return token;
+    } finally {
+      session.writeTokenPromise = undefined;
+    }
   }
 
   async validateCredentials() {
@@ -197,6 +320,7 @@ export class GoogleReaderClient {
   private async forEachStreamItemPage(
     auth: string,
     consume: (items: z.infer<typeof streamItemSchema>[]) => void | Promise<void>,
+    options: { startTimeSeconds?: number; order?: 'newest' | 'oldest' } = {},
   ) {
     const itemIds = new Set<string>();
     const continuationTokens = new Set<string>();
@@ -204,6 +328,8 @@ export class GoogleReaderClient {
 
     do {
       const query = new URLSearchParams({ output: 'json', n: String(STREAM_PAGE_SIZE) });
+      query.set('r', options.order === 'oldest' ? 'o' : 'n');
+      if (options.startTimeSeconds) query.set('ot', String(options.startTimeSeconds));
       if (continuation) query.set('c', continuation);
       const response = await this.authorizedRequest(
         `/reader/api/0/stream/contents/user/-/state/com.google/reading-list?${query}`,
@@ -257,7 +383,7 @@ export class GoogleReaderClient {
       const response = await this.authorizedRequest(`/reader/api/0/stream/items/ids?${query}`, auth, undefined, phase);
       const page = itemIdsSchema.parse(await this.responseJson(response, phase));
       this.performanceRun?.recordItems(phase, page.itemRefs.length, 1);
-      for (const item of page.itemRefs) itemIds.add(comparableItemId(item.id));
+      for (const item of page.itemRefs) itemIds.add(normalizeGoogleReaderItemId(item.id));
 
       const nextContinuation = page.continuation;
       if (!nextContinuation) break;
@@ -268,6 +394,32 @@ export class GoogleReaderClient {
       continuation = nextContinuation;
     } while (continuation);
 
+    return itemIds;
+  }
+
+  private async allReadingListItemIds(auth: string, startTimeSeconds: number) {
+    const itemIds = new Set<string>();
+    const continuationTokens = new Set<string>();
+    let continuation: string | undefined;
+    do {
+      const query = new URLSearchParams({
+        output: 'json',
+        n: String(STREAM_PAGE_SIZE),
+        r: 'n',
+        s: 'user/-/state/com.google/reading-list',
+        ot: String(startTimeSeconds),
+      });
+      if (continuation) query.set('c', continuation);
+      const response = await this.authorizedRequest(`/reader/api/0/stream/items/ids?${query}`, auth, undefined, 'contentPages');
+      const page = itemIdsSchema.parse(await this.responseJson(response, 'contentPages'));
+      this.performanceRun?.recordItems('contentPages', page.itemRefs.length, 1);
+      for (const item of page.itemRefs) itemIds.add(normalizeGoogleReaderItemId(item.id));
+      const nextContinuation = page.continuation;
+      if (!nextContinuation) break;
+      if (continuationTokens.has(nextContinuation)) throw new Error('RSS service returned a repeating continuation token');
+      continuationTokens.add(nextContinuation);
+      continuation = nextContinuation;
+    } while (continuation);
     return itemIds;
   }
 
@@ -309,7 +461,7 @@ export class GoogleReaderClient {
         const html = item.content?.content ?? item.summary?.content ?? '';
         const text = plainText(html);
         const subscription = subscriptionsById.get(item.origin.streamId);
-        const comparableId = comparableItemId(item.id);
+        const comparableId = normalizeGoogleReaderItemId(item.id);
         return {
           id: item.id,
           feedId: item.origin.streamId,
@@ -413,7 +565,7 @@ export class GoogleReaderClient {
         const html = item.content?.content ?? item.summary?.content ?? '';
         const text = plainText(html);
         const subscription = context.subscriptionsById.get(item.origin.streamId);
-        const comparableId = comparableItemId(item.id);
+        const comparableId = normalizeGoogleReaderItemId(item.id);
         return {
           id: item.id,
           feedId: item.origin.streamId,
@@ -436,13 +588,152 @@ export class GoogleReaderClient {
     await Promise.all([structure, articles]);
   }
 
+  private async incrementalContext(auth: string) {
+    const [subscriptionsResponse, unreadCountResponse] = await Promise.all([
+      this.authorizedRequest('/reader/api/0/subscription/list?output=json', auth, undefined, 'subscriptions'),
+      this.authorizedRequest('/reader/api/0/unread-count?output=json', auth, undefined, 'subscriptions'),
+    ]);
+    const subscriptionsResult = subscriptionListSchema.parse(await this.responseJson(subscriptionsResponse, 'subscriptions'));
+    const unreadCountResult = unreadCountSchema.parse(await this.responseJson(unreadCountResponse, 'subscriptions'));
+    this.performanceRun?.recordItems('subscriptions', subscriptionsResult.subscriptions.length);
+    const unreadCounts = new Map(unreadCountResult.unreadcounts.map((entry) => [entry.id, entry.count] as const));
+    const subscriptions = subscriptionsResult.subscriptions.map((subscription) => ({
+      id: subscription.id,
+      title: subscription.title,
+      url: subscription.url ?? subscription.id.replace(/^feed\//, ''),
+      siteUrl: subscription.htmlUrl ?? null,
+      iconUrl: this.iconUrl(subscription.iconUrl),
+      folderIds: subscription.categories.map((category) => folderId(category.id)),
+      unreadCount: unreadCounts.get(subscription.id) ?? 0,
+    }));
+    const subscriptionsById = new Map(subscriptions.map((subscription) => [subscription.id, subscription]));
+    const folderMap = new Map<string, Folder>();
+    for (const source of subscriptionsResult.subscriptions) {
+      for (const category of source.categories) {
+        const id = folderId(category.id);
+        folderMap.set(id, {
+          id,
+          title: category.label ?? category.id.split('/').at(-1) ?? 'Folder',
+          unreadCount: unreadCounts.get(category.id)
+            ?? (folderMap.get(id)?.unreadCount ?? 0) + (subscriptionsById.get(source.id)?.unreadCount ?? 0),
+        });
+      }
+    }
+    return { subscriptions, subscriptionsById, folders: [...folderMap.values()] };
+  }
+
+  private mapIncrementalItems(
+    items: z.infer<typeof streamItemSchema>[],
+    subscriptionsById: Map<string, Subscription>,
+  ) {
+    return items.map((item) => {
+      const html = item.content?.content ?? item.summary?.content ?? '';
+      const text = plainText(html);
+      const subscription = subscriptionsById.get(item.origin.streamId);
+      return {
+        id: item.id,
+        feedId: item.origin.streamId,
+        folderIds: subscription?.folderIds ?? [],
+        title: item.title,
+        author: item.author ?? null,
+        source: item.origin.title ?? subscription?.title ?? 'Unknown feed',
+        canonicalUrl: item.canonical?.[0]?.href ?? item.alternate?.[0]?.href ?? item.origin.htmlUrl ?? '#',
+        publishedAt: publishedAt(item),
+        readingMinutes: Math.max(1, Math.ceil(text.split(/\s+/).filter(Boolean).length / 220)),
+        summary: text.slice(0, 240),
+        contentHtml: html,
+        // Birchfeed does not expose read/starred tags on sampled item bodies.
+        // The independent authoritative state scan corrects these defaults.
+        read: false,
+        starred: false,
+      } satisfies Article;
+    });
+  }
+
+  async discoverSince(
+    startTimeSeconds: number,
+    knownIds: ReadonlySet<string>,
+    structureMatches: (folders: Folder[], subscriptions: Subscription[]) => boolean = () => true,
+  ) {
+    const measure = <T>(phase: ReaderPhase, operation: () => Promise<T>) => this.performanceRun
+      ? this.performanceRun.measure(phase, operation)
+      : operation();
+    const auth = await measure('authentication', () => this.authenticate('authentication'));
+    const [context, candidateIds] = await Promise.all([
+      measure('subscriptions', () => this.incrementalContext(auth)),
+      measure('contentPages', () => this.allReadingListItemIds(auth, startTimeSeconds)),
+    ]);
+    const unknownIds = [...candidateIds].filter((id) => !knownIds.has(id));
+    const articles: Article[] = [];
+    const structureChanged = !structureMatches(context.folders, context.subscriptions);
+    if (structureChanged) {
+      return {
+        folders: context.folders,
+        subscriptions: context.subscriptions,
+        candidateIds,
+        unknownIds,
+        articles,
+        structureChanged,
+      };
+    }
+    for (let offset = 0; offset < unknownIds.length; offset += 100) {
+      const ids = unknownIds.slice(offset, offset + 100);
+      const body = new URLSearchParams();
+      for (const id of ids) body.append('i', id);
+      const response = await this.authorizedRequest('/reader/api/0/stream/items/contents', auth, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+      }, 'contentPages');
+      const page = streamSchema.parse(await this.responseJson(response, 'contentPages'));
+      this.performanceRun?.recordItems('contentPages', page.items.length, 1);
+      articles.push(...this.mapIncrementalItems(page.items, context.subscriptionsById));
+    }
+    return {
+      folders: context.folders,
+      subscriptions: context.subscriptions,
+      candidateIds,
+      unknownIds,
+      articles,
+      structureChanged,
+    };
+  }
+
+  async reconcileBodiesSince(startTimeSeconds: number, consume: (articles: Article[]) => void | Promise<void>) {
+    const measure = <T>(phase: ReaderPhase, operation: () => Promise<T>) => this.performanceRun
+      ? this.performanceRun.measure(phase, operation)
+      : operation();
+    const auth = await measure('authentication', () => this.authenticate('authentication'));
+    const contextPromise = measure('subscriptions', () => this.incrementalContext(auth));
+    let candidates = 0;
+    await measure('contentPages', () => this.forEachStreamItemPage(auth, async (items) => {
+      const context = await contextPromise;
+      const articles = this.mapIncrementalItems(items, context.subscriptionsById);
+      candidates += articles.length;
+      await consume(articles);
+    }, { startTimeSeconds, order: 'newest' }));
+    return { candidates };
+  }
+
+  async authoritativeState() {
+    const measure = <T>(phase: ReaderPhase, operation: () => Promise<T>) => this.performanceRun
+      ? this.performanceRun.measure(phase, operation)
+      : operation();
+    const auth = await measure('authentication', () => this.authenticate('authentication'));
+    const [unreadIds, starredIds] = await Promise.all([
+      measure('unreadIds', () => this.allStateItemIds(auth, 'unread')),
+      measure('starredIds', () => this.allStateItemIds(auth, 'starred')),
+    ]);
+    return { unreadIds, starredIds };
+  }
+
   async mutate(mutation: ArticleMutation) {
     await this.mutateMany([mutation]);
   }
 
   async mutateMany(mutations: ArticleMutation[]) {
     const auth = await this.authenticate();
-    const token = await (await this.authorizedRequest('/reader/api/0/token', auth)).text();
+    const token = await this.writeToken(auth);
     const groups = new Map<string, ArticleMutation[]>();
     for (const mutation of mutations) {
       const key = `${mutation.operation}:${mutation.value}`;
@@ -467,7 +758,7 @@ export class GoogleReaderClient {
 
   async subscribe(feedUrl: string) {
     const auth = await this.authenticate();
-    const token = await (await this.authorizedRequest('/reader/api/0/token', auth)).text();
+    const token = await this.writeToken(auth);
     const quickAddBody = new URLSearchParams({ quickadd: feedUrl, T: token });
     const quickAddResponse = await this.request(`${this.baseUrl}/reader/api/0/subscription/quickadd?output=json`, {
       method: 'POST',

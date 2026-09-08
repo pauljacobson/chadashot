@@ -15,7 +15,7 @@ Chadashot deploys as one Docker-based Railway service from the repository root. 
 - Optional logging controls are `LOG_LEVEL` (`debug`, `info`, `warn`, or `error`), `LOG_OUTPUT` (`console`, `file`, or `both`), and `LOG_MAX_BYTES`. The defaults are `info`, `both`, and 5 MiB.
 - Keep `READER_CACHE_ENABLED=true` for normal operation. `false` is a temporary application rollback to the legacy blocking reader route; it does not reverse the forward-only cache migration.
 - `READER_SYNC_LEASE_MS` defaults to 45 seconds. The importing web process heartbeats every 15 seconds, and another process may take ownership only after the lease expires.
-- `READER_CACHE_REFRESH_INTERVAL_MS` defaults to three minutes so repeated compatibility snapshot requests do not start repeated full imports.
+- Reader synchronization defaults are `READER_ROUTINE_SYNC_INTERVAL_MS=180000`, `READER_STATE_SYNC_INTERVAL_MS=900000`, `READER_BODY_SYNC_INTERVAL_MS=21600000`, `READER_FULL_SYNC_INTERVAL_MS=86400000`, and `READER_SYNC_OVERLAP_SECONDS=21600`. They bound discovery delay while keeping complete state, body, and collection reconciliation less frequent.
 - The deployment health check is `/api/health`.
 
 Treat `ENCRYPTION_KEY` as permanent application data: changing it makes the saved Birchfeed and Readwise credentials unreadable. Store it in a password manager as well as Railway.
@@ -54,7 +54,7 @@ Migration rules:
 
 #### Reader import process model
 
-Run one Railway web service and do not add a separate reader worker in this phase. A request serves the latest committed SQLite generation immediately and asks the same web process to refresh in the background. Short transactions stage at most 500 articles at a time; no transaction stays open during a Birchfeed request. A final transaction verifies the current fencing token and atomically publishes the generation with its checkpoint and collection/state/body versions.
+Run one Railway web service and do not add a separate reader worker in this phase. A request serves the latest committed SQLite generation immediately and asks the same web process to refresh in the background. Routine runs discover IDs inside an overlapping time window and request bodies only for unknown IDs. Scheduled state, changed-body, and daily full reconciliation cover provider capabilities that have no reliable incremental marker. Short transactions stage at most 500 articles at a time; no transaction stays open during a Birchfeed request. Every data-changing phase verifies the current fencing token and advances its checkpoint in the same SQLite transaction.
 
 The lease is stored in SQLite rather than process memory so overlapping Railway deployments cannot publish competing generations. Its default 45-second expiry and 15-second heartbeat allow a replacement process to recover after an old process stops. An expired or replaced owner is fenced from publication even if its old provider request later completes. A failed or interrupted generation remains uncommitted and the last successful generation remains readable.
 

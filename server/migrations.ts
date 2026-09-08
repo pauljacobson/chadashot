@@ -246,6 +246,25 @@ const migrations: Migration[] = [
       CREATE INDEX reader_sync_runs_account_started ON reader_sync_runs(account_key, started_at DESC);
     `,
   },
+  {
+    version: 5,
+    name: 'incremental_reader_checkpoints',
+    sql: `
+      ALTER TABLE reader_sync_runs ADD COLUMN kind TEXT NOT NULL DEFAULT 'full'
+        CHECK (kind IN ('full', 'routine', 'state', 'body'));
+
+      CREATE TABLE reader_incremental_checkpoints (
+        account_key TEXT PRIMARY KEY REFERENCES reader_accounts(account_key) ON DELETE CASCADE,
+        routine_cutoff_seconds INTEGER,
+        body_cutoff_seconds INTEGER,
+        subscription_fingerprint TEXT,
+        last_routine_at TEXT,
+        last_state_at TEXT,
+        last_body_at TEXT,
+        last_full_at TEXT
+      );
+    `,
+  },
 ];
 
 function ensureMigrationTable(database: AppDatabase) {

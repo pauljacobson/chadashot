@@ -17,7 +17,11 @@ const environmentSchema = z.object({
   READER_SYNC_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(10 * 60 * 1_000).default(120_000),
   READER_CACHE_ENABLED: z.enum(['true', 'false']).default('true'),
   READER_SYNC_LEASE_MS: z.coerce.number().int().min(5_000).max(10 * 60 * 1_000).default(45_000),
-  READER_CACHE_REFRESH_INTERVAL_MS: z.coerce.number().int().min(0).max(60 * 60 * 1_000).default(180_000),
+  READER_ROUTINE_SYNC_INTERVAL_MS: z.coerce.number().int().min(0).max(60 * 60 * 1_000).default(180_000),
+  READER_STATE_SYNC_INTERVAL_MS: z.coerce.number().int().min(0).max(24 * 60 * 60 * 1_000).default(15 * 60 * 1_000),
+  READER_BODY_SYNC_INTERVAL_MS: z.coerce.number().int().min(0).max(7 * 24 * 60 * 60 * 1_000).default(6 * 60 * 60 * 1_000),
+  READER_FULL_SYNC_INTERVAL_MS: z.coerce.number().int().min(0).max(30 * 24 * 60 * 60 * 1_000).default(24 * 60 * 60 * 1_000),
+  READER_SYNC_OVERLAP_SECONDS: z.coerce.number().int().min(0).max(7 * 24 * 60 * 60).default(6 * 60 * 60),
 });
 
 export type AppConfig = {
@@ -37,7 +41,11 @@ export type AppConfig = {
   readerSyncTimeoutMs: number;
   readerCacheEnabled: boolean;
   readerSyncLeaseMs: number;
-  readerCacheRefreshIntervalMs: number;
+  readerRoutineSyncIntervalMs: number;
+  readerStateSyncIntervalMs: number;
+  readerBodySyncIntervalMs: number;
+  readerFullSyncIntervalMs: number;
+  readerSyncOverlapSeconds: number;
 };
 
 export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppConfig {
@@ -80,6 +88,10 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     readerSyncTimeoutMs: parsed.READER_SYNC_TIMEOUT_MS,
     readerCacheEnabled: parsed.READER_CACHE_ENABLED === 'true',
     readerSyncLeaseMs: parsed.READER_SYNC_LEASE_MS,
-    readerCacheRefreshIntervalMs: parsed.READER_CACHE_REFRESH_INTERVAL_MS,
+    readerRoutineSyncIntervalMs: parsed.READER_ROUTINE_SYNC_INTERVAL_MS,
+    readerStateSyncIntervalMs: parsed.READER_STATE_SYNC_INTERVAL_MS,
+    readerBodySyncIntervalMs: parsed.READER_BODY_SYNC_INTERVAL_MS,
+    readerFullSyncIntervalMs: parsed.READER_FULL_SYNC_INTERVAL_MS,
+    readerSyncOverlapSeconds: parsed.READER_SYNC_OVERLAP_SECONDS,
   };
 }

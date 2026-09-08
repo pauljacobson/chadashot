@@ -116,6 +116,7 @@ export class ReaderPerformanceRun {
   private encodedBytesUnknownResponses = 0;
   private decodedBytes = 0;
   private coalescedTriggers = 0;
+  private retries = 0;
   private outcome: ReaderSynchronizationMeasurement['outcome'] = 'completed';
 
   async measure<T>(phase: ReaderPhase, operation: () => Promise<T>): Promise<T> {
@@ -164,14 +165,18 @@ export class ReaderPerformanceRun {
     }
   }
 
-  providerResponseIncomplete(phase: ReaderPhase) {
-    this.outcome = 'failed';
+  providerResponseIncomplete(phase: ReaderPhase, final = true) {
+    if (final) this.outcome = 'failed';
     this.incompleteResponses += 1;
     this.phases[phase].incompleteResponses += 1;
   }
 
   recordCoalescedTrigger() {
     this.coalescedTriggers += 1;
+  }
+
+  recordRetry() {
+    this.retries += 1;
   }
 
   recordItems(phase: ReaderPhase, items: number, pages = 0) {
@@ -192,7 +197,7 @@ export class ReaderPerformanceRun {
         encodedBytes: this.encodedBytes,
         encodedBytesUnknownResponses: this.encodedBytesUnknownResponses,
         decodedBytes: this.decodedBytes,
-        retries: 0,
+        retries: this.retries,
       },
       phases: this.phases,
       collection,

@@ -10,7 +10,11 @@ describe('loadConfig', () => {
     expect(config.readerSyncTimeoutMs).toBe(120_000);
     expect(config.readerCacheEnabled).toBe(true);
     expect(config.readerSyncLeaseMs).toBe(45_000);
-    expect(config.readerCacheRefreshIntervalMs).toBe(180_000);
+    expect(config.readerRoutineSyncIntervalMs).toBe(180_000);
+    expect(config.readerStateSyncIntervalMs).toBe(900_000);
+    expect(config.readerBodySyncIntervalMs).toBe(21_600_000);
+    expect(config.readerFullSyncIntervalMs).toBe(86_400_000);
+    expect(config.readerSyncOverlapSeconds).toBe(21_600);
   });
 
   it('keeps the migrated schema while allowing the legacy reader path to be selected', () => {
