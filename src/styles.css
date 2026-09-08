@@ -335,11 +335,11 @@ textarea:focus-visible {
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: var(--sidebar-width, 220px) 10px var(--article-list-width, 350px) 10px minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-width, 220px) 10px minmax(0, 1fr);
   overflow: hidden;
 }
 
-.sidebar-collapsed .workspace { grid-template-columns: var(--article-list-width, 350px) 10px minmax(0, 1fr); }
+.sidebar-collapsed .workspace { grid-template-columns: minmax(0, 1fr); }
 .sidebar-collapsed .sidebar { display: none; }
 .sidebar-collapsed .sidebar-resizer { display: none; }
 
@@ -554,7 +554,6 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   display: flex;
   flex-direction: column;
   background: var(--surface);
-  border-right: 1px solid var(--border);
 }
 .list-header {
   min-height: 66px;
@@ -695,12 +694,31 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   min-height: 66px;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 20px;
+  gap: 12px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--border);
 }
 .toolbar-spacer { flex: 1; }
-.mobile-back { display: none !important; }
+.reader-close { flex: none; }
+.reader-navigation,
+.reader-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.reader-navigation {
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
+}
+.reader-navigation button { white-space: nowrap; }
+.reader-position {
+  min-width: 54px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+  white-space: nowrap;
+}
+.reader-actions { flex: none; }
 .reading-scroll { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; }
 .reading-column { width: 100%; max-width: 840px; margin: 0 auto; padding: 46px 52px 90px; }
 .article-source { color: var(--accent); font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
@@ -1156,8 +1174,7 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 @media (max-width: 900px) {
   .wordmark { width: 182px; }
   .reading-column { padding: 38px 34px 72px; }
-  .toolbar-link { font-size: 0; }
-  .toolbar-link::after { content: "↗"; font-size: 14px; }
+  .reader-actions .button-label { display: none; }
 }
 
 @media (max-width: 720px) {
@@ -1173,20 +1190,19 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   .panel-resizer { display: none; }
   .sidebar { display: none; }
   .article-list, .reader-pane { height: calc(100dvh - 126px); border-right: 0; }
-  .mobile-list .reader-pane { display: none; }
-  .mobile-reader .article-list { display: none; }
   .list-header { min-height: 50px; flex-wrap: wrap; padding-block: 8px; }
   .article-read-filter { order: 3; width: 100%; }
   .article-read-filter button { flex: 1; min-height: 34px; }
   .article-main-action { min-height: 112px; padding: 15px 42px 14px 17px; }
-  .reader-toolbar { min-height: 56px; gap: 2px; padding: 0 8px; }
+  .reader-toolbar { min-height: 56px; gap: 2px; padding: 0 8px; overflow-x: auto; scrollbar-width: none; }
+  .reader-toolbar::-webkit-scrollbar { display: none; }
   .reader-toolbar button, .toolbar-link { min-width: 44px; min-height: 44px; padding: 0 8px; border: 0; border-radius: 50%; background: transparent; font-size: 0; }
-  .reader-toolbar button::first-letter, .toolbar-link::first-letter { font-size: 16px; }
-  .mobile-back { display: inline-flex !important; font-size: 18px !important; }
-  .reader-toolbar button:nth-of-type(2)::after { content: "●"; font-size: 14px; }
-  .reader-toolbar button:nth-of-type(3)::after { content: "☆"; font-size: 18px; }
-  .reader-toolbar button:nth-of-type(3)[aria-pressed="true"]::after { content: "★"; }
-  .reader-toolbar button:nth-of-type(4)::after { content: "↗"; font-size: 16px; }
+  .reader-toolbar button > [aria-hidden="true"], .toolbar-link > [aria-hidden="true"] { font-size: 17px; }
+  .reader-toolbar .button-label { display: none; }
+  .reader-navigation { gap: 0; padding-left: 2px; }
+  .reader-actions { gap: 0; }
+  .reader-position { min-width: 50px; }
+  .toolbar-spacer { display: none; }
   .reading-column { padding: 28px 22px 70px; }
   .reading-column > h1 { font-size: 32px; }
   .article-content { font-size: 17px; line-height: 1.72; }
