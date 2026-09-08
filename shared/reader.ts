@@ -17,6 +17,28 @@ export type Article = ArticleState & {
   contentHtml: string;
 };
 
+export type ReaderArticleMetadata = Omit<Article, 'contentHtml'>;
+
+export type ReaderVersions = {
+  collection: number;
+  state: number;
+  body: number;
+};
+
+export type ReaderArticlePage = {
+  generation: string;
+  versions: ReaderVersions;
+  total: number;
+  articles: ReaderArticleMetadata[];
+  nextCursor: string | null;
+};
+
+export type ReaderArticleBody = {
+  articleId: string;
+  contentHtml: string;
+  bodyVersion: number;
+};
+
 export type Subscription = {
   id: string;
   title: string;

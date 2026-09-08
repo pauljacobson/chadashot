@@ -15,6 +15,7 @@ import { BIRCHFEED_API_URL, GoogleReaderClient } from './integrations/google-rea
 import { deleteIntegration, hasIntegration, loadBirchfeed, loadBirchfeedWithGeneration, loadReadwise, saveIntegration } from './integrations/settings.js';
 import { ReadwiseClient } from './integrations/readwise.js';
 import { AppLogger, readAppLogs, readLogExport, requestLogger } from './logging.js';
+import { ReaderApi, ReaderCacheUnavailableError, ReaderCursorError } from './reader-api.js';
 import {
   encodedResponseByteCounter,
   ReaderPerformanceRun,
@@ -92,6 +93,26 @@ const logQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).default(100),
   offset: z.coerce.number().int().min(0).default(0),
 });
+const readerArticleQuerySchema = z.object({
+  scope: z.enum(['inbox', 'all', 'starred', 'uncategorized', 'folder', 'feed']).default('inbox'),
+  scopeId: z.string().min(1).max(1_000).optional(),
+  read: z.enum(['all', 'unread', 'read']).default('all'),
+  search: z.string().trim().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(100),
+  cursor: z.string().max(8_192).optional(),
+}).superRefine((value, context) => {
+  if ((value.scope === 'folder' || value.scope === 'feed') && !value.scopeId) {
+    context.addIssue({ code: 'custom', path: ['scopeId'], message: 'scopeId is required for folder and feed scopes' });
+  }
+  if (value.scope !== 'folder' && value.scope !== 'feed' && value.scopeId) {
+    context.addIssue({ code: 'custom', path: ['scopeId'], message: 'scopeId is only valid for folder and feed scopes' });
+  }
+});
+const readerBodyParamsSchema = z.object({ articleId: z.string().min(1).max(2_000) });
+const readerChangesQuerySchema = z.object({
+  token: z.string().max(8_192).optional(),
+  limit: z.coerce.number().int().min(1).max(500).default(200),
+});
 
 function normalizeFeedUrl(value: string) {
   const url = new URL(value);
@@ -120,6 +141,7 @@ export function createApp(config: AppConfig, dependencies: {
     generation: string;
   }>(config.readerSyncTimeoutMs);
   const readerCache = new ReaderCache(database, newId(), config.readerSyncLeaseMs);
+  const readerApi = new ReaderApi(database);
   const activeCacheImports = new Map<string, { work: Promise<void>; controller: AbortController }>();
   app.disable('x-powered-by');
   if (config.nodeEnv === 'production') app.set('trust proxy', 1);
@@ -167,6 +189,7 @@ export function createApp(config: AppConfig, dependencies: {
   function startReaderCacheImport(
     comparisonKey: string,
     integration: NonNullable<ReturnType<typeof loadBirchfeedWithGeneration>>,
+    forceRoutine = false,
   ) {
     const identity = readerCacheIdentity(comparisonKey, integration.credentials, integration.generation);
     if (activeCacheImports.has(identity.accountKey)) return identity;
@@ -235,6 +258,7 @@ export function createApp(config: AppConfig, dependencies: {
           overlapSeconds: config.readerSyncOverlapSeconds,
         };
         const plan = readerCache.syncPlan(identity, cadence);
+        if (forceRoutine && !plan.full) plan.routine = true;
         if (plan.full) {
           await runFullImport(lease);
           return;
@@ -623,6 +647,106 @@ export function createApp(config: AppConfig, dependencies: {
     const snapshot = performanceRun.measureSync('mapping', () => ({ ...developmentFixture, generatedAt: new Date().toISOString() }));
     const collection = snapshotComparison.compare(comparisonKey, snapshot);
     return sendMeasuredReaderSnapshot(res, logger, snapshot, performanceRun.result(collection));
+  });
+
+  function connectedReader(res: express.Response) {
+    const integration = loadBirchfeedWithGeneration(database, config);
+    if (!integration) return null;
+    const userId = (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user';
+    return {
+      integration,
+      identity: readerCacheIdentity(userId, integration.credentials, integration.generation),
+    };
+  }
+
+  function readerCursorFailure(res: express.Response, error: unknown) {
+    if (error instanceof ReaderCacheUnavailableError) {
+      return res.status(202).json({ status: 'initializing', reset: false, error: error.message });
+    }
+    if (error instanceof ReaderCursorError) {
+      return res.status(error.code === 'expired' ? 409 : 400).json({
+        error: error.code === 'expired' ? 'reader_cursor_expired' : 'invalid_reader_cursor',
+        message: error.message,
+        reset: error.code === 'expired',
+        preserveQueuedWrites: true,
+      });
+    }
+    throw error;
+  }
+
+  app.get('/api/reader/navigation', requireUser, (_req, res) => {
+    const reader = connectedReader(res);
+    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before loading reader navigation' });
+    try {
+      const result = readerApi.navigation(reader.identity);
+      const { etag, ...body } = result;
+      res.set({ ETag: etag, 'Cache-Control': 'private, no-cache' });
+      return res.json(body);
+    } catch (error) {
+      return readerCursorFailure(res, error);
+    }
+  });
+
+  app.get('/api/reader/articles', requireUser, (req, res) => {
+    const reader = connectedReader(res);
+    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before loading articles' });
+    const query = readerArticleQuerySchema.parse(req.query);
+    try {
+      const result = readerApi.articles(reader.identity, query);
+      const { etag, ...body } = result;
+      res.set({ ETag: etag, 'Cache-Control': 'private, no-cache' });
+      return res.json(body);
+    } catch (error) {
+      return readerCursorFailure(res, error);
+    }
+  });
+
+  app.get('/api/reader/articles/:articleId/body', requireUser, (req, res) => {
+    const reader = connectedReader(res);
+    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before loading article bodies' });
+    const { articleId } = readerBodyParamsSchema.parse(req.params);
+    try {
+      const result = readerApi.body(reader.identity, articleId);
+      if (!result) return res.status(404).json({ error: 'Article body not found in the current generation' });
+      const { etag, ...body } = result;
+      res.set({ ETag: etag, 'Cache-Control': 'private, no-cache' });
+      return res.json(body);
+    } catch (error) {
+      return readerCursorFailure(res, error);
+    }
+  });
+
+  app.get('/api/reader/status', requireUser, (_req, res) => {
+    const reader = connectedReader(res);
+    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before checking synchronization' });
+    res.set('Cache-Control', 'no-store');
+    return res.json(readerCache.status(reader.identity));
+  });
+
+  app.post('/api/reader/refresh', requireUser, (_req, res) => {
+    const reader = connectedReader(res);
+    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before refreshing' });
+    startReaderCacheImport(
+      (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user',
+      reader.integration,
+      true,
+    );
+    res.set('Cache-Control', 'no-store');
+    return res.status(202).json({ status: 'scheduled', synchronization: readerCache.status(reader.identity) });
+  });
+
+  app.get('/api/reader/changes', requireUser, (req, res) => {
+    const reader = connectedReader(res);
+    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before loading changes' });
+    const query = readerChangesQuerySchema.parse(req.query);
+    try {
+      const result = readerApi.changes(reader.identity, query.token, query.limit);
+      const { etag, ...body } = result;
+      res.set({ ETag: etag, 'Cache-Control': 'private, no-cache' });
+      return res.json(body);
+    } catch (error) {
+      return readerCursorFailure(res, error);
+    }
   });
 
   app.post('/api/reader/mutations', requireUser, async (req, res) => {

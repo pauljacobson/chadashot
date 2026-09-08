@@ -10,13 +10,15 @@ describe('database migrations', () => {
     runMigrations(database);
     runMigrations(database);
 
-    expect(currentSchemaVersion(database)).toEqual({ version: 5 });
+    expect(currentSchemaVersion(database)).toEqual({ version: 7 });
     expect(database.prepare('SELECT version, name FROM schema_migrations ORDER BY version').all()).toEqual([
       { version: 1, name: 'initial_schema' },
       { version: 2, name: 'passkey_management_and_recovery' },
       { version: 3, name: 'durable_highlight_anchors' },
       { version: 4, name: 'transactional_reader_cache' },
       { version: 5, name: 'incremental_reader_checkpoints' },
+      { version: 6, name: 'paginated_reader_api' },
+      { version: 7, name: 'repair_reader_navigation_activity' },
     ]);
     expect(database.prepare("PRAGMA table_info('passkey_credentials')").all()).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'name' })]),
@@ -41,6 +43,20 @@ describe('database migrations', () => {
         expect.objectContaining({ name: 'last_full_at' }),
       ]),
     );
+    expect(database.prepare("PRAGMA table_info('reader_change_log')").all()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'sequence' }),
+        expect.objectContaining({ name: 'payload_json' }),
+      ]),
+    );
+    expect(database.prepare("PRAGMA table_info('reader_navigation_activity')").all()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'kind' }),
+        expect.objectContaining({ name: 'latest_published_at' }),
+      ]),
+    );
+    expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reader_article_search'").get())
+      .toEqual({ name: 'reader_article_search' });
   });
 
   it('upgrades a legacy version-one database without losing existing rows', () => {
@@ -53,6 +69,22 @@ describe('database migrations', () => {
     runMigrations(database);
 
     expect(database.prepare('SELECT id, display_name FROM users').get()).toEqual({ id: 'user-1', display_name: 'Paul' });
-    expect(currentSchemaVersion(database)).toEqual({ version: 5 });
+    expect(currentSchemaVersion(database)).toEqual({ version: 7 });
+  });
+
+  it('repairs a database where the paginated migration was recorded without its navigation table', () => {
+    const database = new Database(':memory:');
+    database.pragma('foreign_keys = ON');
+    runMigrations(database);
+    database.exec(`
+      DROP TABLE reader_navigation_activity;
+      DELETE FROM schema_migrations WHERE version = 7;
+    `);
+
+    runMigrations(database);
+
+    expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reader_navigation_activity'").get())
+      .toEqual({ name: 'reader_navigation_activity' });
+    expect(currentSchemaVersion(database)).toEqual({ version: 7 });
   });
 });
