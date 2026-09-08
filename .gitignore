@@ -7,6 +7,7 @@ dist/
 server-dist/
 coverage/
 data/
+.playwright-cli/
 *.log
 
 # Local reference only: superseded FreshRSS deployment wrapper
