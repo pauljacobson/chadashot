@@ -325,6 +325,111 @@ const migrations: Migration[] = [
       CREATE INDEX reader_change_log_account_sequence ON reader_change_log(account_key, sequence);
     `,
   },
+  {
+    version: 7,
+    name: 'repair_reader_navigation_activity',
+    sql: `
+      CREATE TABLE IF NOT EXISTS reader_navigation_activity (
+        generation_id TEXT NOT NULL REFERENCES reader_cache_generations(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('scope', 'folder', 'feed')),
+        id TEXT NOT NULL,
+        total_count INTEGER NOT NULL,
+        unread_count INTEGER NOT NULL,
+        latest_published_at TEXT,
+        PRIMARY KEY(generation_id, kind, id)
+      ) WITHOUT ROWID;
+
+      DELETE FROM reader_navigation_activity
+      WHERE generation_id IN (
+        SELECT current_generation_id FROM reader_accounts WHERE current_generation_id IS NOT NULL
+      );
+
+      INSERT INTO reader_navigation_activity
+        (generation_id, kind, id, total_count, unread_count, latest_published_at)
+      SELECT subscription.generation_id, 'feed', subscription.id, COUNT(article.id),
+        COALESCE(SUM(CASE WHEN state.is_read = 0 THEN 1 ELSE 0 END), 0), MAX(article.published_at)
+      FROM reader_subscriptions subscription
+      JOIN reader_accounts account ON account.current_generation_id = subscription.generation_id
+      LEFT JOIN reader_articles article
+        ON article.generation_id = subscription.generation_id AND article.feed_id = subscription.id
+      LEFT JOIN reader_article_state state
+        ON state.generation_id = article.generation_id AND state.article_id = article.id
+      GROUP BY subscription.generation_id, subscription.id;
+
+      INSERT INTO reader_navigation_activity
+        (generation_id, kind, id, total_count, unread_count, latest_published_at)
+      SELECT folder.generation_id, 'folder', folder.id, COUNT(DISTINCT article.id),
+        COALESCE(SUM(CASE WHEN state.is_read = 0 THEN 1 ELSE 0 END), 0), MAX(article.published_at)
+      FROM reader_folders folder
+      JOIN reader_accounts account ON account.current_generation_id = folder.generation_id
+      LEFT JOIN reader_article_folders relation
+        ON relation.generation_id = folder.generation_id AND relation.folder_id = folder.id
+      LEFT JOIN reader_articles article
+        ON article.generation_id = relation.generation_id AND article.id = relation.article_id
+      LEFT JOIN reader_article_state state
+        ON state.generation_id = article.generation_id AND state.article_id = article.id
+      GROUP BY folder.generation_id, folder.id;
+
+      INSERT INTO reader_navigation_activity
+        (generation_id, kind, id, total_count, unread_count, latest_published_at)
+      SELECT account.current_generation_id, 'scope', 'all', COUNT(article.id),
+        COALESCE(SUM(CASE WHEN state.is_read = 0 THEN 1 ELSE 0 END), 0), MAX(article.published_at)
+      FROM reader_accounts account
+      LEFT JOIN reader_articles article ON article.generation_id = account.current_generation_id
+      LEFT JOIN reader_article_state state
+        ON state.generation_id = article.generation_id AND state.article_id = article.id
+      WHERE account.current_generation_id IS NOT NULL
+      GROUP BY account.current_generation_id;
+
+      INSERT INTO reader_navigation_activity
+        (generation_id, kind, id, total_count, unread_count, latest_published_at)
+      SELECT account.current_generation_id, 'scope', 'inbox',
+        COALESCE(SUM(CASE WHEN state.is_read = 0 THEN 1 ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN state.is_read = 0 THEN 1 ELSE 0 END), 0),
+        MAX(CASE WHEN state.is_read = 0 THEN article.published_at END)
+      FROM reader_accounts account
+      LEFT JOIN reader_articles article ON article.generation_id = account.current_generation_id
+      LEFT JOIN reader_article_state state
+        ON state.generation_id = article.generation_id AND state.article_id = article.id
+      WHERE account.current_generation_id IS NOT NULL
+      GROUP BY account.current_generation_id;
+
+      INSERT INTO reader_navigation_activity
+        (generation_id, kind, id, total_count, unread_count, latest_published_at)
+      SELECT account.current_generation_id, 'scope', 'starred',
+        COALESCE(SUM(CASE WHEN state.is_starred = 1 THEN 1 ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN state.is_starred = 1 AND state.is_read = 0 THEN 1 ELSE 0 END), 0),
+        MAX(CASE WHEN state.is_starred = 1 THEN article.published_at END)
+      FROM reader_accounts account
+      LEFT JOIN reader_articles article ON article.generation_id = account.current_generation_id
+      LEFT JOIN reader_article_state state
+        ON state.generation_id = article.generation_id AND state.article_id = article.id
+      WHERE account.current_generation_id IS NOT NULL
+      GROUP BY account.current_generation_id;
+
+      INSERT INTO reader_navigation_activity
+        (generation_id, kind, id, total_count, unread_count, latest_published_at)
+      SELECT account.current_generation_id, 'scope', 'uncategorized',
+        COALESCE(SUM(CASE WHEN article.id IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM reader_subscription_folders relation
+          WHERE relation.generation_id = article.generation_id AND relation.subscription_id = article.feed_id
+        ) THEN 1 ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN state.is_read = 0 AND NOT EXISTS (
+          SELECT 1 FROM reader_subscription_folders relation
+          WHERE relation.generation_id = article.generation_id AND relation.subscription_id = article.feed_id
+        ) THEN 1 ELSE 0 END), 0),
+        MAX(CASE WHEN article.id IS NOT NULL AND NOT EXISTS (
+          SELECT 1 FROM reader_subscription_folders relation
+          WHERE relation.generation_id = article.generation_id AND relation.subscription_id = article.feed_id
+        ) THEN article.published_at END)
+      FROM reader_accounts account
+      LEFT JOIN reader_articles article ON article.generation_id = account.current_generation_id
+      LEFT JOIN reader_article_state state
+        ON state.generation_id = article.generation_id AND state.article_id = article.id
+      WHERE account.current_generation_id IS NOT NULL
+      GROUP BY account.current_generation_id;
+    `,
+  },
 ];
 
 function ensureMigrationTable(database: AppDatabase) {
