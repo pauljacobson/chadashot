@@ -41,7 +41,13 @@ describe('article highlights', () => {
     const { container } = render(
       <ReaderPane
         article={article}
-        onBack={vi.fn()}
+        position={1}
+        total={1}
+        hasPrevious={false}
+        hasNext={false}
+        onClose={vi.fn()}
+        onPrevious={vi.fn()}
+        onNext={vi.fn()}
         onToggleStar={vi.fn()}
         onToggleRead={vi.fn()}
         onNotify={vi.fn()}

@@ -33,7 +33,13 @@ function renderReader() {
   return render(
     <ReaderPane
       article={article}
-      onBack={vi.fn()}
+      position={1}
+      total={1}
+      hasPrevious={false}
+      hasNext={false}
+      onClose={vi.fn()}
+      onPrevious={vi.fn()}
+      onNext={vi.fn()}
       onToggleStar={vi.fn()}
       onToggleRead={vi.fn()}
       onNotify={vi.fn()}
@@ -91,7 +97,13 @@ describe('article media', () => {
     render(
       <ReaderPane
         article={{ ...article, contentHtml: '<img src="https://example.test/uncaptioned.png" alt="">' }}
-        onBack={vi.fn()}
+        position={1}
+        total={1}
+        hasPrevious={false}
+        hasNext={false}
+        onClose={vi.fn()}
+        onPrevious={vi.fn()}
+        onNext={vi.fn()}
         onToggleStar={vi.fn()}
         onToggleRead={vi.fn()}
         onNotify={vi.fn()}

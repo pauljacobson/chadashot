@@ -38,15 +38,13 @@ import {
 } from './offlineStore';
 import { finishArticleOpen, finishSelectionUpdate, markMilestone, recordMountedRows, startArticleOpen, startSelectionUpdate } from './performance';
 
-type MobileScreen = 'list' | 'reader';
+type ContentView = 'list' | 'reader';
 const FEED_SORT_ORDER_KEY = 'chadashot.feedSortOrder';
 const ACCENT_COLOR_KEY = 'chadashot.accentColor';
 const PANEL_WIDTHS_KEY = 'chadashot.panelWidths';
-const DEFAULT_PANEL_WIDTHS = { sidebar: 220, articleList: 350 };
+const DEFAULT_PANEL_WIDTHS = { sidebar: 220 };
 const MIN_SIDEBAR_WIDTH = 160;
 const MAX_SIDEBAR_WIDTH = 420;
-const MIN_ARTICLE_LIST_WIDTH = 240;
-const MAX_ARTICLE_LIST_WIDTH = 640;
 const MIN_READER_WIDTH = 300;
 const PANEL_RESIZER_WIDTH = 10;
 const ARTICLE_ROW_ESTIMATE = 116;
@@ -72,30 +70,19 @@ function savedPanelWidths(): PanelWidths {
     const saved = JSON.parse(localStorage.getItem(PANEL_WIDTHS_KEY) ?? '') as Partial<PanelWidths>;
     return {
       sidebar: clamp(Number(saved.sidebar) || DEFAULT_PANEL_WIDTHS.sidebar, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
-      articleList: clamp(Number(saved.articleList) || DEFAULT_PANEL_WIDTHS.articleList, MIN_ARTICLE_LIST_WIDTH, MAX_ARTICLE_LIST_WIDTH),
     };
   } catch {
     return DEFAULT_PANEL_WIDTHS;
   }
 }
 
-function fitPanelWidths(widths: PanelWidths, availableWidth: number, sidebarOpen: boolean): PanelWidths {
+function fitPanelWidths(widths: PanelWidths, availableWidth: number): PanelWidths {
   if (availableWidth <= 0) return widths;
-
-  let sidebar = clamp(widths.sidebar, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
-  let articleList = clamp(widths.articleList, MIN_ARTICLE_LIST_WIDTH, MAX_ARTICLE_LIST_WIDTH);
-  if (!sidebarOpen) {
-    articleList = Math.min(articleList, Math.max(MIN_ARTICLE_LIST_WIDTH, availableWidth - MIN_READER_WIDTH - PANEL_RESIZER_WIDTH));
-    return { sidebar, articleList };
-  }
-
-  const availableForAdjustablePanels = availableWidth - MIN_READER_WIDTH - (PANEL_RESIZER_WIDTH * 2);
-  let excess = Math.max(0, sidebar + articleList - availableForAdjustablePanels);
-  const articleReduction = Math.min(excess, articleList - MIN_ARTICLE_LIST_WIDTH);
-  articleList -= articleReduction;
-  excess -= articleReduction;
-  sidebar -= Math.min(excess, sidebar - MIN_SIDEBAR_WIDTH);
-  return { sidebar, articleList };
+  const maximum = Math.max(
+    MIN_SIDEBAR_WIDTH,
+    Math.min(MAX_SIDEBAR_WIDTH, availableWidth - MIN_READER_WIDTH - PANEL_RESIZER_WIDTH),
+  );
+  return { sidebar: clamp(widths.sidebar, MIN_SIDEBAR_WIDTH, maximum) };
 }
 
 function PanelResizer({ className, label, controls, value, minimum, maximum, defaultValue, onResize }: {
@@ -632,7 +619,13 @@ function prepareArticleMedia(root: HTMLElement) {
 
 export function ReaderPane({
   article,
-  onBack,
+  position,
+  total,
+  hasPrevious,
+  hasNext,
+  onClose,
+  onPrevious,
+  onNext,
   onToggleStar,
   onToggleRead,
   onNotify,
@@ -640,7 +633,13 @@ export function ReaderPane({
   onSaveToReader,
 }: {
   article: Article | null;
-  onBack: () => void;
+  position: number;
+  total: number;
+  hasPrevious: boolean;
+  hasNext: boolean;
+  onClose: () => void;
+  onPrevious: () => void;
+  onNext: () => void;
   onToggleStar: (article: Article) => void;
   onToggleRead: (article: Article) => void;
   onNotify: (message: string) => void;
@@ -788,12 +787,33 @@ export function ReaderPane({
   return (
     <main className="reader-pane" id="reader-pane">
       <header className="reader-toolbar">
-        <button className="mobile-back" aria-label="Back to article list" onClick={onBack}>←</button>
-        <button aria-label={article.read ? 'Mark unread' : 'Mark read'} onClick={() => onToggleRead(article)}>{article.read ? '○ Unread' : '● Read'}</button>
+        <button className="reader-close" aria-label="Close article and return to article list" onClick={onClose}>
+          <span aria-hidden="true">←</span><span className="button-label">All items</span>
+        </button>
+        <div className="reader-navigation" role="group" aria-label="Article navigation">
+          <button aria-label="Previous article" disabled={!hasPrevious} onClick={onPrevious}>
+            <span aria-hidden="true">←</span><span className="button-label">Previous</span>
+          </button>
+          <span className="reader-position" aria-live="polite">{position} of {total}</span>
+          <button aria-label="Next article" disabled={!hasNext} onClick={onNext}>
+            <span className="button-label">Next</span><span aria-hidden="true">→</span>
+          </button>
+        </div>
         <span className="toolbar-spacer"></span>
-        <button aria-label={article.starred ? 'Remove star' : 'Star article'} aria-pressed={article.starred} onClick={() => onToggleStar(article)}>{article.starred ? '★ Starred' : '☆ Star'}</button>
-        <button disabled={savingAction !== null} onClick={() => void saveDocument()}>↗ {savingAction === 'document' ? 'Saving…' : 'Save to Reader'}</button>
-        <a className="toolbar-link" href={article.canonicalUrl} target="_blank" rel="noreferrer">Open original</a>
+        <div className="reader-actions">
+          <button aria-label={article.read ? 'Mark unread' : 'Mark read'} onClick={() => onToggleRead(article)}>
+            <span aria-hidden="true">{article.read ? '○' : '●'}</span><span className="button-label">{article.read ? 'Unread' : 'Read'}</span>
+          </button>
+          <button aria-label={article.starred ? 'Remove star' : 'Star article'} aria-pressed={article.starred} onClick={() => onToggleStar(article)}>
+            <span aria-hidden="true">{article.starred ? '★' : '☆'}</span><span className="button-label">{article.starred ? 'Starred' : 'Star'}</span>
+          </button>
+          <button className="save-reader-action" disabled={savingAction !== null} onClick={() => void saveDocument()}>
+            <span aria-hidden="true">↗</span><span className="button-label">{savingAction === 'document' ? 'Saving…' : 'Save to Reader'}</span>
+          </button>
+          <a className="toolbar-link" href={article.canonicalUrl} target="_blank" rel="noreferrer">
+            <span aria-hidden="true">↗</span><span className="button-label">Open original</span>
+          </a>
+        </div>
       </header>
       <div className="reading-scroll">
         <article className="reading-column">
@@ -1424,7 +1444,7 @@ export function App() {
   const [feedSortOrder, setFeedSortOrder] = useState<FeedSortOrder>(savedFeedSortOrder);
   const [accentColor, setAccentColor] = useState<AccentColor>(savedAccentColor);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [mobileScreen, setMobileScreen] = useState<MobileScreen>('list');
+  const [contentView, setContentView] = useState<ContentView>('list');
   const [notice, setNotice] = useState('');
   const [panelWidths, setPanelWidths] = useState<PanelWidths>(savedPanelWidths);
   const [workspaceWidth, setWorkspaceWidth] = useState(0);
@@ -1545,7 +1565,7 @@ export function App() {
   function chooseFilter(filter: ReaderFilter) {
     if (filter.kind === 'inbox') reader.setReadFilter('all');
     reader.setFilter(filter);
-    setMobileScreen('list');
+    setContentView('list');
   }
 
   function chooseArticle(article: Article) {
@@ -1554,29 +1574,39 @@ export function App() {
       startSelectionUpdate();
     }
     reader.selectArticle(article.id);
-    if (!article.read) void reader.toggleRead(article);
-    setMobileScreen('reader');
+    setContentView('reader');
   }
 
-  const fittedPanelWidths = fitPanelWidths(panelWidths, workspaceWidth, sidebarOpen);
+  function navigateArticle(direction: -1 | 1) {
+    const currentArticle = reader.selectedArticle;
+    startArticleOpen('cache');
+    startSelectionUpdate();
+    void reader.navigateSelection(direction).then(() => {
+      if (currentArticle && !currentArticle.read) void reader.toggleRead(currentArticle);
+    });
+  }
+
+  function closeArticle() {
+    const currentArticle = reader.selectedArticle;
+    setContentView('list');
+    if (currentArticle && !currentArticle.read) void reader.toggleRead(currentArticle);
+  }
+
+  const selectedArticleIndex = reader.selectedArticle
+    ? reader.articles.findIndex((article) => article.id === reader.selectedArticle?.id)
+    : -1;
+  const selectedArticlePosition = selectedArticleIndex >= 0 ? selectedArticleIndex + 1 : 0;
+  const fittedPanelWidths = fitPanelWidths(panelWidths, workspaceWidth);
   const sidebarMaximum = Math.max(
     MIN_SIDEBAR_WIDTH,
-    Math.min(MAX_SIDEBAR_WIDTH, workspaceWidth - fittedPanelWidths.articleList - MIN_READER_WIDTH - (PANEL_RESIZER_WIDTH * 2)),
-  );
-  const articleListMaximum = Math.max(
-    MIN_ARTICLE_LIST_WIDTH,
-    Math.min(
-      MAX_ARTICLE_LIST_WIDTH,
-      workspaceWidth - (sidebarOpen ? fittedPanelWidths.sidebar + (PANEL_RESIZER_WIDTH * 2) : PANEL_RESIZER_WIDTH) - MIN_READER_WIDTH,
-    ),
+    Math.min(MAX_SIDEBAR_WIDTH, workspaceWidth - MIN_READER_WIDTH - PANEL_RESIZER_WIDTH),
   );
   const workspaceStyle = {
     '--sidebar-width': `${fittedPanelWidths.sidebar}px`,
-    '--article-list-width': `${fittedPanelWidths.articleList}px`,
   } as CSSProperties;
 
   return (
-    <div className={`app-shell ${sidebarOpen ? '' : 'sidebar-collapsed'} mobile-${mobileScreen}`}>
+    <div className={`app-shell ${sidebarOpen ? '' : 'sidebar-collapsed'} content-${contentView}`}>
       <header className="topbar">
         <div className="wordmark">
           <button
@@ -1588,7 +1618,7 @@ export function App() {
           >☰</button>
           <span className="app-mark">ח</span><span>Chadashot</span>
         </div>
-        <label className="search-box" htmlFor="article-search"><span aria-hidden="true">⌕</span><input id="article-search" type="search" value={reader.query} onChange={(event) => reader.setQuery(event.target.value)} placeholder="Search your reading" /></label>
+        <label className="search-box" htmlFor="article-search"><span aria-hidden="true">⌕</span><input id="article-search" type="search" value={reader.query} onChange={(event) => { reader.setQuery(event.target.value); setContentView('list'); }} placeholder="Search your reading" /></label>
         <div className="topbar-actions">
           <span className="topbar-status">
             <span className={`status-dot ${reader.status}`}></span>
@@ -1619,66 +1649,65 @@ export function App() {
           defaultValue={DEFAULT_PANEL_WIDTHS.sidebar}
           onResize={(sidebar) => setPanelWidths((current) => ({ ...current, sidebar }))}
         />
-        <ArticleList
-          key={activeListKey}
-          listKey={activeListKey}
-          title={title}
-          articles={reader.articles}
-          total={reader.totalArticles}
-          readFilter={reader.readFilter}
-          showReadFilter={activeFilter.kind !== 'inbox'}
-          markAllCount={reader.readFilter !== 'read' && reader.coverage?.complete ? reader.bulkUnreadCount : 0}
-          selectedId={reader.selectedArticle?.id ?? null}
-          onSelect={chooseArticle}
-          onToggleRead={(article) => void reader.toggleRead(article)}
-          onToggleStar={(article) => void reader.toggleStarred(article)}
-          onReadFilterChange={reader.setReadFilter}
-          onLoadMore={() => void reader.loadMoreArticles()}
-          onMarkAllRead={reader.readFilter !== 'read' && reader.coverage?.complete ? async () => {
-            const count = await reader.markAllRead();
-            setNotice(`${count} ${count === 1 ? 'item' : 'items'} accepted for marking as read`);
-            return count;
-          } : undefined}
-        />
-        <PanelResizer
-          className="article-list-resizer"
-          label="Resize article list"
-          controls="article-list"
-          value={fittedPanelWidths.articleList}
-          minimum={MIN_ARTICLE_LIST_WIDTH}
-          maximum={articleListMaximum}
-          defaultValue={DEFAULT_PANEL_WIDTHS.articleList}
-          onResize={(articleList) => setPanelWidths((current) => ({ ...current, articleList }))}
-        />
-        <ReaderPane
-          key={reader.selectedArticle?.id ?? 'empty-reader'}
-          article={reader.selectedArticle}
-          onBack={() => setMobileScreen('list')}
-          onToggleRead={(article) => void reader.toggleRead(article)}
-          onToggleStar={(article) => void reader.toggleStarred(article)}
-          onNotify={setNotice}
-          onHighlight={async (article, selection, note) => {
-            const result = await createReadwiseHighlight({
-              articleId: article.id,
-              ...selection,
-              note,
-              title: article.title,
-              author: article.author,
-              canonicalUrl: article.canonicalUrl,
-            });
-            if (result.synchronized) setNotice(note ? 'Highlight and note saved to Readwise' : 'Highlight saved to Readwise');
-            return result;
-          }}
-          onSaveToReader={async (article) => {
-            await saveReadwiseDocument({
-              articleId: article.id,
-              title: article.title,
-              author: article.author,
-              canonicalUrl: article.canonicalUrl,
-            });
-            setNotice('Article saved to Readwise Reader');
-          }}
-        />
+        {contentView === 'list' ? (
+          <ArticleList
+            key={activeListKey}
+            listKey={activeListKey}
+            title={title}
+            articles={reader.articles}
+            total={reader.totalArticles}
+            readFilter={reader.readFilter}
+            showReadFilter={activeFilter.kind !== 'inbox'}
+            markAllCount={reader.readFilter !== 'read' && reader.coverage?.complete ? reader.bulkUnreadCount : 0}
+            selectedId={reader.selectedArticle?.id ?? null}
+            onSelect={chooseArticle}
+            onToggleRead={(article) => void reader.toggleRead(article)}
+            onToggleStar={(article) => void reader.toggleStarred(article)}
+            onReadFilterChange={reader.setReadFilter}
+            onLoadMore={() => void reader.loadMoreArticles()}
+            onMarkAllRead={reader.readFilter !== 'read' && reader.coverage?.complete ? async () => {
+              const count = await reader.markAllRead();
+              setNotice(`${count} ${count === 1 ? 'item' : 'items'} accepted for marking as read`);
+              return count;
+            } : undefined}
+          />
+        ) : (
+          <ReaderPane
+            key={reader.selectedArticle?.id ?? 'empty-reader'}
+            article={reader.selectedArticle}
+            position={selectedArticlePosition}
+            total={reader.totalArticles}
+            hasPrevious={selectedArticleIndex > 0}
+            hasNext={selectedArticleIndex >= 0 && selectedArticlePosition < reader.totalArticles}
+            onClose={closeArticle}
+            onPrevious={() => navigateArticle(-1)}
+            onNext={() => navigateArticle(1)}
+            onToggleRead={(article) => void reader.toggleRead(article)}
+            onToggleStar={(article) => void reader.toggleStarred(article)}
+            onNotify={setNotice}
+            onHighlight={async (article, selection, note) => {
+              const result = await createReadwiseHighlight({
+                articleId: article.id,
+                ...selection,
+                note,
+                title: article.title,
+                author: article.author,
+                canonicalUrl: article.canonicalUrl,
+              });
+              if (result.synchronized) setNotice(note ? 'Highlight and note saved to Readwise' : 'Highlight saved to Readwise');
+              return result;
+            }}
+            onSaveToReader={async (article) => {
+              await saveReadwiseDocument({
+                articleId: article.id,
+                title: article.title,
+                author: article.author,
+                canonicalUrl: article.canonicalUrl,
+              });
+              setNotice('Article saved to Readwise Reader');
+            }}
+          />
+        )}
       </div>
       <nav className="mobile-navigation" aria-label="Primary navigation">
         <button className={reader.filter.kind === 'inbox' ? 'active' : ''} onClick={() => chooseFilter({ kind: 'inbox' })}><span>●</span>Inbox</button>
