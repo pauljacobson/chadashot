@@ -16,13 +16,13 @@ export class ApiError extends Error {
 
 async function request<T>(path: string, init?: RequestInit, measureReaderResponse = false): Promise<T> {
   const response = await fetch(path, {
+    ...init,
     credentials: 'same-origin',
     headers: {
       Accept: 'application/json',
       ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
       ...init?.headers,
     },
-    ...init,
   });
 
   if (!response.ok) {
