@@ -567,6 +567,12 @@ type SelectionAnchor = {
   endOffset: number;
 };
 
+type MediaLightboxState = {
+  src: string;
+  alt: string;
+  caption: string;
+};
+
 function renderHighlightMarks(root: HTMLElement, highlights: SavedHighlight[]) {
   root.querySelectorAll('mark[data-chadashot-highlight]').forEach((mark) => mark.replaceWith(...mark.childNodes));
   root.normalize();
@@ -600,6 +606,30 @@ function renderHighlightMarks(root: HTMLElement, highlights: SavedHighlight[]) {
   }
 }
 
+function prepareArticleMedia(root: HTMLElement) {
+  root.querySelectorAll<HTMLImageElement>('img[src]').forEach((image) => {
+    const description = image.alt.trim() || 'article image';
+    image.dataset.chadashotMedia = 'image';
+
+    if (!image.closest('.article-media-frame')) {
+      const mediaElement = image.parentElement instanceof HTMLPictureElement ? image.parentElement : image;
+      const frame = document.createElement('span');
+      frame.className = 'article-media-frame';
+      mediaElement.replaceWith(frame);
+      frame.append(mediaElement);
+    }
+
+    const trigger = image.closest<HTMLAnchorElement>('a[href]')
+      ?? image.closest<HTMLElement>('.article-media-frame');
+    if (!trigger) return;
+    trigger.dataset.chadashotMediaTrigger = 'image';
+    trigger.tabIndex = 0;
+    trigger.setAttribute('role', 'button');
+    trigger.setAttribute('aria-haspopup', 'dialog');
+    trigger.setAttribute('aria-label', `View ${description} larger`);
+  });
+}
+
 export function ReaderPane({
   article,
   onBack,
@@ -618,13 +648,17 @@ export function ReaderPane({
   onSaveToReader: (article: Article) => Promise<void>;
 }) {
   const contentRef = useRef<HTMLDivElement>(null);
+  const lightboxCloseRef = useRef<HTMLButtonElement>(null);
+  const lightboxTriggerRef = useRef<HTMLElement | null>(null);
   const [selection, setSelection] = useState<SelectionAnchor | null>(null);
   const [highlights, setHighlights] = useState<SavedHighlight[]>([]);
   const [noteOpen, setNoteOpen] = useState(false);
   const [note, setNote] = useState('');
   const [savingAction, setSavingAction] = useState<'highlight' | 'document' | null>(null);
+  const [lightbox, setLightbox] = useState<MediaLightboxState | null>(null);
   const articleId = article?.id;
   const sanitized = useMemo(() => DOMPurify.sanitize(article?.contentHtml ?? ''), [article?.contentHtml]);
+  const sanitizedMarkup = useMemo(() => ({ __html: sanitized }), [sanitized]);
 
   useEffect(() => {
     setHighlights([]);
@@ -637,8 +671,36 @@ export function ReaderPane({
   }, [article]);
 
   useLayoutEffect(() => {
-    if (contentRef.current) renderHighlightMarks(contentRef.current, highlights);
+    if (!contentRef.current) return;
+    renderHighlightMarks(contentRef.current, highlights);
+    prepareArticleMedia(contentRef.current);
   }, [highlights, sanitized]);
+
+  useEffect(() => {
+    if (!lightbox) return;
+    const trigger = lightboxTriggerRef.current;
+    lightboxCloseRef.current?.focus();
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setLightbox(null);
+      } else if (event.key === 'Tab') {
+        event.preventDefault();
+        lightboxCloseRef.current?.focus();
+      }
+    }
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      if (trigger?.isConnected) trigger.focus();
+    };
+  }, [lightbox]);
+
+  useEffect(() => {
+    setLightbox(null);
+  }, [articleId]);
 
   useLayoutEffect(() => {
     if (!articleId || !contentRef.current) return;
@@ -698,6 +760,27 @@ export function ReaderPane({
     }
   }
 
+  function openMediaFromTarget(target: EventTarget | null) {
+    const trigger = target instanceof Element
+      ? target.closest<HTMLElement>('[data-chadashot-media-trigger="image"]')
+      : null;
+    if (!trigger || !contentRef.current?.contains(trigger)) return false;
+    const image = trigger instanceof HTMLImageElement
+      ? trigger
+      : trigger.querySelector<HTMLImageElement>('img[data-chadashot-media="image"]');
+    if (!image) return false;
+
+    const src = image.currentSrc || image.src;
+    if (!src) return false;
+    const caption = image.closest('figure')?.querySelector('figcaption')?.textContent?.trim()
+      || image.alt.trim()
+      || article?.title
+      || 'Article image';
+    lightboxTriggerRef.current = trigger;
+    setLightbox({ src, alt: image.alt.trim(), caption });
+    return true;
+  }
+
   if (!article) {
     return <main className="reader-pane empty-reader" id="reader-pane"><div><strong>Select an article</strong><span>Choose something from the list to begin reading.</span></div></main>;
   }
@@ -724,7 +807,16 @@ export function ReaderPane({
               className="article-content"
               onMouseUp={captureSelection}
               onTouchEnd={captureSelection}
-              dangerouslySetInnerHTML={{ __html: sanitized }}
+              onClick={(event) => {
+                if (!openMediaFromTarget(event.target)) return;
+                event.preventDefault();
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                if (!openMediaFromTarget(event.target)) return;
+                event.preventDefault();
+              }}
+              dangerouslySetInnerHTML={sanitizedMarkup}
             />
           ) : (
             <div ref={contentRef} className="article-content article-content-missing" role="status">
@@ -743,6 +835,25 @@ export function ReaderPane({
             <button onClick={() => { void navigator.clipboard.writeText(selection.text); onNotify('Copied selection'); }}>Copy</button>
             <button aria-label="Close selection actions" onClick={() => setSelection(null)}>×</button>
           </div>
+        </div>
+      )}
+      {lightbox && (
+        <div
+          className="media-lightbox"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="media-lightbox-caption"
+          onMouseDown={(event) => {
+            if (event.currentTarget === event.target) setLightbox(null);
+          }}
+        >
+          <figure className="media-lightbox-frame">
+            <button ref={lightboxCloseRef} className="media-lightbox-close" aria-label="Close enlarged image" onClick={() => setLightbox(null)}>× Close</button>
+            <div className="media-lightbox-image-area">
+              <img className="media-lightbox-image" src={lightbox.src} alt={lightbox.alt} />
+            </div>
+            <figcaption id="media-lightbox-caption">{lightbox.caption}</figcaption>
+          </figure>
         </div>
       )}
     </main>
