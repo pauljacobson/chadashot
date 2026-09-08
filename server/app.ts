@@ -1,5 +1,7 @@
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
+import compression from 'compression';
 import express, { type ErrorRequestHandler, type RequestHandler } from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
@@ -10,10 +12,21 @@ import { createPasskeyAuthentication } from './auth/passkeys.js';
 import { newId, nowIso, openDatabase, type AppDatabase } from './database.js';
 import { fixtureSnapshot } from './fixtures.js';
 import { BIRCHFEED_API_URL, GoogleReaderClient } from './integrations/google-reader.js';
-import { deleteIntegration, hasIntegration, loadBirchfeed, loadReadwise, saveIntegration } from './integrations/settings.js';
+import { deleteIntegration, hasIntegration, loadBirchfeed, loadBirchfeedWithGeneration, loadReadwise, saveIntegration } from './integrations/settings.js';
 import { ReadwiseClient } from './integrations/readwise.js';
 import { AppLogger, readAppLogs, readLogExport, requestLogger } from './logging.js';
-import { ReaderPerformanceRun, ReaderSnapshotComparison, sendMeasuredReaderSnapshot } from './reader-performance.js';
+import {
+  encodedResponseByteCounter,
+  ReaderPerformanceRun,
+  ReaderSnapshotComparison,
+  sendMeasuredReaderSnapshot,
+  type ReaderSynchronizationMeasurement,
+} from './reader-performance.js';
+import {
+  StaleSynchronizationError,
+  SynchronizationCoordinator,
+  SynchronizationTimeoutError,
+} from './synchronization-coordinator.js';
 
 const mutationSchema = z.object({
   articleId: z.string().min(1),
@@ -93,9 +106,22 @@ export function createApp(config: AppConfig, dependencies: {
   const logger = dependencies.logger ?? new AppLogger(config);
   const developmentFixture = dependencies.fixtureSnapshot ?? fixtureSnapshot;
   const snapshotComparison = new ReaderSnapshotComparison();
+  const readerSyncCoordinator = new SynchronizationCoordinator<{
+    snapshot: ReaderSnapshot;
+    measurement: ReaderSynchronizationMeasurement;
+    generation: string;
+  }>(config.readerSyncTimeoutMs);
   app.disable('x-powered-by');
   if (config.nodeEnv === 'production') app.set('trust proxy', 1);
   app.use(requestLogger(logger));
+  app.use(encodedResponseByteCounter());
+  app.use(compression({
+    threshold: 1_024,
+    level: 6,
+    brotli: {
+      params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 4 },
+    },
+  }));
   app.use(helmet({
     contentSecurityPolicy: config.nodeEnv === 'production' ? {
       directives: {
@@ -156,6 +182,7 @@ export function createApp(config: AppConfig, dependencies: {
     try {
       await client.validateCredentials();
       saveIntegration(database, config, 'birchfeed', credentials);
+      readerSyncCoordinator.invalidateAll();
       logger.info('RSS service connected', { provider: 'google-reader', serverHost: new URL(credentials.serverUrl).hostname });
       return res.json({ provider: 'google-reader', configured: true, serverUrl: credentials.serverUrl });
     } catch (error) {
@@ -166,6 +193,7 @@ export function createApp(config: AppConfig, dependencies: {
 
   app.delete('/api/settings/rss', requireUser, (_req, res) => {
     const removed = deleteIntegration(database, 'birchfeed');
+    readerSyncCoordinator.invalidateAll();
     logger.info('RSS service disconnected', { removed });
     res.json({ provider: 'google-reader', configured: false, removed });
   });
@@ -305,30 +333,53 @@ export function createApp(config: AppConfig, dependencies: {
   });
 
   app.get('/api/reader/snapshot', requireUser, async (_req, res) => {
-    const performanceRun = new ReaderPerformanceRun();
     const comparisonKey = (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user';
-    const credentials = loadBirchfeed(database, config);
-    if (credentials) {
+    const integration = loadBirchfeedWithGeneration(database, config);
+    if (integration) {
+      const performanceRun = new ReaderPerformanceRun();
+      const coordinatorKey = `${comparisonKey}:${integration.generation}`;
       try {
-        const snapshot = await new GoogleReaderClient(credentials, fetchImplementation, performanceRun).snapshot();
-        const collection = snapshotComparison.compare(comparisonKey, snapshot);
-        return sendMeasuredReaderSnapshot(res, logger, snapshot, performanceRun.result(collection));
+        const coordinated = await readerSyncCoordinator.run(coordinatorKey, async (signal) => {
+          try {
+            const snapshot = await new GoogleReaderClient(integration.credentials, fetchImplementation, performanceRun, signal).snapshot();
+            if (signal.aborted) throw signal.reason;
+            const collection = snapshotComparison.compare(comparisonKey, snapshot);
+            return {
+              snapshot,
+              measurement: performanceRun.result(collection),
+              generation: integration.generation,
+            };
+          } catch (error) {
+            logger.warn('Reader synchronization measurement failed', {
+              synchronization: performanceRun.result({
+                articles: 0,
+                subscriptions: 0,
+                changedItems: 0,
+                unchangedItems: 0,
+                comparison: 'no-prior-run',
+              }),
+            });
+            throw error;
+          }
+        }, () => performanceRun.recordCoalescedTrigger());
+        if (loadBirchfeedWithGeneration(database, config)?.generation !== coordinated.generation) {
+          return res.status(409).json({ error: 'The RSS connection changed; refresh again to use the current connection' });
+        }
+        return sendMeasuredReaderSnapshot(res, logger, coordinated.snapshot, coordinated.measurement);
       } catch (error) {
-        logger.warn('Reader synchronization measurement failed', {
-          synchronization: performanceRun.result({
-            articles: 0,
-            subscriptions: 0,
-            changedItems: 0,
-            unchangedItems: 0,
-            comparison: 'no-prior-run',
-          }),
-        });
+        if (error instanceof SynchronizationTimeoutError) {
+          return res.status(504).json({ error: 'The RSS service did not finish synchronizing before the provider deadline' });
+        }
+        if (error instanceof StaleSynchronizationError) {
+          return res.status(409).json({ error: 'The RSS connection changed; refresh again to use the current connection' });
+        }
         throw error;
       }
     }
     if (config.nodeEnv === 'production') {
       return res.status(409).json({ error: 'Connect Birchfeed in Settings before synchronizing' });
     }
+    const performanceRun = new ReaderPerformanceRun();
     const snapshot = performanceRun.measureSync('mapping', () => ({ ...developmentFixture, generatedAt: new Date().toISOString() }));
     const collection = snapshotComparison.compare(comparisonKey, snapshot);
     return sendMeasuredReaderSnapshot(res, logger, snapshot, performanceRun.result(collection));

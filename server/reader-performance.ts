@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import type { Response } from 'express';
+import type { RequestHandler, Response } from 'express';
 import type { Article, ReaderSnapshot } from '../shared/reader.js';
 import type { AppLogger } from './logging.js';
 
@@ -71,6 +71,33 @@ function roundedMilliseconds(value: number) {
   return Math.round(value * 100) / 100;
 }
 
+const responseBytes = new WeakMap<Response, { bytes: number }>();
+
+function chunkBytes(chunk: unknown, encoding: unknown) {
+  if (chunk === undefined || chunk === null) return 0;
+  if (typeof chunk === 'string') return Buffer.byteLength(chunk, typeof encoding === 'string' && Buffer.isEncoding(encoding) ? encoding : 'utf8');
+  if (chunk instanceof Uint8Array) return chunk.byteLength;
+  return 0;
+}
+
+export function encodedResponseByteCounter(): RequestHandler {
+  return (_request, response, next) => {
+    const state = { bytes: 0 };
+    responseBytes.set(response, state);
+    const originalWrite = response.write;
+    const originalEnd = response.end;
+    response.write = function write(this: Response, chunk: unknown, ...args: unknown[]) {
+      state.bytes += chunkBytes(chunk, args[0]);
+      return Reflect.apply(originalWrite, this, [chunk, ...args]) as boolean;
+    } as typeof response.write;
+    response.end = function end(this: Response, chunk?: unknown, ...args: unknown[]) {
+      state.bytes += chunkBytes(chunk, args[0]);
+      return Reflect.apply(originalEnd, this, [chunk, ...args]) as Response;
+    } as typeof response.end;
+    next();
+  };
+}
+
 function encodedBodyBytes(response: globalThis.Response, decodedBytes: number) {
   const contentLength = response.headers.get('content-length');
   if (contentLength && /^\d+$/.test(contentLength)) return Number(contentLength);
@@ -88,6 +115,7 @@ export class ReaderPerformanceRun {
   private encodedBytes = 0;
   private encodedBytesUnknownResponses = 0;
   private decodedBytes = 0;
+  private coalescedTriggers = 0;
   private outcome: ReaderSynchronizationMeasurement['outcome'] = 'completed';
 
   async measure<T>(phase: ReaderPhase, operation: () => Promise<T>): Promise<T> {
@@ -142,6 +170,10 @@ export class ReaderPerformanceRun {
     this.phases[phase].incompleteResponses += 1;
   }
 
+  recordCoalescedTrigger() {
+    this.coalescedTriggers += 1;
+  }
+
   recordItems(phase: ReaderPhase, items: number, pages = 0) {
     this.phases[phase].items += items;
     this.phases[phase].pages += pages;
@@ -164,7 +196,7 @@ export class ReaderPerformanceRun {
       },
       phases: this.phases,
       collection,
-      triggers: { coalesced: 0 },
+      triggers: { coalesced: this.coalescedTriggers },
     };
   }
 }
@@ -221,26 +253,45 @@ export function sendMeasuredReaderSnapshot(
   const serializationDurationMs = roundedMilliseconds(performance.now() - serializationStartedAt);
   const decodedBytes = Buffer.byteLength(serialized, 'utf8');
   let finished = false;
+  const responseStartedAt = performance.now();
+  const cpuStartedAt = process.cpuUsage();
 
   response.setHeader('X-Reader-Run-Id', synchronization.runId);
   response.setHeader('Content-Type', 'application/json; charset=utf-8');
   response.setHeader('Content-Length', decodedBytes);
   response.once('finish', () => {
     finished = true;
+    const encoding = String(response.getHeader('Content-Encoding') ?? 'identity');
+    const encodedBytes = responseBytes.get(response)?.bytes ?? (encoding === 'identity' ? decodedBytes : null);
+    const cpu = process.cpuUsage(cpuStartedAt);
     logger.info('Reader synchronization measured', {
       synchronization,
       serialization: { durationMs: serializationDurationMs, decodedBytes },
-      browserToApp: { requests: 1, requestBytes: 0, completedResponses: 1, encodedResponseBytes: decodedBytes },
-      response: { completed: true, disconnected: false, encodedBytes: decodedBytes },
+      compression: {
+        encoding,
+        durationMs: roundedMilliseconds(performance.now() - responseStartedAt),
+        cpuUserMicros: cpu.user,
+        cpuSystemMicros: cpu.system,
+      },
+      browserToApp: { requests: 1, requestBytes: 0, completedResponses: 1, encodedResponseBytes: encodedBytes },
+      response: { completed: true, disconnected: false, encodedBytes },
     });
   });
   response.once('close', () => {
     if (finished) return;
+    const encoding = String(response.getHeader('Content-Encoding') ?? 'identity');
+    const cpu = process.cpuUsage(cpuStartedAt);
     logger.warn('Reader synchronization response disconnected', {
       synchronization,
       serialization: { durationMs: serializationDurationMs, decodedBytes },
+      compression: {
+        encoding,
+        durationMs: roundedMilliseconds(performance.now() - responseStartedAt),
+        cpuUserMicros: cpu.user,
+        cpuSystemMicros: cpu.system,
+      },
       browserToApp: { requests: 1, requestBytes: 0, completedResponses: 0, encodedResponseBytes: null },
-      response: { completed: false, disconnected: true, encodedBytes: null },
+      response: { completed: false, disconnected: true, encodedBytes: null, partialEncodedBytes: responseBytes.get(response)?.bytes ?? 0 },
     });
   });
   response.status(200).send(serialized);

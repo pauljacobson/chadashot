@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import type { AppConfig } from '../config.js';
 import type { AppDatabase } from '../database.js';
 import { nowIso } from '../database.js';
@@ -31,8 +32,21 @@ export function deleteIntegration(database: AppDatabase, kind: IntegrationKind) 
 }
 
 export function loadBirchfeed(database: AppDatabase, config: AppConfig) {
-  const credentials = loadIntegration<GoogleReaderCredentials | Omit<GoogleReaderCredentials, 'serverUrl'>>(database, config, 'birchfeed');
-  return credentials ? { serverUrl: BIRCHFEED_API_URL, ...credentials } : null;
+  return loadBirchfeedWithGeneration(database, config)?.credentials ?? null;
+}
+
+export function loadBirchfeedWithGeneration(database: AppDatabase, config: AppConfig) {
+  const row = database.prepare('SELECT encrypted_config, updated_at FROM integrations WHERE kind = ?').get('birchfeed') as {
+    encrypted_config: string;
+    updated_at: string;
+  } | undefined;
+  if (!row) return null;
+  if (!config.encryptionKey) throw new Error('ENCRYPTION_KEY must be configured before connecting external services');
+  const stored = decryptSecret<GoogleReaderCredentials | Omit<GoogleReaderCredentials, 'serverUrl'>>(row.encrypted_config, config.encryptionKey);
+  return {
+    credentials: { serverUrl: BIRCHFEED_API_URL, ...stored },
+    generation: crypto.createHash('sha256').update(row.updated_at).update('\0').update(row.encrypted_config).digest('base64url'),
+  };
 }
 
 export function loadReadwise(database: AppDatabase, config: AppConfig) {
