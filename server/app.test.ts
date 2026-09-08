@@ -51,6 +51,8 @@ describe('application API', () => {
   it('returns the fixture-backed reader snapshot', async () => {
     const response = await request(app).get('/api/reader/snapshot');
     expect(response.status).toBe(200);
+    expect(response.headers['x-reader-run-id']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(Number(response.headers['content-length'])).toBeGreaterThan(0);
     expect(response.body.source).toBe('fixture');
     expect(response.body.articles).toHaveLength(4);
   });

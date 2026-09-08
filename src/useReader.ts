@@ -11,6 +11,13 @@ import {
   saveCachedSnapshot,
 } from './offlineStore';
 import { applyReadStates } from './readerState';
+import {
+  markMilestone,
+  measureOutboxReplay,
+  measureSnapshotPersistence,
+  recordCollectionDiff,
+  recordSynchronizationTrigger,
+} from './performance';
 
 export type ReaderFilter =
   | { kind: 'inbox' }
@@ -53,46 +60,60 @@ export function useReader(enabled = true) {
   const [pendingMutations, setPendingMutations] = useState(0);
   const lastSync = useRef(0);
   const activeRequest = useRef<AbortController | null>(null);
+  const currentSnapshot = useRef<ReaderSnapshot | null>(null);
 
   const refreshPendingCount = useCallback(async () => {
     setPendingMutations((await queuedArticleMutations()).length);
   }, []);
 
-  const synchronize = useCallback(async () => {
+  const synchronize = useCallback(async (trigger: 'startup' | 'manual' | 'interval' | 'visibility' | 'online' = 'manual') => {
     if (!enabled) return;
     if (!navigator.onLine) {
       setStatus('offline');
       return;
     }
+    recordSynchronizationTrigger(trigger);
     activeRequest.current?.abort();
     const controller = new AbortController();
     activeRequest.current = controller;
     setStatus('syncing');
     try {
       let outboxError: unknown = null;
-      for (const queued of await queuedArticleMutations()) {
-        try {
-          await sendArticleMutation({
-            articleId: queued.articleId,
-            operation: queued.operation,
-            value: queued.value,
-          });
-          await removeQueuedArticleMutation(queued);
-        } catch (mutationError) {
-          outboxError = mutationError;
-          break;
+      const outbox = await queuedArticleMutations();
+      await measureOutboxReplay(outbox.length, async () => {
+        let completedMutations = 0;
+        for (const queued of outbox) {
+          try {
+            await sendArticleMutation({
+              articleId: queued.articleId,
+              operation: queued.operation,
+              value: queued.value,
+            });
+            await removeQueuedArticleMutation(queued);
+            completedMutations += 1;
+          } catch (mutationError) {
+            outboxError = mutationError;
+            break;
+          }
         }
-      }
+        return completedMutations;
+      });
 
       const next = await getReaderSnapshot(controller.signal);
       const remaining = await queuedArticleMutations();
       const reconciled = applyQueuedArticleMutations(next, remaining);
+      recordCollectionDiff(currentSnapshot.current, reconciled);
+      currentSnapshot.current = reconciled;
       setSnapshot(reconciled);
       setSelectedId((current) => current ?? reconciled.articles[0]?.id ?? null);
       setPendingMutations(remaining.length);
       setError(outboxError ? 'Some offline changes are still waiting to synchronize' : null);
       setStatus(outboxError ? 'error' : 'current');
       lastSync.current = Date.now();
+      window.requestAnimationFrame(() => {
+        markMilestone('first-server-backed-list', { articles: reconciled.articles.length });
+        markMilestone('synchronization-complete', { articles: reconciled.articles.length });
+      });
     } catch (syncError) {
       if (controller.signal.aborted) return;
       setError(syncError instanceof Error ? syncError.message : 'Synchronization failed');
@@ -109,22 +130,24 @@ export function useReader(enabled = true) {
       if (!active) return;
       if (cached && lastSync.current === 0) {
         const restored = applyQueuedArticleMutations(cached, queued);
+        currentSnapshot.current = restored;
         setSnapshot(restored);
         setSelectedId((current) => current ?? restored.articles[0]?.id ?? null);
+        window.requestAnimationFrame(() => markMilestone('first-usable-cached-list', { articles: restored.articles.length }));
       }
       setPendingMutations(queued.length);
-      initialSync = window.setTimeout(() => void synchronize(), 0);
+      initialSync = window.setTimeout(() => void synchronize('startup'), 0);
     }).catch(() => {
-      if (active) initialSync = window.setTimeout(() => void synchronize(), 0);
+      if (active) initialSync = window.setTimeout(() => void synchronize('startup'), 0);
     });
 
     const interval = window.setInterval(() => {
-      if (document.visibilityState === 'visible') void synchronize();
+      if (document.visibilityState === 'visible') void synchronize('interval');
     }, 3 * 60 * 1000);
     const handleVisibility = () => {
-      if (document.visibilityState === 'visible' && Date.now() - lastSync.current > 60_000) void synchronize();
+      if (document.visibilityState === 'visible' && Date.now() - lastSync.current > 60_000) void synchronize('visibility');
     };
-    const handleOnline = () => void synchronize();
+    const handleOnline = () => void synchronize('online');
     const handleOffline = () => setStatus('offline');
     document.addEventListener('visibilitychange', handleVisibility);
     window.addEventListener('online', handleOnline);
@@ -143,7 +166,7 @@ export function useReader(enabled = true) {
 
   useEffect(() => {
     if (!snapshot) return;
-    void saveCachedSnapshot(snapshot).catch(() => {
+    void measureSnapshotPersistence(() => saveCachedSnapshot(snapshot)).catch(() => {
       setError('Could not update offline storage on this device');
       setStatus('error');
     });
@@ -257,6 +280,7 @@ export function useReader(enabled = true) {
 
   const clear = useCallback(() => {
     activeRequest.current?.abort();
+    currentSnapshot.current = null;
     setSnapshot(null);
     setSelectedId(null);
     setFilter({ kind: 'inbox' });

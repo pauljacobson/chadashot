@@ -3,6 +3,9 @@ import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import { PwaUpdatePrompt } from './PwaUpdatePrompt';
 import './styles.css';
+import { initializeBrowserPerformance } from './performance';
+
+initializeBrowserPerformance();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import express, { type ErrorRequestHandler, type RequestHandler } from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
-import type { ArticleMutation, SavedHighlight } from '../shared/reader.js';
+import type { ArticleMutation, ReaderSnapshot, SavedHighlight } from '../shared/reader.js';
 import type { AppConfig } from './config.js';
 import { developmentSession, requireDevelopmentUser } from './auth/development.js';
 import { createPasskeyAuthentication } from './auth/passkeys.js';
@@ -13,6 +13,7 @@ import { BIRCHFEED_API_URL, GoogleReaderClient } from './integrations/google-rea
 import { deleteIntegration, hasIntegration, loadBirchfeed, loadReadwise, saveIntegration } from './integrations/settings.js';
 import { ReadwiseClient } from './integrations/readwise.js';
 import { AppLogger, readAppLogs, readLogExport, requestLogger } from './logging.js';
+import { ReaderPerformanceRun, ReaderSnapshotComparison, sendMeasuredReaderSnapshot } from './reader-performance.js';
 
 const mutationSchema = z.object({
   articleId: z.string().min(1),
@@ -84,11 +85,14 @@ export function createApp(config: AppConfig, dependencies: {
   database?: AppDatabase;
   fetchImplementation?: typeof fetch;
   logger?: AppLogger;
+  fixtureSnapshot?: ReaderSnapshot;
 } = {}) {
   const app = express();
   const database = dependencies.database ?? openDatabase(config.dataDir);
   const fetchImplementation = dependencies.fetchImplementation ?? fetch;
   const logger = dependencies.logger ?? new AppLogger(config);
+  const developmentFixture = dependencies.fixtureSnapshot ?? fixtureSnapshot;
+  const snapshotComparison = new ReaderSnapshotComparison();
   app.disable('x-powered-by');
   if (config.nodeEnv === 'production') app.set('trust proxy', 1);
   app.use(requestLogger(logger));
@@ -301,16 +305,33 @@ export function createApp(config: AppConfig, dependencies: {
   });
 
   app.get('/api/reader/snapshot', requireUser, async (_req, res) => {
+    const performanceRun = new ReaderPerformanceRun();
+    const comparisonKey = (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user';
     const credentials = loadBirchfeed(database, config);
     if (credentials) {
-      const snapshot = await new GoogleReaderClient(credentials, fetchImplementation).snapshot();
-      logger.debug('RSS snapshot synchronized', { articles: snapshot.articles.length, subscriptions: snapshot.subscriptions.length });
-      return res.json(snapshot);
+      try {
+        const snapshot = await new GoogleReaderClient(credentials, fetchImplementation, performanceRun).snapshot();
+        const collection = snapshotComparison.compare(comparisonKey, snapshot);
+        return sendMeasuredReaderSnapshot(res, logger, snapshot, performanceRun.result(collection));
+      } catch (error) {
+        logger.warn('Reader synchronization measurement failed', {
+          synchronization: performanceRun.result({
+            articles: 0,
+            subscriptions: 0,
+            changedItems: 0,
+            unchangedItems: 0,
+            comparison: 'no-prior-run',
+          }),
+        });
+        throw error;
+      }
     }
     if (config.nodeEnv === 'production') {
       return res.status(409).json({ error: 'Connect Birchfeed in Settings before synchronizing' });
     }
-    return res.json({ ...fixtureSnapshot, generatedAt: new Date().toISOString() });
+    const snapshot = performanceRun.measureSync('mapping', () => ({ ...developmentFixture, generatedAt: new Date().toISOString() }));
+    const collection = snapshotComparison.compare(comparisonKey, snapshot);
+    return sendMeasuredReaderSnapshot(res, logger, snapshot, performanceRun.result(collection));
   });
 
   app.post('/api/reader/mutations', requireUser, async (req, res) => {

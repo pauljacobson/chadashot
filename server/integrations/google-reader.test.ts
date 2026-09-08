@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { GoogleReaderClient } from './google-reader.js';
+import { ReaderPerformanceRun } from '../reader-performance.js';
 
 function jsonResponse(value: unknown) {
   return new Response(JSON.stringify(value), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -46,6 +47,45 @@ describe('Google Reader compatible Birchfeed client', () => {
     expect(snapshot.folders).toEqual([{ id: 'folder:user/-/label/Tech', title: 'Tech', unreadCount: 1 }]);
     expect(snapshot.subscriptions[0]).toMatchObject({ title: 'Example', unreadCount: 1, iconUrl: 'https://reader.example.test/api/f.php?h=abc' });
     expect(snapshot.articles[0]).toMatchObject({ title: 'A careful web', starred: true, read: false, folderIds: ['folder:user/-/label/Tech'] });
+  });
+
+  it('attributes every snapshot request and page to a redacted synchronization phase', async () => {
+    const run = new ReaderPerformanceRun();
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.includes('/subscription/list')) return jsonResponse({ subscriptions: [{ id: 'feed/1', title: 'Private feed', categories: [] }] });
+      if (url.includes('/unread-count')) return jsonResponse({ unreadcounts: [] });
+      if (url.includes('/stream/items/ids')) return jsonResponse({ itemRefs: [] });
+      if (url.includes('/stream/contents/')) return jsonResponse({ items: [{
+        id: 'private-article-id',
+        title: 'Private title',
+        content: { content: '<p>Private body</p>' },
+        categories: [],
+        origin: { streamId: 'feed/1', title: 'Private feed' },
+      }] });
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const snapshot = await new GoogleReaderClient({
+      serverUrl: 'https://private-reader.example.test', email: 'private@example.test', apiKey: 'private-secret',
+    }, fetchMock, run).snapshot();
+    const result = run.result({
+      articles: snapshot.articles.length,
+      subscriptions: snapshot.subscriptions.length,
+      changedItems: snapshot.articles.length,
+      unchangedItems: 0,
+      comparison: 'no-prior-run',
+    });
+
+    expect(result.provider).toMatchObject({ requests: 6, completedResponses: 6, incompleteResponses: 0, retries: 0 });
+    expect(result.phases.authentication.providerRequests).toBe(1);
+    expect(result.phases.subscriptions.providerRequests).toBe(2);
+    expect(result.phases.contentPages).toMatchObject({ providerRequests: 1, pages: 1, items: 1 });
+    expect(result.phases.unreadIds).toMatchObject({ providerRequests: 1, pages: 1 });
+    expect(result.phases.starredIds).toMatchObject({ providerRequests: 1, pages: 1 });
+    expect(result.phases.mapping.durationMs).toBeGreaterThanOrEqual(0);
+    expect(JSON.stringify(result)).not.toContain('private');
+    expect(JSON.stringify(result)).not.toContain('example.test');
   });
 
   it('follows continuation tokens without imposing a total item limit', async () => {
