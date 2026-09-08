@@ -42,4 +42,6 @@ Only a successful provider mutation writes cached state. The same transaction in
 
 All cache state is ordinary SQLite data and is included in the existing Litestream/R2 replica. Restore tests serialize and reopen a committed database and confirm that bodies and state remain readable. Staging data may also restore, but only the committed account pointer is served.
 
-Set `READER_CACHE_ENABLED=false` to route reads through the legacy full-synchronization path without reversing migration 4. This leaves committed generations and browser-queued writes intact for a later re-enable.
+Set `READER_CLIENT_PATH=snapshot` to route the browser through the compatibility snapshot API. Leave `READER_CACHE_ENABLED=true` to assemble that response from the committed SQLite generation. Set `READER_CACHE_ENABLED=false` as well only when the provider-direct, request-blocking server path is required. Neither switch reverses migrations or clears committed generations, browser outboxes, acknowledgement barriers, queued mark-read jobs, or durable server jobs. Restore `READER_CACHE_ENABLED=true` and `READER_CLIENT_PATH=paginated` to resume the incremental path.
+
+The detailed rollout gates and verified switch behavior are recorded in [the integrated reader verification](./20260908%20Integrated%20reader%20verification.md).

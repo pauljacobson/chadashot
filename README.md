@@ -30,6 +30,7 @@ npm run check
 
 The isolated 20,000-article benchmark and current baseline are documented in the [reader performance benchmark](docs/20260908%20Reader%20performance%20benchmark.md).
 The cache generation, lease, recovery, and rollback contract is documented in the [transactional reader cache design](docs/20260908%20Transactional%20reader%20cache.md).
+The integrated measurements, rollout gates, and compatibility-switch procedure are tracked in the [integrated reader verification](docs/20260908%20Integrated%20reader%20verification.md).
 
 ## Deploy to Railway
 

@@ -162,7 +162,33 @@ export function createApp(config: AppConfig, dependencies: {
   const readerCache = new ReaderCache(database, newId(), config.readerSyncLeaseMs);
   const readerApi = new ReaderApi(database);
   const markReadJobs = new MarkReadJobService(database, readerCache, logger);
+  const fixtureIdentity = dependencies.fixtureSnapshot ? {
+    accountKey: 'synthetic-performance-fixture',
+    providerIdentity: 'synthetic-provider',
+    credentialGeneration: 'performance-fixture-v1',
+  } : null;
+  const ensurePerformanceFixture = () => {
+    if (!fixtureIdentity || readerCache.status(fixtureIdentity).state !== 'empty') return;
+    const lease = readerCache.acquireLease(fixtureIdentity);
+    if (lease) {
+      const run = readerCache.beginImport(lease);
+      readerCache.stageFolders(run, developmentFixture.folders);
+      readerCache.stageSubscriptions(run, developmentFixture.subscriptions);
+      for (let offset = 0; offset < developmentFixture.articles.length; offset += 500) {
+        readerCache.stageArticles(run, developmentFixture.articles.slice(offset, offset + 500));
+      }
+      readerCache.publish(run);
+    }
+  };
+  ensurePerformanceFixture();
   const activeCacheImports = new Map<string, { work: Promise<void>; controller: AbortController }>();
+  const readerSyncCadence = {
+    routineMs: config.readerRoutineSyncIntervalMs,
+    stateMs: config.readerStateSyncIntervalMs,
+    bodyMs: config.readerBodySyncIntervalMs,
+    fullMs: config.readerFullSyncIntervalMs,
+    overlapSeconds: config.readerSyncOverlapSeconds,
+  };
   app.disable('x-powered-by');
   if (config.nodeEnv === 'production') app.set('trust proxy', 1);
   app.use(requestLogger(logger));
@@ -205,6 +231,11 @@ export function createApp(config: AppConfig, dependencies: {
       next();
     });
   };
+
+  app.get('/api/reader/config', requireUser, (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ path: config.readerClientPath });
+  });
 
   function startReaderCacheImport(
     comparisonKey: string,
@@ -270,14 +301,7 @@ export function createApp(config: AppConfig, dependencies: {
       };
 
       try {
-        const cadence = {
-          routineMs: config.readerRoutineSyncIntervalMs,
-          stateMs: config.readerStateSyncIntervalMs,
-          bodyMs: config.readerBodySyncIntervalMs,
-          fullMs: config.readerFullSyncIntervalMs,
-          overlapSeconds: config.readerSyncOverlapSeconds,
-        };
-        const plan = readerCache.syncPlan(identity, cadence);
+        const plan = readerCache.syncPlan(identity, readerSyncCadence);
         if (forceRoutine && !plan.full) plan.routine = true;
         if (plan.full) {
           await runFullImport(lease);
@@ -297,8 +321,19 @@ export function createApp(config: AppConfig, dependencies: {
           const discovery = await client.discoverSince(
             plan.routineSinceSeconds,
             readerCache.knownArticleIds(identity),
-            (folders, subscriptions) => !plan.subscriptionFingerprint
-              || readerSubscriptionFingerprint(subscriptions, folders) === plan.subscriptionFingerprint,
+            (folders, subscriptions) => {
+              const observedFingerprint = readerSubscriptionFingerprint(subscriptions, folders);
+              const matches = !plan.subscriptionFingerprint || observedFingerprint === plan.subscriptionFingerprint;
+              if (!matches) {
+                logger.info('Reader subscription structure fingerprint changed', {
+                  expectedFingerprint: plan.subscriptionFingerprint,
+                  observedFingerprint,
+                  subscriptions: subscriptions.length,
+                  folders: folders.length,
+                });
+              }
+              return matches;
+            },
           );
           const fingerprint = readerSubscriptionFingerprint(discovery.subscriptions, discovery.folders);
           if (discovery.structureChanged) {
@@ -581,13 +616,7 @@ export function createApp(config: AppConfig, dependencies: {
         const identity = readerCacheIdentity(comparisonKey, integration.credentials, integration.generation);
         const performanceRun = new ReaderPerformanceRun();
         const cached = performanceRun.measureSync('mapping', () => readerCache.readSnapshot(identity));
-        const syncPlan = readerCache.syncPlan(identity, {
-          routineMs: config.readerRoutineSyncIntervalMs,
-          stateMs: config.readerStateSyncIntervalMs,
-          bodyMs: config.readerBodySyncIntervalMs,
-          fullMs: config.readerFullSyncIntervalMs,
-          overlapSeconds: config.readerSyncOverlapSeconds,
-        });
+        const syncPlan = readerCache.syncPlan(identity, readerSyncCadence);
         if (syncPlan.full || syncPlan.routine || syncPlan.state || syncPlan.body) {
           startReaderCacheImport(comparisonKey, integration);
         }
@@ -671,8 +700,12 @@ export function createApp(config: AppConfig, dependencies: {
 
   function connectedReader(res: express.Response) {
     const integration = loadBirchfeedWithGeneration(database, config);
-    if (!integration) return null;
     const userId = (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user';
+    if (!integration && fixtureIdentity) {
+      ensurePerformanceFixture();
+      return { integration: null, identity: fixtureIdentity };
+    }
+    if (!integration) return null;
     return {
       integration,
       identity: readerCacheIdentity(userId, integration.credentials, integration.generation),
@@ -707,6 +740,7 @@ export function createApp(config: AppConfig, dependencies: {
   }
 
   function markReadSubmitter(reader: NonNullable<ReturnType<typeof connectedReader>>) {
+    if (!reader.integration) return async () => undefined;
     const client = new GoogleReaderClient(reader.integration.credentials, fetchImplementation);
     return (mutations: ArticleMutation[]) => client.mutateMany(mutations);
   }
@@ -757,6 +791,15 @@ export function createApp(config: AppConfig, dependencies: {
     const reader = connectedReader(res);
     if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before checking synchronization' });
     res.set('Cache-Control', 'no-store');
+    if (reader.integration) {
+      const plan = readerCache.syncPlan(reader.identity, readerSyncCadence);
+      if (plan.full || plan.routine || plan.state || plan.body) {
+        startReaderCacheImport(
+          (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user',
+          reader.integration,
+        );
+      }
+    }
     void markReadJobs.resume(reader.identity, markReadSubmitter(reader));
     return res.json({ accountKey: reader.identity.accountKey, ...readerCache.status(reader.identity) });
   });
@@ -764,11 +807,13 @@ export function createApp(config: AppConfig, dependencies: {
   app.post('/api/reader/refresh', requireUser, (_req, res) => {
     const reader = connectedReader(res);
     if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before refreshing' });
-    startReaderCacheImport(
-      (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user',
-      reader.integration,
-      true,
-    );
+    if (reader.integration) {
+      startReaderCacheImport(
+        (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user',
+        reader.integration,
+        true,
+      );
+    }
     res.set('Cache-Control', 'no-store');
     return res.status(202).json({ status: 'scheduled', synchronization: readerCache.status(reader.identity) });
   });
@@ -799,6 +844,8 @@ export function createApp(config: AppConfig, dependencies: {
       }
       await new GoogleReaderClient(integration.credentials, fetchImplementation).mutate(mutation);
       readerCache.applyConfirmedMutations(identity, [mutation]);
+    } else if (fixtureIdentity) {
+      readerCache.applyConfirmedMutations(fixtureIdentity, [mutation]);
     }
     logger.debug('Article state synchronized', { operation: mutation.operation, value: mutation.value });
     res.status(200).json({ mutation, synchronized: true });
@@ -816,6 +863,8 @@ export function createApp(config: AppConfig, dependencies: {
       }
       await new GoogleReaderClient(integration.credentials, fetchImplementation).mutateMany(mutations);
       readerCache.applyConfirmedMutations(identity, mutations);
+    } else if (fixtureIdentity) {
+      readerCache.applyConfirmedMutations(fixtureIdentity, mutations);
     }
     logger.debug('Article state batch synchronized', { mutations: mutations.length });
     res.status(200).json({ mutations, synchronized: true });

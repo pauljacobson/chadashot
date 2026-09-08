@@ -51,6 +51,35 @@ describe('Google Reader compatible Birchfeed client', () => {
     expect(snapshot.articles[0]).toMatchObject({ title: 'A careful web', starred: true, read: false, folderIds: ['folder:user/-/label/Tech'] });
   });
 
+  it('maps repeated folder metadata deterministically when subscription order changes', async () => {
+    let reverse = false;
+    const subscriptions = [
+      { id: 'feed/1', title: 'One', categories: [{ id: 'user/-/label/shared', label: 'Zulu' }] },
+      { id: 'feed/2', title: 'Two', categories: [{ id: 'user/-/label/shared', label: 'Alpha' }] },
+    ];
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.includes('/subscription/list')) {
+        return jsonResponse({ subscriptions: reverse ? [...subscriptions].reverse() : subscriptions });
+      }
+      if (url.includes('/unread-count')) return jsonResponse({ unreadcounts: [{ id: 'user/-/label/shared', count: 2 }] });
+      if (url.includes('/stream/items/ids')) return jsonResponse({ itemRefs: [] });
+      if (url.includes('/stream/contents/')) return jsonResponse({ items: [] });
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const client = new GoogleReaderClient({
+      serverUrl: 'https://reader.example.test', email: 'reader@example.test', apiKey: 'secret',
+    }, fetchMock);
+
+    const first = await client.snapshot();
+    reverse = true;
+    const second = await client.snapshot();
+
+    expect(first.folders).toEqual([{ id: 'folder:user/-/label/shared', title: 'Alpha', unreadCount: 2 }]);
+    expect(second.folders).toEqual(first.folders);
+  });
+
   it('attributes every snapshot request and page to a redacted synchronization phase', async () => {
     const run = new ReaderPerformanceRun();
     const fetchMock = vi.fn<typeof fetch>(async (input) => {

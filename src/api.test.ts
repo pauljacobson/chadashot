@@ -1,9 +1,19 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, getReaderSnapshot, sendArticleMutations } from './api';
+import { ApiError, getReaderRuntimeConfig, getReaderSnapshot, sendArticleMutations } from './api';
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe('reader snapshot API', () => {
+  it('loads the server-selected compatibility path', async () => {
+    const fetchMock = vi.fn(async () => Response.json({ path: 'snapshot' }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(getReaderRuntimeConfig()).resolves.toEqual({ path: 'snapshot' });
+    expect(fetchMock).toHaveBeenCalledWith('/api/reader/config', expect.objectContaining({
+      credentials: 'same-origin',
+    }));
+  });
+
   it('turns the bounded initialization response into an actionable retry state', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
       status: 'initializing',

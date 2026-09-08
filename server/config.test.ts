@@ -8,6 +8,7 @@ describe('loadConfig', () => {
     expect(config.logOutput).toBe('both');
     expect(config.logFilePath).toBe(`${config.dataDir}/logs/app.ndjson`);
     expect(config.readerSyncTimeoutMs).toBe(120_000);
+    expect(config.readerClientPath).toBe('paginated');
     expect(config.readerCacheEnabled).toBe(true);
     expect(config.readerSyncLeaseMs).toBe(45_000);
     expect(config.readerRoutineSyncIntervalMs).toBe(180_000);
@@ -18,7 +19,12 @@ describe('loadConfig', () => {
   });
 
   it('keeps the migrated schema while allowing the legacy reader path to be selected', () => {
-    const config = loadConfig({ NODE_ENV: 'development', READER_CACHE_ENABLED: 'false' });
+    const config = loadConfig({
+      NODE_ENV: 'development',
+      READER_CLIENT_PATH: 'snapshot',
+      READER_CACHE_ENABLED: 'false',
+    });
+    expect(config.readerClientPath).toBe('snapshot');
     expect(config.readerCacheEnabled).toBe(false);
   });
 

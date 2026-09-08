@@ -77,7 +77,7 @@ describe('reader cache API', () => {
       expect(database.prepare(`SELECT COUNT(*) AS count FROM reader_sync_leases`).get()).toEqual({ count: 0 });
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect((await request(app).get('/api/reader/snapshot')).status).toBe(200);
+    expect((await request(app).get('/api/reader/status')).status).toBe(200);
     await vi.waitFor(() => {
       expect(database.prepare('SELECT COUNT(*) AS count FROM reader_sync_runs').get()).toEqual({ count: 2 });
     });

@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { createApp, normalizeReaderServerUrl } from './app.js';
 import { loadConfig } from './config.js';
 import { openMemoryDatabase } from './database.js';
+import { fixtureSnapshot } from './fixtures.js';
 import { AppLogger } from './logging.js';
 
 const config = loadConfig({ NODE_ENV: 'test', AUTH_MODE: 'development' });
@@ -18,6 +19,21 @@ describe('application API', () => {
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ status: 'ok' });
     expect(response.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('publishes the selected browser reader path without caching it', async () => {
+    const paginated = await request(app).get('/api/reader/config');
+    const snapshotApp = createApp(loadConfig({
+      NODE_ENV: 'test',
+      AUTH_MODE: 'development',
+      READER_CLIENT_PATH: 'snapshot',
+    }), { database: openMemoryDatabase() });
+    const snapshot = await request(snapshotApp).get('/api/reader/config');
+
+    expect(paginated.status).toBe(200);
+    expect(paginated.body).toEqual({ path: 'paginated' });
+    expect(paginated.headers['cache-control']).toBe('no-store');
+    expect(snapshot.body).toEqual({ path: 'snapshot' });
   });
 
   it('returns and exports redacted application logs for an authenticated user', async () => {
@@ -55,6 +71,21 @@ describe('application API', () => {
     expect(Number(response.headers['content-length'])).toBeGreaterThan(0);
     expect(response.body.source).toBe('fixture');
     expect(response.body.articles).toHaveLength(4);
+  });
+
+  it('seeds the paginated reader APIs when the isolated fixture is explicitly enabled', async () => {
+    const fixtureApp = createApp(config, {
+      database: openMemoryDatabase(),
+      fixtureSnapshot,
+    });
+
+    const status = await request(fixtureApp).get('/api/reader/status');
+    const navigation = await request(fixtureApp).get('/api/reader/navigation');
+    const articles = await request(fixtureApp).get('/api/reader/articles').query({ scope: 'all', read: 'all', limit: 100 });
+
+    expect(status.body).toMatchObject({ accountKey: 'synthetic-performance-fixture', state: 'current' });
+    expect(navigation.body.counts.all).toBe(fixtureSnapshot.articles.length);
+    expect(articles.body.articles).toHaveLength(fixtureSnapshot.articles.length);
   });
 
   it('negotiates Brotli or gzip while preserving the identity snapshot contract', async () => {
