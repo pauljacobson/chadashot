@@ -3,7 +3,7 @@ import type { ArticleMutation, ReaderSnapshot, SessionState } from '../shared/re
 import { applyReadStates } from './readerState';
 
 const DATABASE_NAME = 'chadashot';
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
 const SNAPSHOT_KEY = 'latest';
 const MAX_CACHED_ARTICLES = 200;
 const MAX_CACHE_BYTES = 100 * 1024 * 1024;
@@ -12,6 +12,10 @@ export type QueuedArticleMutation = ArticleMutation & {
   key: string;
   createdAt: string;
   revision: string;
+};
+
+export type AcknowledgedArticleMutation = QueuedArticleMutation & {
+  acknowledgedAt: string;
 };
 
 interface ChadashotDatabase extends DBSchema {
@@ -28,6 +32,10 @@ interface ChadashotDatabase extends DBSchema {
     value: QueuedArticleMutation;
     indexes: { 'by-created-at': string };
   };
+  acknowledgements: {
+    key: string;
+    value: AcknowledgedArticleMutation;
+  };
 }
 
 let databasePromise: ReturnType<typeof openDB<ChadashotDatabase>> | null = null;
@@ -35,11 +43,14 @@ let databasePromise: ReturnType<typeof openDB<ChadashotDatabase>> | null = null;
 function database() {
   if (!databasePromise) {
     databasePromise = openDB<ChadashotDatabase>(DATABASE_NAME, DATABASE_VERSION, {
-      upgrade(db) {
-        db.createObjectStore('snapshots', { keyPath: 'key' });
-        db.createObjectStore('sessions', { keyPath: 'key' });
-        const outbox = db.createObjectStore('outbox', { keyPath: 'key' });
-        outbox.createIndex('by-created-at', 'createdAt');
+      upgrade(db, oldVersion) {
+        if (oldVersion < 1) {
+          db.createObjectStore('snapshots', { keyPath: 'key' });
+          db.createObjectStore('sessions', { keyPath: 'key' });
+          const outbox = db.createObjectStore('outbox', { keyPath: 'key' });
+          outbox.createIndex('by-created-at', 'createdAt');
+        }
+        if (oldVersion < 2) db.createObjectStore('acknowledgements', { keyPath: 'key' });
       },
     });
   }
@@ -89,16 +100,28 @@ export async function loadOfflineSession() {
 }
 
 export async function enqueueArticleMutation(mutation: ArticleMutation) {
+  return (await enqueueArticleMutations([mutation]))[0];
+}
+
+/** Atomically persists a local batch before any provider request is attempted. */
+export async function enqueueArticleMutations(mutations: ArticleMutation[]) {
+  if (mutations.length === 0) return [];
   const db = await database();
-  const key = `${mutation.articleId}:${mutation.operation}`;
-  const existing = await db.get('outbox', key);
-  const queued = {
-    ...mutation,
-    key,
-    createdAt: existing?.createdAt ?? new Date().toISOString(),
-    revision: crypto.randomUUID(),
-  };
-  await db.put('outbox', queued);
+  const transaction = db.transaction('outbox', 'readwrite', { durability: 'strict' });
+  const queued: QueuedArticleMutation[] = [];
+  for (const mutation of mutations) {
+    const key = `${mutation.articleId}:${mutation.operation}`;
+    const existing = await transaction.store.get(key);
+    const next = {
+      ...mutation,
+      key,
+      createdAt: existing?.createdAt ?? new Date().toISOString(),
+      revision: crypto.randomUUID(),
+    };
+    await transaction.store.put(next);
+    queued.push(next);
+  }
+  await transaction.done;
   return queued;
 }
 
@@ -112,6 +135,34 @@ export async function removeQueuedArticleMutation(mutation: QueuedArticleMutatio
   const current = await transaction.store.get(mutation.key);
   if (current?.revision === mutation.revision) await transaction.store.delete(mutation.key);
   await transaction.done;
+}
+
+/**
+ * Moves successfully submitted revisions from the outbox to an acknowledgement
+ * barrier in one transaction. A newer local revision is never removed by an
+ * older request completing later.
+ */
+export async function acknowledgeQueuedArticleMutations(mutations: QueuedArticleMutation[]) {
+  if (mutations.length === 0) return 0;
+  const db = await database();
+  const transaction = db.transaction(['outbox', 'acknowledgements'], 'readwrite', { durability: 'strict' });
+  let acknowledged = 0;
+  for (const mutation of mutations) {
+    const current = await transaction.objectStore('outbox').get(mutation.key);
+    if (current?.revision !== mutation.revision) continue;
+    await transaction.objectStore('outbox').delete(mutation.key);
+    await transaction.objectStore('acknowledgements').put({
+      ...mutation,
+      acknowledgedAt: new Date().toISOString(),
+    });
+    acknowledged += 1;
+  }
+  await transaction.done;
+  return acknowledged;
+}
+
+export async function acknowledgedArticleMutations() {
+  return (await (await database()).getAll('acknowledgements'));
 }
 
 export function applyQueuedArticleMutations(snapshot: ReaderSnapshot, mutations: QueuedArticleMutation[]) {
@@ -130,6 +181,59 @@ export function applyQueuedArticleMutations(snapshot: ReaderSnapshot, mutations:
   };
 }
 
+function snapshotMatchesMutation(snapshot: ReaderSnapshot, mutation: ArticleMutation) {
+  const article = snapshot.articles.find((candidate) => candidate.id === mutation.articleId);
+  if (!article) return false;
+  return mutation.operation === 'read'
+    ? article.read === mutation.value
+    : article.starred === mutation.value;
+}
+
+/** Applies durable local intent to cached data without treating that cache as provider confirmation. */
+export async function overlayLocalMutations(snapshot: ReaderSnapshot) {
+  const db = await database();
+  const transaction = db.transaction(['outbox', 'acknowledgements'], 'readonly');
+  const [pending, acknowledgements] = await Promise.all([
+    transaction.objectStore('outbox').index('by-created-at').getAll(),
+    transaction.objectStore('acknowledgements').getAll(),
+  ]);
+  await transaction.done;
+  return {
+    snapshot: applyQueuedArticleMutations(snapshot, [...acknowledgements, ...pending]),
+    pendingMutations: pending.length,
+  };
+}
+
+/**
+ * Overlays both pending and recently acknowledged intent on a server snapshot.
+ * An acknowledgement is cleared only after the provider snapshot confirms the
+ * same value, preventing an eventually consistent response from reverting UI.
+ */
+export async function reconcileSnapshotWithLocalMutations(snapshot: ReaderSnapshot) {
+  const db = await database();
+  const transaction = db.transaction(['outbox', 'acknowledgements'], 'readwrite');
+  const pending = await transaction.objectStore('outbox').index('by-created-at').getAll();
+  const acknowledgements = await transaction.objectStore('acknowledgements').getAll();
+  const retainedAcknowledgements: AcknowledgedArticleMutation[] = [];
+
+  for (const acknowledgement of acknowledgements) {
+    if (snapshotMatchesMutation(snapshot, acknowledgement)) {
+      const current = await transaction.objectStore('acknowledgements').get(acknowledgement.key);
+      if (current?.revision === acknowledgement.revision) {
+        await transaction.objectStore('acknowledgements').delete(acknowledgement.key);
+      }
+    } else {
+      retainedAcknowledgements.push(acknowledgement);
+    }
+  }
+  await transaction.done;
+
+  return {
+    snapshot: applyQueuedArticleMutations(snapshot, [...retainedAcknowledgements, ...pending]),
+    pendingMutations: pending.length,
+  };
+}
+
 export async function offlineStorageSummary() {
   const db = await database();
   const [snapshotRecord, queuedChanges] = await Promise.all([
@@ -145,11 +249,12 @@ export async function offlineStorageSummary() {
 
 export async function clearOfflineData() {
   const db = await database();
-  const transaction = db.transaction(['snapshots', 'sessions', 'outbox'], 'readwrite', { durability: 'strict' });
+  const transaction = db.transaction(['snapshots', 'sessions', 'outbox', 'acknowledgements'], 'readwrite', { durability: 'strict' });
   await Promise.all([
     transaction.objectStore('snapshots').clear(),
     transaction.objectStore('sessions').clear(),
     transaction.objectStore('outbox').clear(),
+    transaction.objectStore('acknowledgements').clear(),
   ]);
   await transaction.done;
 }
