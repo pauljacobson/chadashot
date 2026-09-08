@@ -1,4 +1,4 @@
-import type { AccountSecurityState, AppLogLevel, AppLogResult, ArticleMutation, IntegrationStatus, ReaderSnapshot, SavedHighlight, SessionState } from '../shared/reader';
+import type { AccountSecurityState, AppLogLevel, AppLogResult, ArticleMutation, IntegrationStatus, ReaderInitializationState, ReaderSnapshot, SavedHighlight, SessionState } from '../shared/reader';
 import type {
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
@@ -43,8 +43,15 @@ export function getSession(signal?: AbortSignal) {
   return request<SessionState>('/api/session', { signal });
 }
 
-export function getReaderSnapshot(signal?: AbortSignal) {
-  return request<ReaderSnapshot>('/api/reader/snapshot', { signal }, true);
+export async function getReaderSnapshot(signal?: AbortSignal) {
+  const result = await request<ReaderSnapshot | ReaderInitializationState>('/api/reader/snapshot', { signal }, true);
+  if ('status' in result && result.status === 'initializing') {
+    const progress = result.progress.itemsStaged > 0 ? ` (${result.progress.itemsStaged.toLocaleString()} items staged)` : '';
+    throw new ApiError(result.error
+      ? `Reader cache retrying after: ${result.error}`
+      : `Reader cache is initializing${progress}; retry shortly`, 202);
+  }
+  return result as ReaderSnapshot;
 }
 
 export function sendArticleMutation(mutation: ArticleMutation) {

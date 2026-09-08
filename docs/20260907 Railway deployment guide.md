@@ -13,6 +13,9 @@ Chadashot deploys as one Docker-based Railway service from the repository root. 
 - Set `BOOTSTRAP_TOKEN` to a separate long random value for the initial setup ceremony, then remove it from Railway immediately after the first account and passkey are created.
 - Railway supplies `PORT`; Chadashot listens on it automatically.
 - Optional logging controls are `LOG_LEVEL` (`debug`, `info`, `warn`, or `error`), `LOG_OUTPUT` (`console`, `file`, or `both`), and `LOG_MAX_BYTES`. The defaults are `info`, `both`, and 5 MiB.
+- Keep `READER_CACHE_ENABLED=true` for normal operation. `false` is a temporary application rollback to the legacy blocking reader route; it does not reverse the forward-only cache migration.
+- `READER_SYNC_LEASE_MS` defaults to 45 seconds. The importing web process heartbeats every 15 seconds, and another process may take ownership only after the lease expires.
+- `READER_CACHE_REFRESH_INTERVAL_MS` defaults to three minutes so repeated compatibility snapshot requests do not start repeated full imports.
 - The deployment health check is `/api/health`.
 
 Treat `ENCRYPTION_KEY` as permanent application data: changing it makes the saved Birchfeed and Readwise credentials unreadable. Store it in a password manager as well as Railway.
@@ -49,6 +52,14 @@ Migration rules:
 - Take or verify a Railway/R2 backup before deploying a migration that rewrites tables or removes data.
 - Keep application code compatible with the migration it ships with; the server applies migrations before it begins listening.
 
+#### Reader import process model
+
+Run one Railway web service and do not add a separate reader worker in this phase. A request serves the latest committed SQLite generation immediately and asks the same web process to refresh in the background. Short transactions stage at most 500 articles at a time; no transaction stays open during a Birchfeed request. A final transaction verifies the current fencing token and atomically publishes the generation with its checkpoint and collection/state/body versions.
+
+The lease is stored in SQLite rather than process memory so overlapping Railway deployments cannot publish competing generations. Its default 45-second expiry and 15-second heartbeat allow a replacement process to recover after an old process stops. An expired or replaced owner is fenced from publication even if its old provider request later completes. A failed or interrupted generation remains uncommitted and the last successful generation remains readable.
+
+Litestream replicates the staging rows, lease, checkpoint, and committed generation as ordinary SQLite state. After a restore, only `reader_accounts.current_generation_id` is served. An incomplete generation cannot become visible merely because it was present in a replica; a new process resumes with a new fenced import after the restored lease expires.
+
 #### Safe replacement sequence
 
 1. The existing FreshRSS instance contains no data that needs preserving, so detach or delete its old volume rather than mounting it into Chadashot.
@@ -63,4 +74,4 @@ Migration rules:
 
 #### Rollback boundary
 
-Do not reuse the old FreshRSS volume for Chadashot. Before account creation, rollback can simply redeploy the old FreshRSS image if desired. After Chadashot contains account or highlight data, rollback means deploying the previous Chadashot image with a matching database backup; keep its `/data` volume intact during any application rollback.
+Do not reuse the old FreshRSS volume for Chadashot. Before account creation, rollback can simply redeploy the old FreshRSS image if desired. After Chadashot contains account or highlight data, rollback means deploying the previous Chadashot image with a matching database backup; keep its `/data` volume intact during any application rollback. For a cache-only rollback on a compatible image, set `READER_CACHE_ENABLED=false`. This preserves the migrated tables, committed cache, and browser outbox while routing reads through the legacy full-synchronization path.

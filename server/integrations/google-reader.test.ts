@@ -127,6 +127,40 @@ describe('Google Reader compatible Birchfeed client', () => {
     expect(streamRequests[1]?.searchParams.get('c')).toBe('next page');
   });
 
+  it('streams unique mapped article pages to a durable import sink', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.pathname.includes('/subscription/list')) return jsonResponse({ subscriptions: [{
+        id: 'feed/1', title: 'Example', categories: [],
+      }] });
+      if (url.pathname.includes('/unread-count')) return jsonResponse({ unreadcounts: [] });
+      if (url.pathname.includes('/stream/items/ids')) return jsonResponse({ itemRefs: [] });
+      if (url.pathname.includes('/stream/contents/')) {
+        const makeArticle = (id: string, title = id) => ({
+          id, title, categories: [], origin: { streamId: 'feed/1', title: 'Example' },
+        });
+        if (!url.searchParams.has('c')) {
+          return jsonResponse({ items: [makeArticle('article-1'), makeArticle('duplicate', 'First')], continuation: 'next' });
+        }
+        return jsonResponse({ items: [makeArticle('duplicate', 'Ignored'), makeArticle('article-2')] });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const structures: number[] = [];
+    const pages: string[][] = [];
+
+    await new GoogleReaderClient({
+      serverUrl: 'https://reader.example.test/api/greader.php', email: 'reader@example.test', apiKey: 'secret',
+    }, fetchMock).importTo({
+      stageStructure(_folders, subscriptions) { structures.push(subscriptions.length); },
+      stageArticles(articles) { pages.push(articles.map((article) => article.id)); },
+    });
+
+    expect(structures).toEqual([1]);
+    expect(pages).toEqual([['article-1', 'duplicate'], ['article-2']]);
+  });
+
   it('stops a malformed service from repeating the same continuation forever', async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);

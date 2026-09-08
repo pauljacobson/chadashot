@@ -10,11 +10,12 @@ describe('database migrations', () => {
     runMigrations(database);
     runMigrations(database);
 
-    expect(currentSchemaVersion(database)).toEqual({ version: 3 });
+    expect(currentSchemaVersion(database)).toEqual({ version: 4 });
     expect(database.prepare('SELECT version, name FROM schema_migrations ORDER BY version').all()).toEqual([
       { version: 1, name: 'initial_schema' },
       { version: 2, name: 'passkey_management_and_recovery' },
       { version: 3, name: 'durable_highlight_anchors' },
+      { version: 4, name: 'transactional_reader_cache' },
     ]);
     expect(database.prepare("PRAGMA table_info('passkey_credentials')").all()).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'name' })]),
@@ -23,6 +24,13 @@ describe('database migrations', () => {
       expect.arrayContaining([
         expect.objectContaining({ name: 'start_offset' }),
         expect.objectContaining({ name: 'end_offset' }),
+      ]),
+    );
+    expect(database.prepare("PRAGMA table_info('reader_cache_generations')").all()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'status' }),
+        expect.objectContaining({ name: 'fence_token' }),
+        expect.objectContaining({ name: 'collection_version' }),
       ]),
     );
   });
@@ -37,6 +45,6 @@ describe('database migrations', () => {
     runMigrations(database);
 
     expect(database.prepare('SELECT id, display_name FROM users').get()).toEqual({ id: 'user-1', display_name: 'Paul' });
-    expect(currentSchemaVersion(database)).toEqual({ version: 3 });
+    expect(currentSchemaVersion(database)).toEqual({ version: 4 });
   });
 });

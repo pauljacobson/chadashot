@@ -39,6 +39,19 @@ export type ReaderSnapshot = {
   folders: Folder[];
   subscriptions: Subscription[];
   articles: Article[];
+  cacheStatus?: {
+    state: 'refreshing' | 'current' | 'stale';
+    lastSuccessAt: string | null;
+    error: string | null;
+    versions: { collection: number; state: number; body: number };
+  };
+};
+
+export type ReaderInitializationState = {
+  status: 'initializing';
+  progress: { itemsStaged: number };
+  retryAfterSeconds: number;
+  error: string | null;
 };
 
 export type ArticleMutation = {
