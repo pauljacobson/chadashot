@@ -19,11 +19,16 @@ export function buildFeedGroups(snapshot: ReaderSnapshot | null, options: FeedTr
   if (!snapshot) return [];
 
   const { unreadOnly = false, sortOrder = 'alphabetical' } = options;
-  const activityByFeed = new Map<string, number>();
-  for (const article of snapshot.articles) {
-    const publishedAt = Date.parse(article.publishedAt);
-    if (Number.isFinite(publishedAt)) {
-      activityByFeed.set(article.feedId, Math.max(activityByFeed.get(article.feedId) ?? 0, publishedAt));
+  const activityByFeed = new Map(snapshot.subscriptions.map((subscription) => {
+    const publishedAt = subscription.latestPublishedAt ? Date.parse(subscription.latestPublishedAt) : 0;
+    return [subscription.id, Number.isFinite(publishedAt) ? publishedAt : 0] as const;
+  }));
+  if (!snapshot.subscriptions.some((subscription) => subscription.latestPublishedAt !== undefined)) {
+    for (const article of snapshot.articles) {
+      const publishedAt = Date.parse(article.publishedAt);
+      if (Number.isFinite(publishedAt)) {
+        activityByFeed.set(article.feedId, Math.max(activityByFeed.get(article.feedId) ?? 0, publishedAt));
+      }
     }
   }
   const compareSubscriptions = (left: Subscription, right: Subscription) => {

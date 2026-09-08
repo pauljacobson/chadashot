@@ -398,7 +398,13 @@ function snapshotFromNormalized(
   return {
     generatedAt: new Date().toISOString(),
     source: 'google-reader',
-    folders: navigation.folders.map(({ id, title, unreadCount }) => ({ id, title, unreadCount })),
+    folders: navigation.folders.map((folder) => ({
+      id: folder.id,
+      title: folder.title,
+      unreadCount: folder.unreadCount,
+      totalCount: folder.totalCount,
+      latestPublishedAt: folder.latestPublishedAt,
+    })),
     subscriptions: navigation.feeds.map((feed) => ({
       id: feed.id,
       title: feed.title,
@@ -407,6 +413,8 @@ function snapshotFromNormalized(
       iconUrl: feed.iconUrl,
       folderIds: feed.folderIds,
       unreadCount: feed.unreadCount,
+      totalCount: feed.totalCount,
+      latestPublishedAt: feed.latestPublishedAt,
     })),
     articles: metadata
       .sort((first, second) => second.publishedAt.localeCompare(first.publishedAt) || second.id.localeCompare(first.id))

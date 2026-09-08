@@ -22,6 +22,7 @@
   "dependencies": {
     "@simplewebauthn/browser": "13.3.0",
     "@simplewebauthn/server": "13.3.3",
+    "@tanstack/react-virtual": "^3.14.11",
     "better-sqlite3": "13.0.3",
     "compression": "^1.8.1",
     "dompurify": "3.4.15",

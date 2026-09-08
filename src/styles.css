@@ -629,7 +629,8 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 .mark-all-confirmation .primary-action { border-color: var(--accent); background: var(--accent); color: var(--accent-contrast); }
 .mark-all-confirmation button:disabled { opacity: .55; cursor: default; }
 .article-list-scroll { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; }
-.article-row { position: relative; border-bottom: 1px solid var(--border); }
+.article-list-window { position: relative; width: 100%; }
+.article-row { position: absolute; top: 0; left: 0; width: 100%; border-bottom: 1px solid var(--border); }
 .article-row.active { background: var(--surface-active); box-shadow: inset 3px 0 var(--accent); }
 .article-row:hover { background: color-mix(in srgb, var(--surface-active) 62%, var(--surface)); }
 .article-main-action {

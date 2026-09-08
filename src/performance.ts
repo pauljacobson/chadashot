@@ -11,6 +11,7 @@ export type BrowserPerformanceEventName =
   | 'collection-diff'
   | 'mounted-rows'
   | 'synchronization-trigger'
+  | 'selection-update'
   | 'article-open'
   | 'outbox-replay';
 
@@ -56,6 +57,7 @@ let longTaskMaximumDurationMs = 0;
 let maximumMountedRows = 0;
 let initialized = false;
 let articleOpenStartedAt: { startTimeMs: number; source: 'cache' | 'server' } | null = null;
+let selectionUpdateStartedAt: number | null = null;
 
 function roundedMilliseconds(value: number) {
   return Math.round(value * 100) / 100;
@@ -176,6 +178,21 @@ export function startArticleOpen(source: 'cache' | 'server' = 'cache') {
   articleOpenStartedAt = { startTimeMs: now(), source };
 }
 
+export function startSelectionUpdate() {
+  selectionUpdateStartedAt = now();
+}
+
+export function finishSelectionUpdate() {
+  if (selectionUpdateStartedAt === null) return;
+  addEvent({
+    name: 'selection-update',
+    startTimeMs: roundedMilliseconds(selectionUpdateStartedAt),
+    durationMs: roundedMilliseconds(now() - selectionUpdateStartedAt),
+    source: 'cache',
+  });
+  selectionUpdateStartedAt = null;
+}
+
 export function finishArticleOpen() {
   if (!articleOpenStartedAt) return;
   addEvent({
@@ -185,6 +202,7 @@ export function finishArticleOpen() {
     source: articleOpenStartedAt.source,
   });
   articleOpenStartedAt = null;
+  selectionUpdateStartedAt = null;
 }
 
 export function recordMountedRows(mountedRows: number) {

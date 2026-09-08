@@ -61,10 +61,20 @@ export function getReaderNavigation(signal?: AbortSignal) {
 export function getReaderArticles(options: {
   cursor?: string;
   limit?: number;
+  scope?: 'inbox' | 'all' | 'starred' | 'uncategorized' | 'folder' | 'feed';
+  scopeId?: string;
+  read?: 'all' | 'unread' | 'read';
+  search?: string;
   signal?: AbortSignal;
 } = {}) {
-  const query = new URLSearchParams({ scope: 'all', read: 'all', limit: String(options.limit ?? 100) });
+  const query = new URLSearchParams({
+    scope: options.scope ?? 'all',
+    read: options.read ?? 'all',
+    limit: String(options.limit ?? 100),
+  });
   if (options.cursor) query.set('cursor', options.cursor);
+  if (options.scopeId) query.set('scopeId', options.scopeId);
+  if (options.search) query.set('search', options.search);
   return request<ReaderArticlePage>(`/api/reader/articles?${query.toString()}`, { signal: options.signal }, true);
 }
 
