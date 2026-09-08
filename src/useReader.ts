@@ -1,22 +1,36 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Article, ArticleMutation, ReaderSnapshot } from '../shared/reader';
-import { getReaderSnapshot } from './api';
+import type { Article, ArticleMutation, ReaderArticleBody, ReaderSnapshot } from '../shared/reader';
 import {
+  ApiError,
+  getReaderArticleBody,
+  getReaderArticles,
+  getReaderChanges,
+  getReaderNavigation,
+  getReaderSynchronizationStatus,
+  requestReaderRefresh,
+} from './api';
+import {
+  applyLocalMutationToReaderCache,
+  applyReaderChanges,
   enqueueArticleMutation,
   enqueueArticleMutations,
-  loadCachedSnapshot,
-  overlayLocalMutations,
+  loadCachedReader,
+  loadReaderBody,
   queuedArticleMutations,
   reconcileSnapshotWithLocalMutations,
   requestPersistentStorage,
-  saveCachedSnapshot,
+  saveReaderArticlePage,
+  saveReaderBody,
+  saveReaderChangeToken,
+  saveReaderNavigation,
+  subscribeToReaderUpdates,
+  type CachedReaderState,
 } from './offlineStore';
 import { describeOutboxFailure, outboxWorker, type OutboxRunResult } from './outboxWorker';
 import { applyReadStates } from './readerState';
 import {
   markMilestone,
   measureOutboxReplay,
-  measureSnapshotPersistence,
   recordCollectionDiff,
   recordSynchronizationTrigger,
 } from './performance';
@@ -59,7 +73,8 @@ export async function loadReaderSnapshotWithoutWaitingForReplay(
   return { ...reconciliation, replayResult };
 }
 
-export function useReader(enabled = true) {
+export function useReader(userId?: string) {
+  const enabled = Boolean(userId);
   const [snapshot, setSnapshot] = useState<ReaderSnapshot | null>(null);
   const [filter, setFilter] = useState<ReaderFilter>({ kind: 'inbox' });
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -68,19 +83,22 @@ export function useReader(enabled = true) {
   const [status, setStatus] = useState<SyncStatus>(navigator.onLine ? 'syncing' : 'offline');
   const [error, setError] = useState<string | null>(null);
   const [pendingMutations, setPendingMutations] = useState(0);
+  const [coverage, setCoverage] = useState<CachedReaderState['coverage'] | null>(null);
   const lastSync = useRef(0);
   const activeRequest = useRef<AbortController | null>(null);
   const currentSnapshot = useRef<ReaderSnapshot | null>(null);
+  const currentCache = useRef<CachedReaderState | null>(null);
+  const bodyRequests = useRef(new Map<string, Promise<ReaderArticleBody>>());
 
   const refreshPendingCount = useCallback(async () => {
-    setPendingMutations((await queuedArticleMutations()).length);
+    setPendingMutations((await queuedArticleMutations(currentCache.current?.accountKey)).length);
   }, []);
 
-  const replayPendingMutations = useCallback(async () => {
-    const attempted = (await queuedArticleMutations()).length;
+  const replayPendingMutations = useCallback(async (accountKey?: string) => {
+    const attempted = (await queuedArticleMutations(accountKey)).length;
     let result: OutboxRunResult | null = null;
     await measureOutboxReplay(attempted, async () => {
-      result = await outboxWorker.run();
+      result = await outboxWorker.run(accountKey);
       return result.acknowledged;
     });
     return result!;
@@ -98,6 +116,97 @@ export function useReader(enabled = true) {
     }
   }, []);
 
+  const publishCachedReader = useCallback(async (milestone?: 'cached' | 'server') => {
+    if (!userId) return null;
+    const cached = await loadCachedReader(userId);
+    if (!cached) return null;
+    const reconciled = await reconcileSnapshotWithLocalMutations(cached.snapshot, cached.accountKey);
+    currentCache.current = { ...cached, snapshot: reconciled.snapshot };
+    setCoverage(cached.coverage);
+    recordCollectionDiff(currentSnapshot.current, reconciled.snapshot);
+    currentSnapshot.current = reconciled.snapshot;
+    setSnapshot(reconciled.snapshot);
+    setSelectedId((current) => current ?? reconciled.snapshot.articles[0]?.id ?? null);
+    setPendingMutations(reconciled.pendingMutations);
+    if (milestone) {
+      window.requestAnimationFrame(() => markMilestone(
+        milestone === 'cached' ? 'first-usable-cached-list' : 'first-server-backed-list',
+        { articles: reconciled.snapshot.articles.length },
+      ));
+    }
+    return cached;
+  }, [userId]);
+
+  const waitForServerCache = useCallback(async (controller: AbortController, forceRefresh: boolean) => {
+    let serverStatus = await getReaderSynchronizationStatus(controller.signal);
+    if (forceRefresh || serverStatus.state === 'empty') {
+      await requestReaderRefresh(controller.signal);
+      serverStatus = await getReaderSynchronizationStatus(controller.signal);
+    }
+    const isWaiting = () => serverStatus.state === 'empty'
+      || serverStatus.state === 'initializing'
+      || (forceRefresh && serverStatus.state === 'refreshing');
+    for (let attempt = 0; attempt < 120 && isWaiting(); attempt += 1) {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = window.setTimeout(resolve, 500);
+        controller.signal.addEventListener('abort', () => {
+          window.clearTimeout(timeout);
+          reject(controller.signal.reason);
+        }, { once: true });
+      });
+      serverStatus = await getReaderSynchronizationStatus(controller.signal);
+    }
+    return serverStatus;
+  }, []);
+
+  const applyAvailableChanges = useCallback(async (accountKey: string, token: string, signal: AbortSignal) => {
+    let nextToken = token;
+    do {
+      const page = await getReaderChanges(nextToken, signal);
+      if (page.accountKey !== accountKey) throw new Error('Reader account changed during synchronization');
+      await applyReaderChanges(page);
+      nextToken = page.token;
+      if (!page.hasMore) return;
+    } while (!signal.aborted);
+  }, []);
+
+  const continueBackfill = useCallback(async (
+    accountKey: string,
+    cursor: string | null,
+    baselineToken: string,
+    controller: AbortController,
+  ) => {
+    let nextCursor = cursor;
+    let deltaBaseline = baselineToken;
+    while (nextCursor && !controller.signal.aborted) {
+      let page;
+      try {
+        page = await getReaderArticles({ cursor: nextCursor, signal: controller.signal });
+      } catch (pagingError) {
+        if (!(pagingError instanceof ApiError) || pagingError.status !== 409) throw pagingError;
+        const replacementBaseline = await getReaderChanges(undefined, controller.signal);
+        page = await getReaderArticles({ signal: controller.signal });
+        await saveReaderArticlePage(userId!, page, true);
+        await saveReaderChangeToken(accountKey, replacementBaseline.token);
+        deltaBaseline = replacementBaseline.token;
+      }
+      if (page.accountKey !== accountKey) throw new Error('Reader account changed during metadata backfill');
+      await saveReaderArticlePage(userId!, page);
+      nextCursor = page.nextCursor;
+    }
+    if (controller.signal.aborted) return;
+    await saveReaderChangeToken(accountKey, deltaBaseline);
+    await applyAvailableChanges(accountKey, deltaBaseline, controller.signal);
+    await saveReaderNavigation(userId!, await getReaderNavigation(controller.signal));
+    const cached = await publishCachedReader();
+    lastSync.current = Date.now();
+    setError(null);
+    setStatus('current');
+    window.requestAnimationFrame(() => markMilestone('synchronization-complete', {
+      articles: cached?.snapshot.articles.length ?? 0,
+    }));
+  }, [applyAvailableChanges, publishCachedReader, userId]);
+
   const synchronize = useCallback(async (trigger: 'startup' | 'manual' | 'interval' | 'visibility' | 'online' = 'manual') => {
     if (!enabled) return;
     if (!navigator.onLine) {
@@ -110,20 +219,13 @@ export function useReader(enabled = true) {
     activeRequest.current = controller;
     setStatus('syncing');
     try {
-      const reconciliation = await loadReaderSnapshotWithoutWaitingForReplay(
-        () => getReaderSnapshot(controller.signal),
-        reconcileSnapshotWithLocalMutations,
-        replayPendingMutations,
-      );
-      const reconciled = reconciliation.snapshot;
-      recordCollectionDiff(currentSnapshot.current, reconciled);
-      currentSnapshot.current = reconciled;
-      setSnapshot(reconciled);
-      setSelectedId((current) => current ?? reconciled.articles[0]?.id ?? null);
-      setPendingMutations(reconciliation.pendingMutations);
-      setError(null);
-      setStatus('current');
-      void reconciliation.replayResult.then((result) => {
+      const serverStatus = await waitForServerCache(controller, trigger === 'manual');
+      if (serverStatus.state === 'empty' || serverStatus.state === 'initializing') {
+        throw new Error(serverStatus.error ?? 'Reader cache is still initializing');
+      }
+      const navigation = await getReaderNavigation(controller.signal);
+      await saveReaderNavigation(userId!, navigation);
+      void replayPendingMutations(navigation.accountKey).then((result) => {
         if (!controller.signal.aborted) reportOutboxResult(result);
       }).catch(() => {
         if (!controller.signal.aborted) {
@@ -131,10 +233,38 @@ export function useReader(enabled = true) {
           setStatus(navigator.onLine ? 'error' : 'offline');
         }
       });
-      lastSync.current = Date.now();
-      window.requestAnimationFrame(() => {
-        markMilestone('first-server-backed-list', { articles: reconciled.articles.length });
-        markMilestone('synchronization-complete', { articles: reconciled.articles.length });
+      const cached = currentCache.current;
+      const reusable = cached?.accountKey === navigation.accountKey && cached.generation === navigation.generation;
+      if (reusable && cached.coverage.complete && cached.coverage.changeToken) {
+        try {
+          await applyAvailableChanges(navigation.accountKey, cached.coverage.changeToken, controller.signal);
+          await saveReaderNavigation(userId!, await getReaderNavigation(controller.signal));
+          await publishCachedReader('server');
+          lastSync.current = Date.now();
+          setError(serverStatus.error);
+          setStatus(serverStatus.error ? 'error' : 'current');
+          return;
+        } catch (changeError) {
+          if (!(changeError instanceof ApiError) || changeError.status !== 409) throw changeError;
+          // An expired token requires a metadata rebuild, but the outbox remains untouched.
+        }
+      }
+      const baseline = await getReaderChanges(undefined, controller.signal);
+      let cursor = reusable && !cached.coverage.complete ? cached.coverage.nextCursor : null;
+      if (!cursor) {
+        const firstPage = await getReaderArticles({ signal: controller.signal });
+        if (firstPage.accountKey !== navigation.accountKey) throw new Error('Reader account changed during synchronization');
+        await saveReaderArticlePage(userId!, firstPage, true);
+        await saveReaderChangeToken(firstPage.accountKey, baseline.token);
+        cursor = firstPage.nextCursor;
+        await publishCachedReader('server');
+      }
+      setError(null);
+      setStatus('current');
+      void continueBackfill(navigation.accountKey, cursor, baseline.token, controller).catch((backfillError: unknown) => {
+        if (controller.signal.aborted) return;
+        setError(backfillError instanceof Error ? `Metadata backfill paused: ${backfillError.message}` : 'Metadata backfill paused');
+        setStatus(navigator.onLine ? 'error' : 'offline');
       });
     } catch (syncError) {
       if (controller.signal.aborted) return;
@@ -142,25 +272,15 @@ export function useReader(enabled = true) {
       setStatus(navigator.onLine ? 'error' : 'offline');
       await refreshPendingCount().catch(() => undefined);
     }
-  }, [enabled, refreshPendingCount, replayPendingMutations, reportOutboxResult]);
+  }, [applyAvailableChanges, continueBackfill, enabled, publishCachedReader, refreshPendingCount, replayPendingMutations, reportOutboxResult, userId, waitForServerCache]);
 
   useEffect(() => {
     if (!enabled) return;
     let active = true;
     let initialSync: number | undefined;
-    void loadCachedSnapshot().then(async (cached) => {
+    void publishCachedReader('cached').then(async (cached) => {
       if (!active) return;
-      if (cached && lastSync.current === 0) {
-        const restored = await overlayLocalMutations(cached);
-        if (!active) return;
-        currentSnapshot.current = restored.snapshot;
-        setSnapshot(restored.snapshot);
-        setSelectedId((current) => current ?? restored.snapshot.articles[0]?.id ?? null);
-        setPendingMutations(restored.pendingMutations);
-        window.requestAnimationFrame(() => markMilestone('first-usable-cached-list', { articles: restored.snapshot.articles.length }));
-      } else {
-        await refreshPendingCount();
-      }
+      if (!cached) await refreshPendingCount();
       initialSync = window.setTimeout(() => void synchronize('startup'), 0);
     }).catch(() => {
       if (active) initialSync = window.setTimeout(() => void synchronize('startup'), 0);
@@ -174,6 +294,9 @@ export function useReader(enabled = true) {
     };
     const handleOnline = () => void synchronize('online');
     const handleOffline = () => setStatus('offline');
+    const unsubscribe = subscribeToReaderUpdates((accountKey) => {
+      if (accountKey === currentCache.current?.accountKey) void publishCachedReader();
+    });
     document.addEventListener('visibilitychange', handleVisibility);
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
@@ -186,20 +309,44 @@ export function useReader(enabled = true) {
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      unsubscribe();
     };
-  }, [enabled, refreshPendingCount, synchronize]);
-
-  useEffect(() => {
-    if (!snapshot) return;
-    void measureSnapshotPersistence(() => saveCachedSnapshot(snapshot)).catch(() => {
-      setError('Could not update offline storage on this device');
-      setStatus('error');
-    });
-  }, [snapshot]);
+  }, [enabled, publishCachedReader, refreshPendingCount, synchronize]);
 
   useEffect(() => {
     if (enabled) void requestPersistentStorage();
   }, [enabled]);
+
+  useEffect(() => {
+    const account = currentCache.current;
+    const article = snapshot?.articles.find((candidate) => candidate.id === selectedId);
+    if (!enabled || !account || !article || article.contentHtml) return;
+    const requestKey = `${account.accountKey}\0${article.id}\0${account.versions.body}`;
+    let bodyRequest = bodyRequests.current.get(requestKey);
+    if (!bodyRequest) {
+      bodyRequest = (async () => {
+        const cachedBody = await loadReaderBody(account.accountKey, article.id, account.versions.body);
+        if (cachedBody) return cachedBody;
+        if (!navigator.onLine) throw new Error('Article body is not cached on this device');
+        const downloaded = await getReaderArticleBody(article.id);
+        if (downloaded.accountKey !== account.accountKey) throw new Error('Reader account changed while loading article content');
+        await saveReaderBody(downloaded);
+        return downloaded;
+      })().finally(() => bodyRequests.current.delete(requestKey));
+      bodyRequests.current.set(requestKey, bodyRequest);
+    }
+    let active = true;
+    void bodyRequest.then((body) => {
+      if (!active) return;
+      setSnapshot((current) => current ? {
+        ...current,
+        articles: current.articles.map((candidate) => candidate.id === body.articleId
+          ? { ...candidate, contentHtml: body.contentHtml }
+          : candidate),
+      } : current);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [enabled, selectedId, snapshot]);
 
   const filteredArticles = useMemo(() => {
     if (!snapshot) return [];
@@ -241,12 +388,16 @@ export function useReader(enabled = true) {
 
   const mutate = useCallback(async (article: Article, operation: ArticleMutation['operation'], value: boolean) => {
     const mutation = { articleId: article.id, operation, value } satisfies ArticleMutation;
+    const mutationAccountKey = currentCache.current?.accountKey.startsWith('legacy:')
+      ? undefined
+      : currentCache.current?.accountKey;
     setSnapshot((current) => current ? applyMutation(current, mutation) : current);
 
     let queued = false;
     try {
-      await enqueueArticleMutation(mutation);
+      await enqueueArticleMutation(mutation, mutationAccountKey);
       queued = true;
+      if (currentCache.current) await applyLocalMutationToReaderCache(currentCache.current.accountKey, mutation);
       await refreshPendingCount();
       if (!navigator.onLine) {
         setStatus('offline');
@@ -272,12 +423,18 @@ export function useReader(enabled = true) {
     const unread = candidates.filter((article) => !article.read);
     if (unread.length === 0) return 0;
     const mutations = unread.map((article) => ({ articleId: article.id, operation: 'read' as const, value: true }));
+    const mutationAccountKey = currentCache.current?.accountKey.startsWith('legacy:')
+      ? undefined
+      : currentCache.current?.accountKey;
     setSnapshot((current) => current ? applyReadStates(current, new Map(unread.map((article) => [article.id, true]))) : current);
 
     let queued = false;
     try {
-      await enqueueArticleMutations(mutations);
+      await enqueueArticleMutations(mutations, mutationAccountKey);
       queued = true;
+      if (currentCache.current) {
+        await Promise.all(mutations.map((mutation) => applyLocalMutationToReaderCache(currentCache.current!.accountKey, mutation)));
+      }
       await refreshPendingCount();
       if (!navigator.onLine) {
         setStatus('offline');
@@ -310,6 +467,7 @@ export function useReader(enabled = true) {
     setReadFilter('all');
     setError(null);
     setPendingMutations(0);
+    setCoverage(null);
     setStatus(navigator.onLine ? 'current' : 'offline');
   }, []);
 
@@ -325,6 +483,7 @@ export function useReader(enabled = true) {
     status,
     error,
     pendingMutations,
+    coverage,
     setFilter,
     setReadFilter,
     setQuery,

@@ -22,8 +22,8 @@ export type OutboxRunResult = {
 };
 
 export type OutboxWorkerDependencies = {
-  list: () => Promise<QueuedArticleMutation[]>;
-  submit: (mutations: ArticleMutation[]) => Promise<unknown>;
+  list: (accountKey?: string) => Promise<QueuedArticleMutation[]>;
+  submit: (mutations: ArticleMutation[], accountKey?: string) => Promise<unknown>;
   acknowledge: (mutations: QueuedArticleMutation[]) => Promise<number>;
 };
 
@@ -73,22 +73,26 @@ const browserLock: OutboxLock = {
 };
 
 export class OutboxWorker {
-  private active: Promise<OutboxRunResult> | null = null;
+  private active: { accountKey?: string; promise: Promise<OutboxRunResult> } | null = null;
 
   constructor(
     private readonly dependencies = defaultDependencies,
     private readonly lock = browserLock,
   ) {}
 
-  run() {
-    if (this.active) return this.active;
-    this.active = this.drain().finally(() => {
-      this.active = null;
+  run(accountKey?: string): Promise<OutboxRunResult> {
+    if (this.active) {
+      if (this.active.accountKey === accountKey) return this.active.promise;
+      return this.active.promise.then(() => this.run(accountKey));
+    }
+    const promise = this.drain(accountKey).finally(() => {
+      if (this.active?.promise === promise) this.active = null;
     });
-    return this.active;
+    this.active = { accountKey, promise };
+    return promise;
   }
 
-  private async drain(): Promise<OutboxRunResult> {
+  private async drain(accountKey?: string): Promise<OutboxRunResult> {
     let result: OutboxRunResult = {
       attempted: 0,
       submitted: 0,
@@ -100,7 +104,7 @@ export class OutboxWorker {
     };
 
     const acquired = await this.lock.runExclusive(async () => {
-      const queued = await this.dependencies.list();
+      const queued = await this.dependencies.list(accountKey);
       result = { ...result, attempted: queued.length, pending: queued.length };
 
       for (let offset = 0; offset < queued.length; offset += OUTBOX_BATCH_SIZE) {
@@ -110,14 +114,14 @@ export class OutboxWorker {
             articleId,
             operation,
             value,
-          })));
+          })), accountKey);
           result.submitted += chunk.length;
           result.acknowledged += await this.dependencies.acknowledge(chunk);
-          result.pending = (await this.dependencies.list()).length;
+          result.pending = (await this.dependencies.list(accountKey)).length;
         } catch (error) {
           result.error = error;
           result.failureKind = classifyOutboxFailure(error);
-          result.pending = (await this.dependencies.list()).length;
+          result.pending = (await this.dependencies.list(accountKey)).length;
           break;
         }
       }
@@ -126,7 +130,7 @@ export class OutboxWorker {
     if (!acquired) {
       return {
         ...result,
-        pending: (await this.dependencies.list()).length,
+        pending: (await this.dependencies.list(accountKey)).length,
         skippedBecauseLocked: true,
       };
     }

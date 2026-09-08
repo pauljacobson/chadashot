@@ -720,7 +720,7 @@ export function createApp(config: AppConfig, dependencies: {
     const reader = connectedReader(res);
     if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before checking synchronization' });
     res.set('Cache-Control', 'no-store');
-    return res.json(readerCache.status(reader.identity));
+    return res.json({ accountKey: reader.identity.accountKey, ...readerCache.status(reader.identity) });
   });
 
   app.post('/api/reader/refresh', requireUser, (_req, res) => {
@@ -753,12 +753,14 @@ export function createApp(config: AppConfig, dependencies: {
     const mutation = mutationSchema.parse(req.body) satisfies ArticleMutation;
     const integration = loadBirchfeedWithGeneration(database, config);
     if (integration) {
-      await new GoogleReaderClient(integration.credentials, fetchImplementation).mutate(mutation);
       const userId = (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user';
-      readerCache.applyConfirmedMutations(
-        readerCacheIdentity(userId, integration.credentials, integration.generation),
-        [mutation],
-      );
+      const identity = readerCacheIdentity(userId, integration.credentials, integration.generation);
+      const expectedAccount = req.get('x-reader-account-key');
+      if (expectedAccount && expectedAccount !== identity.accountKey) {
+        return res.status(409).json({ error: 'reader_account_changed', preserveQueuedWrites: true });
+      }
+      await new GoogleReaderClient(integration.credentials, fetchImplementation).mutate(mutation);
+      readerCache.applyConfirmedMutations(identity, [mutation]);
     }
     logger.debug('Article state synchronized', { operation: mutation.operation, value: mutation.value });
     res.status(200).json({ mutation, synchronized: true });
@@ -768,12 +770,14 @@ export function createApp(config: AppConfig, dependencies: {
     const { mutations } = batchMutationSchema.parse(req.body) satisfies { mutations: ArticleMutation[] };
     const integration = loadBirchfeedWithGeneration(database, config);
     if (integration) {
-      await new GoogleReaderClient(integration.credentials, fetchImplementation).mutateMany(mutations);
       const userId = (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user';
-      readerCache.applyConfirmedMutations(
-        readerCacheIdentity(userId, integration.credentials, integration.generation),
-        mutations,
-      );
+      const identity = readerCacheIdentity(userId, integration.credentials, integration.generation);
+      const expectedAccount = req.get('x-reader-account-key');
+      if (expectedAccount && expectedAccount !== identity.accountKey) {
+        return res.status(409).json({ error: 'reader_account_changed', preserveQueuedWrites: true });
+      }
+      await new GoogleReaderClient(integration.credentials, fetchImplementation).mutateMany(mutations);
+      readerCache.applyConfirmedMutations(identity, mutations);
     }
     logger.debug('Article state batch synchronized', { mutations: mutations.length });
     res.status(200).json({ mutations, synchronized: true });
