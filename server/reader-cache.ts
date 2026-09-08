@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type { Article, ArticleMutation, Folder, ReaderSnapshot, Subscription } from '../shared/reader.js';
 import type { AppDatabase } from './database.js';
 import { newId, nowIso } from './database.js';
-import type { GoogleReaderCredentials } from './integrations/google-reader.js';
+import { normalizeGoogleReaderItemId, type GoogleReaderCredentials } from './integrations/google-reader.js';
 
 export const READER_IMPORT_BATCH_SIZE = 500;
 
@@ -24,6 +24,23 @@ export type ReaderCacheImport = ReaderCacheLease & {
   generationNumber: number;
   runId: string;
   startedAt: string;
+};
+
+export type ReaderCacheIncrementalRun = ReaderCacheLease & {
+  generationId: null;
+  runId: string;
+  startedAt: string;
+  kind: 'routine' | 'state' | 'body';
+};
+
+export type ReaderSyncPlan = {
+  full: boolean;
+  routine: boolean;
+  state: boolean;
+  body: boolean;
+  routineSinceSeconds: number;
+  bodySinceSeconds: number;
+  subscriptionFingerprint: string | null;
 };
 
 export type ReaderCacheStatus = {
@@ -55,6 +72,24 @@ export function readerCacheIdentity(userId: string, credentials: GoogleReaderCre
     providerIdentity,
     credentialGeneration,
   };
+}
+
+export function readerSubscriptionFingerprint(subscriptions: Subscription[], folders: Folder[] = []) {
+  return sha256(JSON.stringify({
+    subscriptions: subscriptions
+      .map(({ id, title, url, siteUrl, iconUrl, folderIds }) => ({
+      id,
+      title,
+      url,
+      siteUrl,
+      iconUrl,
+      folderIds: [...folderIds].sort(),
+    }))
+      .sort((first, second) => first.id.localeCompare(second.id)),
+    folders: folders
+      .map(({ id, title }) => ({ id, title }))
+      .sort((first, second) => first.id.localeCompare(second.id)),
+  }));
 }
 
 function chunks<T>(values: T[], size: number) {
@@ -158,6 +193,95 @@ export class ReaderCache {
       return { ...lease, generationId, generationNumber, runId, startedAt };
     });
     return begin.immediate();
+  }
+
+  beginIncrementalRun(lease: ReaderCacheLease, kind: ReaderCacheIncrementalRun['kind'] = 'routine'): ReaderCacheIncrementalRun {
+    const begin = this.database.transaction(() => {
+      this.assertLease(lease);
+      const account = this.database.prepare(`SELECT current_generation_id FROM reader_accounts WHERE account_key = ?`)
+        .get(lease.accountKey) as { current_generation_id: string | null } | undefined;
+      if (!account?.current_generation_id) throw new Error('A committed reader generation is required for incremental synchronization');
+      const runId = newId();
+      const startedAt = this.timestamp();
+      this.database.prepare(`
+        INSERT INTO reader_sync_runs (id, account_key, generation_id, fence_token, status, started_at, kind)
+        VALUES (?, ?, NULL, ?, 'running', ?, ?)
+      `).run(runId, lease.accountKey, lease.fenceToken, startedAt, kind);
+      this.database.prepare(`UPDATE reader_accounts SET last_attempt_at = ? WHERE account_key = ?`)
+        .run(startedAt, lease.accountKey);
+      return { ...lease, generationId: null, runId, startedAt, kind };
+    });
+    return begin.immediate();
+  }
+
+  private currentGenerationId(accountKey: string) {
+    return (this.database.prepare(`SELECT current_generation_id AS id FROM reader_accounts WHERE account_key = ?`)
+      .get(accountKey) as { id: string | null } | undefined)?.id ?? null;
+  }
+
+  private fingerprintGenerationSubscriptions(generationId: string) {
+    const rows = this.database.prepare(`
+      SELECT id, title, url, site_url, icon_url, unread_count
+      FROM reader_subscriptions WHERE generation_id = ? ORDER BY id
+    `).all(generationId) as Array<{
+      id: string; title: string; url: string; site_url: string | null; icon_url: string | null; unread_count: number;
+    }>;
+    const folderRows = this.database.prepare(`
+      SELECT subscription_id, folder_id FROM reader_subscription_folders WHERE generation_id = ?
+    `).all(generationId) as Array<{ subscription_id: string; folder_id: string }>;
+    const folders = new Map<string, string[]>();
+    for (const row of folderRows) folders.set(row.subscription_id, [...(folders.get(row.subscription_id) ?? []), row.folder_id]);
+    const readerFolders = this.database.prepare(`
+      SELECT id, title, unread_count FROM reader_folders WHERE generation_id = ? ORDER BY id
+    `).all(generationId) as Array<{ id: string; title: string; unread_count: number }>;
+    return readerSubscriptionFingerprint(rows.map((row) => ({
+      id: row.id,
+      title: row.title,
+      url: row.url,
+      siteUrl: row.site_url,
+      iconUrl: row.icon_url,
+      folderIds: folders.get(row.id) ?? [],
+      unreadCount: row.unread_count,
+    })), readerFolders.map((row) => ({ id: row.id, title: row.title, unreadCount: row.unread_count })));
+  }
+
+  subscriptionFingerprint(identity: ReaderCacheIdentity) {
+    const generationId = this.currentGenerationId(identity.accountKey);
+    return generationId ? this.fingerprintGenerationSubscriptions(generationId) : null;
+  }
+
+  syncPlan(identity: ReaderCacheIdentity, cadence: {
+    routineMs: number;
+    stateMs: number;
+    bodyMs: number;
+    fullMs: number;
+    overlapSeconds: number;
+  }): ReaderSyncPlan {
+    const checkpoint = this.database.prepare(`
+      SELECT routine_cutoff_seconds, body_cutoff_seconds, subscription_fingerprint,
+        last_routine_at, last_state_at, last_body_at, last_full_at
+      FROM reader_incremental_checkpoints WHERE account_key = ?
+    `).get(identity.accountKey) as {
+      routine_cutoff_seconds: number | null;
+      body_cutoff_seconds: number | null;
+      subscription_fingerprint: string | null;
+      last_routine_at: string | null;
+      last_state_at: string | null;
+      last_body_at: string | null;
+      last_full_at: string | null;
+    } | undefined;
+    const now = this.clock().getTime();
+    const due = (value: string | null | undefined, interval: number) => !value || now - Date.parse(value) >= interval;
+    const full = !this.currentGenerationId(identity.accountKey) || due(checkpoint?.last_full_at, cadence.fullMs);
+    return {
+      full,
+      routine: full || due(checkpoint?.last_routine_at, cadence.routineMs),
+      state: full || due(checkpoint?.last_state_at, cadence.stateMs),
+      body: full || due(checkpoint?.last_body_at, cadence.bodyMs),
+      routineSinceSeconds: Math.max(0, (checkpoint?.routine_cutoff_seconds ?? 0) - cadence.overlapSeconds),
+      bodySinceSeconds: Math.max(0, (checkpoint?.body_cutoff_seconds ?? 0) - cadence.overlapSeconds),
+      subscriptionFingerprint: checkpoint?.subscription_fingerprint ?? this.subscriptionFingerprint(identity),
+    };
   }
 
   stageFolders(importRun: ReaderCacheImport, folders: Folder[]) {
@@ -303,6 +427,261 @@ export class ReaderCache {
     `).run(unreadDelta, generationId, generationId, mutation.articleId);
   }
 
+  knownArticleIds(identity: ReaderCacheIdentity, candidateIds?: string[]) {
+    const generationId = this.currentGenerationId(identity.accountKey);
+    if (!generationId) return new Set<string>();
+    const normalizedCandidates = candidateIds ? new Set(candidateIds.map(normalizeGoogleReaderItemId)) : null;
+    const rows = this.database.prepare(`SELECT id FROM reader_articles WHERE generation_id = ?`).all(generationId) as Array<{ id: string }>;
+    return new Set(rows
+      .map((row) => normalizeGoogleReaderItemId(row.id))
+      .filter((id) => !normalizedCandidates || normalizedCandidates.has(id)));
+  }
+
+  private insertNewArticle(generationId: string, article: Article) {
+    const inserted = this.database.prepare(`
+      INSERT OR IGNORE INTO reader_articles
+        (generation_id, id, feed_id, title, author, source, canonical_url, published_at, reading_minutes, summary)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      generationId,
+      article.id,
+      article.feedId,
+      article.title,
+      article.author,
+      article.source,
+      article.canonicalUrl,
+      article.publishedAt,
+      article.readingMinutes,
+      article.summary,
+    ).changes === 1;
+    if (!inserted) return false;
+    this.database.prepare(`INSERT INTO reader_article_bodies (generation_id, article_id, content_html) VALUES (?, ?, ?)`)
+      .run(generationId, article.id, article.contentHtml);
+    this.database.prepare(`
+      INSERT INTO reader_article_state (generation_id, article_id, is_read, is_starred) VALUES (?, ?, ?, ?)
+    `).run(generationId, article.id, Number(article.read), Number(article.starred));
+    const insertFolder = this.database.prepare(`
+      INSERT OR IGNORE INTO reader_article_folders (generation_id, article_id, folder_id) VALUES (?, ?, ?)
+    `);
+    for (const folderId of new Set(article.folderIds)) insertFolder.run(generationId, article.id, folderId);
+    if (!article.read) {
+      this.database.prepare(`
+        UPDATE reader_subscriptions SET unread_count = unread_count + 1 WHERE generation_id = ? AND id = ?
+      `).run(generationId, article.feedId);
+      this.database.prepare(`
+        UPDATE reader_folders SET unread_count = unread_count + 1
+        WHERE generation_id = ? AND id IN (
+          SELECT folder_id FROM reader_article_folders WHERE generation_id = ? AND article_id = ?
+        )
+      `).run(generationId, generationId, article.id);
+    }
+    return true;
+  }
+
+  applyRoutineDiscovery(
+    run: ReaderCacheIncrementalRun,
+    articles: Article[],
+    cutoffSeconds: number,
+    subscriptionFingerprint: string,
+  ) {
+    const apply = this.database.transaction(() => {
+      this.assertLease(run);
+      const generationId = this.currentGenerationId(run.accountKey);
+      if (!generationId) throw new Error('Reader cache has no committed generation');
+      let inserted = 0;
+      for (const article of articles) {
+        if (this.insertNewArticle(generationId, article)) inserted += 1;
+      }
+      const timestamp = this.timestamp();
+      this.database.prepare(`
+        INSERT INTO reader_incremental_checkpoints
+          (account_key, routine_cutoff_seconds, subscription_fingerprint, last_routine_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(account_key) DO UPDATE SET
+          routine_cutoff_seconds = excluded.routine_cutoff_seconds,
+          subscription_fingerprint = excluded.subscription_fingerprint,
+          last_routine_at = excluded.last_routine_at
+      `).run(run.accountKey, cutoffSeconds, subscriptionFingerprint, timestamp);
+      this.database.prepare(`UPDATE reader_sync_runs SET items_staged = ? WHERE id = ?`).run(inserted, run.runId);
+      if (inserted > 0) this.advanceVersions(run.accountKey, generationId, { collection: true, state: true, body: true });
+      return { inserted };
+    });
+    return apply.immediate();
+  }
+
+  applyBodyReconciliation(run: ReaderCacheIncrementalRun, articles: Article[], cutoffSeconds: number) {
+    const apply = this.database.transaction(() => {
+      this.assertLease(run);
+      const generationId = this.currentGenerationId(run.accountKey);
+      if (!generationId) throw new Error('Reader cache has no committed generation');
+      let inserted = 0;
+      let changed = 0;
+      let unchanged = 0;
+      for (const article of articles) {
+        const existing = this.database.prepare(`
+          SELECT a.title, a.author, a.source, a.canonical_url, a.published_at, a.reading_minutes, a.summary, b.content_html
+          FROM reader_articles a JOIN reader_article_bodies b
+            ON b.generation_id = a.generation_id AND b.article_id = a.id
+          WHERE a.generation_id = ? AND a.id = ?
+        `).get(generationId, article.id) as {
+          title: string; author: string | null; source: string; canonical_url: string; published_at: string;
+          reading_minutes: number; summary: string; content_html: string;
+        } | undefined;
+        if (!existing) {
+          if (this.insertNewArticle(generationId, article)) inserted += 1;
+          continue;
+        }
+        const differs = existing.title !== article.title
+          || existing.author !== article.author
+          || existing.source !== article.source
+          || existing.canonical_url !== article.canonicalUrl
+          || existing.published_at !== article.publishedAt
+          || existing.reading_minutes !== article.readingMinutes
+          || existing.summary !== article.summary
+          || existing.content_html !== article.contentHtml;
+        if (!differs) {
+          unchanged += 1;
+          continue;
+        }
+        this.database.prepare(`
+          UPDATE reader_articles SET title = ?, author = ?, source = ?, canonical_url = ?,
+            published_at = ?, reading_minutes = ?, summary = ?
+          WHERE generation_id = ? AND id = ?
+        `).run(
+          article.title,
+          article.author,
+          article.source,
+          article.canonicalUrl,
+          article.publishedAt,
+          article.readingMinutes,
+          article.summary,
+          generationId,
+          article.id,
+        );
+        this.database.prepare(`
+          UPDATE reader_article_bodies SET content_html = ? WHERE generation_id = ? AND article_id = ?
+        `).run(article.contentHtml, generationId, article.id);
+        changed += 1;
+      }
+      const timestamp = this.timestamp();
+      this.database.prepare(`
+        INSERT INTO reader_incremental_checkpoints (account_key, body_cutoff_seconds, last_body_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(account_key) DO UPDATE SET
+          body_cutoff_seconds = excluded.body_cutoff_seconds,
+          last_body_at = excluded.last_body_at
+      `).run(run.accountKey, cutoffSeconds, timestamp);
+      if (inserted > 0 || changed > 0) {
+        this.advanceVersions(run.accountKey, generationId, {
+          collection: inserted > 0 || changed > 0,
+          state: inserted > 0,
+          body: true,
+        });
+      }
+      return { candidates: articles.length, inserted, changed, unchanged };
+    });
+    return apply.immediate();
+  }
+
+  applyStateReconciliation(run: ReaderCacheIncrementalRun, unreadIds: Set<string>, starredIds: Set<string>) {
+    const apply = this.database.transaction(() => {
+      this.assertLease(run);
+      const generationId = this.currentGenerationId(run.accountKey);
+      if (!generationId) throw new Error('Reader cache has no committed generation');
+      const rows = this.database.prepare(`
+        SELECT article_id, is_read, is_starred FROM reader_article_state WHERE generation_id = ?
+      `).all(generationId) as Array<{ article_id: string; is_read: number; is_starred: number }>;
+      let changed = 0;
+      const update = this.database.prepare(`
+        UPDATE reader_article_state SET is_read = ?, is_starred = ? WHERE generation_id = ? AND article_id = ?
+      `);
+      for (const row of rows) {
+        const normalized = normalizeGoogleReaderItemId(row.article_id);
+        const read = !unreadIds.has(normalized);
+        const starred = starredIds.has(normalized);
+        if (Boolean(row.is_read) === read && Boolean(row.is_starred) === starred) continue;
+        update.run(Number(read), Number(starred), generationId, row.article_id);
+        changed += 1;
+      }
+      const overrides = this.database.prepare(`
+        SELECT article_id, operation, value FROM reader_state_overrides WHERE account_key = ?
+      `).all(run.accountKey) as Array<{ article_id: string; operation: ArticleMutation['operation']; value: number }>;
+      for (const override of overrides) {
+        this.applyState(generationId, {
+          articleId: override.article_id,
+          operation: override.operation,
+          value: Boolean(override.value),
+        });
+      }
+      this.database.prepare(`
+        UPDATE reader_subscriptions SET unread_count = (
+          SELECT COUNT(*) FROM reader_articles a JOIN reader_article_state s
+            ON s.generation_id = a.generation_id AND s.article_id = a.id
+          WHERE a.generation_id = reader_subscriptions.generation_id
+            AND a.feed_id = reader_subscriptions.id AND s.is_read = 0
+        ) WHERE generation_id = ?
+      `).run(generationId);
+      this.database.prepare(`
+        UPDATE reader_folders SET unread_count = (
+          SELECT COUNT(*) FROM reader_article_folders af JOIN reader_article_state s
+            ON s.generation_id = af.generation_id AND s.article_id = af.article_id
+          WHERE af.generation_id = reader_folders.generation_id
+            AND af.folder_id = reader_folders.id AND s.is_read = 0
+        ) WHERE generation_id = ?
+      `).run(generationId);
+      const timestamp = this.timestamp();
+      this.database.prepare(`
+        INSERT INTO reader_incremental_checkpoints (account_key, last_state_at) VALUES (?, ?)
+        ON CONFLICT(account_key) DO UPDATE SET last_state_at = excluded.last_state_at
+      `).run(run.accountKey, timestamp);
+      if (changed > 0) this.advanceVersions(run.accountKey, generationId, { collection: false, state: true, body: false });
+      return { scanned: rows.length, changed };
+    });
+    return apply.immediate();
+  }
+
+  private advanceVersions(
+    accountKey: string,
+    generationId: string,
+    changes: { collection: boolean; state: boolean; body: boolean },
+  ) {
+    const account = this.database.prepare(`
+      SELECT collection_version, state_version, body_version FROM reader_accounts WHERE account_key = ?
+    `).get(accountKey) as { collection_version: number; state_version: number; body_version: number };
+    const versions = {
+      collection: account.collection_version + Number(changes.collection),
+      state: account.state_version + Number(changes.state),
+      body: account.body_version + Number(changes.body),
+    };
+    this.database.prepare(`
+      UPDATE reader_accounts SET collection_version = ?, state_version = ?, body_version = ? WHERE account_key = ?
+    `).run(versions.collection, versions.state, versions.body, accountKey);
+    this.database.prepare(`
+      UPDATE reader_cache_generations SET collection_version = ?, state_version = ?, body_version = ? WHERE id = ?
+    `).run(versions.collection, versions.state, versions.body, generationId);
+    this.database.prepare(`
+      UPDATE reader_sync_checkpoints SET collection_version = ?, state_version = ?, body_version = ? WHERE account_key = ?
+    `).run(versions.collection, versions.state, versions.body, accountKey);
+  }
+
+  completeIncrementalRun(run: ReaderCacheIncrementalRun, options: { releaseLease?: boolean } = {}) {
+    const complete = this.database.transaction(() => {
+      this.assertLease(run);
+      const timestamp = this.timestamp();
+      this.database.prepare(`UPDATE reader_sync_runs SET status = 'succeeded', finished_at = ? WHERE id = ?`)
+        .run(timestamp, run.runId);
+      this.database.prepare(`
+        UPDATE reader_accounts SET last_success_at = ?, last_error = NULL WHERE account_key = ?
+      `).run(timestamp, run.accountKey);
+      if (options.releaseLease !== false) {
+        this.database.prepare(`
+          DELETE FROM reader_sync_leases WHERE account_key = ? AND owner_id = ? AND fence_token = ?
+        `).run(run.accountKey, run.ownerId, run.fenceToken);
+      }
+    });
+    complete.immediate();
+  }
+
   publish(importRun: ReaderCacheImport) {
     const publish = this.database.transaction(() => {
       this.assertLease(importRun);
@@ -364,6 +743,31 @@ export class ReaderCache {
           state_version = excluded.state_version, body_version = excluded.body_version,
           committed_at = excluded.committed_at
       `).run(importRun.accountKey, importRun.generationId, versions.collection, versions.state, versions.body, committedAt);
+      const cutoffSeconds = Math.floor(Date.parse(importRun.startedAt) / 1_000);
+      const subscriptionFingerprint = this.fingerprintGenerationSubscriptions(importRun.generationId);
+      this.database.prepare(`
+        INSERT INTO reader_incremental_checkpoints
+          (account_key, routine_cutoff_seconds, body_cutoff_seconds, subscription_fingerprint,
+            last_routine_at, last_state_at, last_body_at, last_full_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(account_key) DO UPDATE SET
+          routine_cutoff_seconds = excluded.routine_cutoff_seconds,
+          body_cutoff_seconds = excluded.body_cutoff_seconds,
+          subscription_fingerprint = excluded.subscription_fingerprint,
+          last_routine_at = excluded.last_routine_at,
+          last_state_at = excluded.last_state_at,
+          last_body_at = excluded.last_body_at,
+          last_full_at = excluded.last_full_at
+      `).run(
+        importRun.accountKey,
+        cutoffSeconds,
+        cutoffSeconds,
+        subscriptionFingerprint,
+        committedAt,
+        committedAt,
+        committedAt,
+        committedAt,
+      );
       this.database.prepare(`
         UPDATE reader_sync_runs SET status = 'succeeded', finished_at = ? WHERE id = ?
       `).run(committedAt, importRun.runId);
@@ -375,17 +779,19 @@ export class ReaderCache {
     return publish.immediate();
   }
 
-  fail(importRun: ReaderCacheImport, error: unknown) {
+  fail(importRun: ReaderCacheImport | ReaderCacheIncrementalRun, error: unknown) {
     const message = error instanceof Error ? error.message : 'Reader import failed';
     const timestamp = this.timestamp();
     const fail = this.database.transaction(() => {
       const stillOwned = Boolean(this.database.prepare(`
         SELECT 1 FROM reader_sync_leases WHERE account_key = ? AND owner_id = ? AND fence_token = ?
       `).get(importRun.accountKey, importRun.ownerId, importRun.fenceToken));
-      this.database.prepare(`
-        UPDATE reader_cache_generations SET status = 'failed', failed_at = ?, error = ?
-        WHERE id = ? AND status = 'staging'
-      `).run(timestamp, message, importRun.generationId);
+      if (importRun.generationId) {
+        this.database.prepare(`
+          UPDATE reader_cache_generations SET status = 'failed', failed_at = ?, error = ?
+          WHERE id = ? AND status = 'staging'
+        `).run(timestamp, message, importRun.generationId);
+      }
       this.database.prepare(`
         UPDATE reader_sync_runs SET status = ?, finished_at = ?, error = ? WHERE id = ? AND status = 'running'
       `).run(error instanceof ReaderCacheFencedError ? 'fenced' : 'failed', timestamp, message, importRun.runId);

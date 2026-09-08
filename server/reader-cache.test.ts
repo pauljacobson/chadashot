@@ -5,6 +5,7 @@ import { openMemoryDatabase } from './database.js';
 import {
   ReaderCache,
   ReaderCacheFencedError,
+  readerSubscriptionFingerprint,
   type ReaderCacheIdentity,
   type ReaderCacheImport,
 } from './reader-cache.js';
@@ -214,6 +215,98 @@ describe('transactional reader cache', () => {
     expect(cache.shouldRefresh(identity, 180_000)).toBe(false);
     now = new Date('2026-09-08T00:03:00.000Z');
     expect(cache.shouldRefresh(identity, 180_000)).toBe(true);
+  });
+
+  it('plans routine, state, body, and full work on independent cadences', () => {
+    const database = openMemoryDatabase();
+    let now = new Date('2026-09-08T00:00:00.000Z');
+    const cache = new ReaderCache(database, 'worker-1', 45_000, () => now);
+    publish(cache, snapshot());
+    const cadence = { routineMs: 180_000, stateMs: 900_000, bodyMs: 21_600_000, fullMs: 86_400_000, overlapSeconds: 21_600 };
+
+    expect(cache.syncPlan(identity, cadence)).toMatchObject({ full: false, routine: false, state: false, body: false });
+    now = new Date('2026-09-08T00:03:00.000Z');
+    expect(cache.syncPlan(identity, cadence)).toMatchObject({ full: false, routine: true, state: false, body: false });
+    now = new Date('2026-09-08T00:15:00.000Z');
+    expect(cache.syncPlan(identity, cadence)).toMatchObject({ full: false, routine: true, state: true, body: false });
+    now = new Date('2026-09-09T00:00:00.000Z');
+    expect(cache.syncPlan(identity, cadence)).toMatchObject({ full: true, routine: true, state: true, body: true });
+  });
+
+  it('commits overlapping new-item discovery and its checkpoint atomically', () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database, 'worker-1');
+    const initial = snapshot([article('known')]);
+    publish(cache, initial);
+    const fingerprint = readerSubscriptionFingerprint(initial.subscriptions, initial.folders);
+    expect(cache.subscriptionFingerprint(identity)).toBe(fingerprint);
+    const lease = cache.acquireLease(identity)!;
+    const run = cache.beginIncrementalRun(lease);
+
+    const result = cache.applyRoutineDiscovery(run, [
+      article('known'),
+      article('backdated', { publishedAt: '2020-01-01T00:00:00.000Z' }),
+      article('same-timestamp-a'),
+      article('same-timestamp-b'),
+      article('same-timestamp-a'),
+    ], 1_788_825_600, fingerprint);
+    cache.completeIncrementalRun(run);
+
+    expect(result.inserted).toBe(3);
+    expect(cache.readSnapshot(identity)?.articles.map((item) => item.id).sort()).toEqual([
+      'backdated', 'known', 'same-timestamp-a', 'same-timestamp-b',
+    ]);
+    expect(cache.status(identity).versions).toEqual({ collection: 2, state: 2, body: 2 });
+    expect(database.prepare(`
+      SELECT routine_cutoff_seconds, subscription_fingerprint FROM reader_incremental_checkpoints WHERE account_key = ?
+    `).get(identity.accountKey)).toEqual({ routine_cutoff_seconds: 1_788_825_600, subscription_fingerprint: fingerprint });
+  });
+
+  it('does not advance an incremental checkpoint after an interrupted transaction', () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database, 'worker-1');
+    const initial = snapshot([article('known')]);
+    publish(cache, initial);
+    const before = database.prepare(`SELECT * FROM reader_incremental_checkpoints WHERE account_key = ?`).get(identity.accountKey);
+    const lease = cache.acquireLease(identity)!;
+    const run = cache.beginIncrementalRun(lease);
+    database.prepare(`DELETE FROM reader_sync_leases WHERE account_key = ?`).run(identity.accountKey);
+
+    expect(() => cache.applyRoutineDiscovery(
+      run,
+      [article('not-committed')],
+      1_788_825_600,
+      readerSubscriptionFingerprint(initial.subscriptions, initial.folders),
+    )).toThrow(ReaderCacheFencedError);
+
+    expect(cache.readSnapshot(identity)?.articles.map((item) => item.id)).toEqual(['known']);
+    expect(database.prepare(`SELECT * FROM reader_incremental_checkpoints WHERE account_key = ?`).get(identity.accountKey)).toEqual(before);
+  });
+
+  it('reconciles changed bodies and authoritative state without reverting confirmed local writes', () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database, 'worker-1');
+    publish(cache, snapshot([
+      article('changed', { read: true, contentHtml: '<p>Old</p>' }),
+      article('unchanged', { read: true }),
+    ]));
+    cache.applyConfirmedMutations(identity, [{ articleId: 'changed', operation: 'read', value: true }]);
+    const lease = cache.acquireLease(identity)!;
+    const run = cache.beginIncrementalRun(lease, 'body');
+
+    const bodies = cache.applyBodyReconciliation(run, [
+      article('changed', { read: false, contentHtml: '<p>Updated</p>' }),
+      article('unchanged', { read: false }),
+    ], 1_788_825_600);
+    const state = cache.applyStateReconciliation(run, new Set(['changed']), new Set(['unchanged']));
+    cache.completeIncrementalRun(run);
+
+    expect(bodies).toEqual({ candidates: 2, inserted: 0, changed: 1, unchanged: 1 });
+    expect(state.scanned).toBe(2);
+    expect(cache.readSnapshot(identity)?.articles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'changed', contentHtml: '<p>Updated</p>', read: true }),
+      expect.objectContaining({ id: 'unchanged', read: true, starred: true }),
+    ]));
   });
 
   it('exposes bounded initialization progress and a retryable empty-cache error', () => {

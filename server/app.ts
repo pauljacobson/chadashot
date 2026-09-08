@@ -5,7 +5,7 @@ import compression from 'compression';
 import express, { type ErrorRequestHandler, type RequestHandler } from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
-import type { ArticleMutation, ReaderInitializationState, ReaderSnapshot, SavedHighlight } from '../shared/reader.js';
+import type { Article, ArticleMutation, ReaderInitializationState, ReaderSnapshot, SavedHighlight } from '../shared/reader.js';
 import type { AppConfig } from './config.js';
 import { developmentSession, requireDevelopmentUser } from './auth/development.js';
 import { createPasskeyAuthentication } from './auth/passkeys.js';
@@ -27,7 +27,14 @@ import {
   SynchronizationCoordinator,
   SynchronizationTimeoutError,
 } from './synchronization-coordinator.js';
-import { ReaderCache, readerCacheIdentity, type ReaderCacheImport } from './reader-cache.js';
+import {
+  ReaderCache,
+  readerCacheIdentity,
+  readerSubscriptionFingerprint,
+  type ReaderCacheImport,
+  type ReaderCacheIncrementalRun,
+  type ReaderCacheLease,
+} from './reader-cache.js';
 
 const mutationSchema = z.object({
   articleId: z.string().min(1),
@@ -168,7 +175,7 @@ export function createApp(config: AppConfig, dependencies: {
     const work = (async () => {
       const lease = readerCache.acquireLease(identity);
       if (!lease) return;
-      let importRun: ReaderCacheImport | null = null;
+      let activeRun: ReaderCacheImport | ReaderCacheIncrementalRun | null = null;
       const performanceRun = new ReaderPerformanceRun();
       let articleCount = 0;
       let subscriptionCount = 0;
@@ -182,19 +189,21 @@ export function createApp(config: AppConfig, dependencies: {
         }
       }, Math.max(1_000, Math.floor(config.readerSyncLeaseMs / 3)));
       heartbeat.unref();
-      try {
-        importRun = readerCache.beginImport(lease);
+
+      const runFullImport = async (currentLease: ReaderCacheLease) => {
+        const importRun = readerCache.beginImport(currentLease);
+        activeRun = importRun;
         const client = new GoogleReaderClient(integration.credentials, fetchImplementation, performanceRun, controller.signal);
         await client.importTo({
           stageStructure(folders, subscriptions) {
             subscriptionCount = subscriptions.length;
-            readerCache.stageFolders(importRun!, folders);
-            readerCache.stageSubscriptions(importRun!, subscriptions);
+            readerCache.stageFolders(importRun, folders);
+            readerCache.stageSubscriptions(importRun, subscriptions);
           },
           stageArticles(articles) {
             for (let offset = 0; offset < articles.length; offset += 500) {
               const batch = articles.slice(offset, offset + 500);
-              readerCache.stageArticles(importRun!, batch);
+              readerCache.stageArticles(importRun, batch);
               articleCount += batch.length;
             }
           },
@@ -204,7 +213,8 @@ export function createApp(config: AppConfig, dependencies: {
           throw new StaleSynchronizationError();
         }
         const versions = readerCache.publish(importRun);
-        logger.info('Reader cache import completed', {
+        activeRun = null;
+        logger.info('Reader cache full import completed', {
           synchronization: performanceRun.result({
             articles: articleCount,
             subscriptions: subscriptionCount,
@@ -214,9 +224,98 @@ export function createApp(config: AppConfig, dependencies: {
           }),
           cache: { articles: articleCount, subscriptions: subscriptionCount, versions },
         });
+      };
+
+      try {
+        const cadence = {
+          routineMs: config.readerRoutineSyncIntervalMs,
+          stateMs: config.readerStateSyncIntervalMs,
+          bodyMs: config.readerBodySyncIntervalMs,
+          fullMs: config.readerFullSyncIntervalMs,
+          overlapSeconds: config.readerSyncOverlapSeconds,
+        };
+        const plan = readerCache.syncPlan(identity, cadence);
+        if (plan.full) {
+          await runFullImport(lease);
+          return;
+        }
+
+        const kind = plan.routine ? 'routine' : plan.body ? 'body' : 'state';
+        const incrementalRun = readerCache.beginIncrementalRun(lease, kind);
+        activeRun = incrementalRun;
+        const client = new GoogleReaderClient(integration.credentials, fetchImplementation, performanceRun, controller.signal);
+        const routineCutoffSeconds = Math.floor(Date.parse(incrementalRun.startedAt) / 1_000);
+        let routineResult = { candidates: 0, downloaded: 0, inserted: 0 };
+        let bodyResult = { candidates: 0, inserted: 0, changed: 0, unchanged: 0 };
+        let stateResult = { scanned: 0, changed: 0 };
+
+        if (plan.routine) {
+          const discovery = await client.discoverSince(
+            plan.routineSinceSeconds,
+            readerCache.knownArticleIds(identity),
+            (folders, subscriptions) => !plan.subscriptionFingerprint
+              || readerSubscriptionFingerprint(subscriptions, folders) === plan.subscriptionFingerprint,
+          );
+          const fingerprint = readerSubscriptionFingerprint(discovery.subscriptions, discovery.folders);
+          if (discovery.structureChanged) {
+            readerCache.completeIncrementalRun(incrementalRun, { releaseLease: false });
+            activeRun = null;
+            logger.info('Reader subscription structure changed; promoting synchronization to a full import');
+            await runFullImport(lease);
+            return;
+          }
+          const applied = readerCache.applyRoutineDiscovery(
+            incrementalRun,
+            discovery.articles,
+            routineCutoffSeconds,
+            fingerprint,
+          );
+          routineResult = {
+            candidates: discovery.candidateIds.size,
+            downloaded: discovery.unknownIds.length,
+            inserted: applied.inserted,
+          };
+          articleCount += applied.inserted;
+          subscriptionCount = discovery.subscriptions.length;
+        }
+
+        if (plan.body) {
+          const candidates: Article[] = [];
+          await client.reconcileBodiesSince(plan.bodySinceSeconds, (articles) => {
+            candidates.push(...articles);
+          });
+          bodyResult = readerCache.applyBodyReconciliation(
+            incrementalRun,
+            candidates,
+            routineCutoffSeconds,
+          );
+          articleCount += bodyResult.inserted;
+        }
+
+        if (plan.state) {
+          const state = await client.authoritativeState();
+          stateResult = readerCache.applyStateReconciliation(incrementalRun, state.unreadIds, state.starredIds);
+        }
+
+        if (controller.signal.aborted) throw controller.signal.reason;
+        if (loadBirchfeedWithGeneration(database, config)?.generation !== integration.generation) {
+          throw new StaleSynchronizationError();
+        }
+        readerCache.completeIncrementalRun(incrementalRun);
+        activeRun = null;
+        logger.info('Reader cache incremental synchronization completed', {
+          synchronization: performanceRun.result({
+            articles: articleCount,
+            subscriptions: subscriptionCount,
+            changedItems: routineResult.inserted + bodyResult.inserted + bodyResult.changed + stateResult.changed,
+            unchangedItems: Math.max(0, routineResult.candidates - routineResult.downloaded) + bodyResult.unchanged,
+            comparison: 'no-prior-run',
+          }),
+          incremental: { routine: routineResult, body: bodyResult, state: stateResult },
+        });
       } catch (error) {
-        if (importRun) readerCache.fail(importRun, error);
-        logger.warn('Reader cache import failed', {
+        if (activeRun) readerCache.fail(activeRun, error);
+        logger.warn('Reader cache synchronization failed', {
           reason: error instanceof Error ? error.message : 'Unknown error',
           synchronization: performanceRun.result({
             articles: articleCount,
@@ -438,7 +537,14 @@ export function createApp(config: AppConfig, dependencies: {
         const identity = readerCacheIdentity(comparisonKey, integration.credentials, integration.generation);
         const performanceRun = new ReaderPerformanceRun();
         const cached = performanceRun.measureSync('mapping', () => readerCache.readSnapshot(identity));
-        if (readerCache.shouldRefresh(identity, config.readerCacheRefreshIntervalMs)) {
+        const syncPlan = readerCache.syncPlan(identity, {
+          routineMs: config.readerRoutineSyncIntervalMs,
+          stateMs: config.readerStateSyncIntervalMs,
+          bodyMs: config.readerBodySyncIntervalMs,
+          fullMs: config.readerFullSyncIntervalMs,
+          overlapSeconds: config.readerSyncOverlapSeconds,
+        });
+        if (syncPlan.full || syncPlan.routine || syncPlan.state || syncPlan.body) {
           startReaderCacheImport(comparisonKey, integration);
         }
         const cacheStatus = readerCache.status(identity);

@@ -1,9 +1,10 @@
 import request from 'supertest';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from './app.js';
 import { loadConfig } from './config.js';
 import { openMemoryDatabase } from './database.js';
 import { saveIntegration } from './integrations/settings.js';
+import { clearGoogleReaderSessionCache } from './integrations/google-reader.js';
 
 function jsonResponse(value: unknown) {
   return new Response(JSON.stringify(value), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -15,11 +16,96 @@ function config() {
     AUTH_MODE: 'development',
     ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
     READER_CACHE_ENABLED: 'true',
-    READER_CACHE_REFRESH_INTERVAL_MS: '0',
+    READER_FULL_SYNC_INTERVAL_MS: '0',
   });
 }
 
 describe('reader cache API', () => {
+  beforeEach(() => clearGoogleReaderSessionCache());
+
+  it('uses ID discovery to download only unknown bodies during a routine refresh', async () => {
+    const database = openMemoryDatabase();
+    const appConfig = loadConfig({
+      NODE_ENV: 'test',
+      AUTH_MODE: 'development',
+      ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
+      READER_CACHE_ENABLED: 'true',
+      READER_ROUTINE_SYNC_INTERVAL_MS: '0',
+      READER_STATE_SYNC_INTERVAL_MS: String(24 * 60 * 60 * 1_000),
+      READER_BODY_SYNC_INTERVAL_MS: String(7 * 24 * 60 * 60 * 1_000),
+      READER_FULL_SYNC_INTERVAL_MS: String(30 * 24 * 60 * 60 * 1_000),
+    });
+    saveIntegration(database, appConfig, 'birchfeed', {
+      serverUrl: 'https://reader.example.test', email: 'reader@example.test', apiKey: 'secret',
+    });
+    const selectiveBodies: string[][] = [];
+    let includeNewFeed = false;
+    const providerArticle = (id: string, feedId = 'feed/1') => ({
+      id, title: id, content: { content: `<p>${id}</p>` }, categories: [],
+      origin: { streamId: feedId, title: feedId === 'feed/1' ? 'Feed' : 'New feed' },
+    });
+    const fetchImplementation = vi.fn<typeof fetch>(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.pathname.includes('/subscription/list')) return jsonResponse({ subscriptions: [
+        { id: 'feed/1', title: 'Feed', url: 'https://example.test/feed', categories: [] },
+        ...(includeNewFeed ? [{ id: 'feed/2', title: 'New feed', url: 'https://example.test/new', categories: [] }] : []),
+      ] });
+      if (url.pathname.includes('/unread-count')) return jsonResponse({ unreadcounts: [{ id: 'feed/1', count: 2 }] });
+      if (url.pathname.endsWith('/stream/items/contents')) {
+        const ids = new URLSearchParams(String(init?.body)).getAll('i');
+        selectiveBodies.push(ids);
+        return jsonResponse({ items: ids.map((id) => providerArticle(id)) });
+      }
+      if (url.pathname.includes('/stream/items/ids')) {
+        if (url.searchParams.has('ot')) return jsonResponse({ itemRefs: [
+          { id: 'article-1' }, { id: 'article-2' }, ...(includeNewFeed ? [{ id: 'backfilled' }] : []),
+        ] });
+        return jsonResponse({ itemRefs: [] });
+      }
+      if (url.pathname.includes('/stream/contents/')) return jsonResponse({ items: includeNewFeed
+        ? [providerArticle('article-1'), providerArticle('article-2'), providerArticle('backfilled', 'feed/2')]
+        : [providerArticle('article-1')] });
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const app = createApp(appConfig, { database, fetchImplementation });
+
+    expect((await request(app).get('/api/reader/snapshot')).status).toBe(202);
+    await vi.waitFor(() => {
+      expect(database.prepare('SELECT COUNT(*) AS count FROM reader_articles').get()).toEqual({ count: 1 });
+      expect(database.prepare(`SELECT status FROM reader_sync_runs ORDER BY rowid DESC LIMIT 1`).get()).toEqual({ status: 'succeeded' });
+      expect(database.prepare(`SELECT COUNT(*) AS count FROM reader_sync_leases`).get()).toEqual({ count: 0 });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((await request(app).get('/api/reader/snapshot')).status).toBe(200);
+    await vi.waitFor(() => {
+      expect(database.prepare('SELECT COUNT(*) AS count FROM reader_sync_runs').get()).toEqual({ count: 2 });
+    });
+    await vi.waitFor(() => {
+      expect(database.prepare(`SELECT status FROM reader_sync_runs ORDER BY rowid DESC LIMIT 1`).get()).not.toEqual({ status: 'running' });
+    });
+    expect(database.prepare('SELECT kind, status, error FROM reader_sync_runs ORDER BY rowid').all()).toEqual([
+      { kind: 'full', status: 'succeeded', error: null },
+      { kind: 'routine', status: 'succeeded', error: null },
+    ]);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_articles').get()).toEqual({ count: 2 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(selectiveBodies).toEqual([['article-2']]);
+
+    includeNewFeed = true;
+    expect((await request(app).get('/api/reader/snapshot')).status).toBe(200);
+    await vi.waitFor(() => {
+      expect(database.prepare(`
+        SELECT COUNT(*) AS count FROM reader_articles a
+        JOIN reader_accounts account ON account.current_generation_id = a.generation_id
+      `).get()).toEqual({ count: 3 });
+    });
+    expect(selectiveBodies).toEqual([['article-2']]);
+    expect(database.prepare(`SELECT kind, status FROM reader_sync_runs ORDER BY rowid DESC LIMIT 1`).get())
+      .toEqual({ kind: 'full', status: 'succeeded' });
+  });
+
   it('returns bounded initialization state, then serves cache while refresh stalls or fails', async () => {
     const database = openMemoryDatabase();
     const appConfig = config();
