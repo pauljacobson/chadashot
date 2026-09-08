@@ -124,6 +124,43 @@ describe('paginated reader HTTP contract', () => {
     expect(malformed.body).toMatchObject({ error: 'invalid_reader_cursor', reset: false });
   });
 
+  it('accepts one compact mark-read job and exposes durable completion status', async () => {
+    const { database, config } = seed();
+    const fetchImplementation = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.endsWith('/reader/api/0/token')) return new Response('write-token');
+      if (url.endsWith('/reader/api/0/edit-tag')) return new Response('OK');
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const app = createApp(config, { database, fetchImplementation });
+    const page = await request(app).get('/api/reader/articles?scope=all&limit=1');
+    const body = {
+      idempotencyKey: crypto.randomUUID(),
+      accountKey: page.body.accountKey,
+      generation: page.body.generation,
+      collectionVersion: page.body.versions.collection,
+      stateVersion: page.body.versions.state,
+      scope: { kind: 'all' },
+      coverage: 'complete',
+    };
+
+    const accepted = await request(app).post('/api/reader/mark-read-jobs').send(body);
+    expect(accepted.status).toBe(202);
+    expect(accepted.body).toMatchObject({ status: 'accepted', targetCount: 125 });
+    const duplicate = await request(app).post('/api/reader/mark-read-jobs').send(body);
+    expect(duplicate.body.id).toBe(accepted.body.id);
+
+    await vi.waitFor(async () => {
+      const status = await request(app).get(`/api/reader/mark-read-jobs/${accepted.body.id}`);
+      expect(status.body).toMatchObject({ status: 'completed', completedCount: 125, targetCount: 125 });
+    });
+    const jobs = await request(app).get('/api/reader/mark-read-jobs');
+    expect(jobs.body.jobs[0]).toMatchObject({ id: accepted.body.id, status: 'completed' });
+    const edit = fetchImplementation.mock.calls.find(([input]) => String(input).endsWith('/reader/api/0/edit-tag'));
+    expect(String((edit?.[1]?.body as URLSearchParams).getAll('i').length)).toBe('125');
+  });
+
   it('schedules an explicit refresh without blocking on provider traversal', async () => {
     const { database, config } = seed();
     const fetchImplementation = async (input: string | URL | Request) => {

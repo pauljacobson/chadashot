@@ -1,22 +1,28 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Article, ArticleMutation, ReaderArticleBody, ReaderArticleMetadata, ReaderSnapshot } from '../shared/reader';
+import type { Article, ArticleMutation, ReaderArticleBody, ReaderArticleMetadata, ReaderMarkReadJobStatus, ReaderSnapshot } from '../shared/reader';
 import {
   ApiError,
+  createMarkReadJob,
   getReaderArticleBody,
   getReaderArticles,
   getReaderChanges,
   getReaderNavigation,
   getReaderSynchronizationStatus,
+  getMarkReadJobs,
   requestReaderRefresh,
+  retryMarkReadJob,
 } from './api';
 import {
   applyLocalMutationToReaderCache,
+  applyLocalReadStateToReaderCache,
+  acknowledgeMarkReadJob,
   applyReaderChanges,
   enqueueArticleMutation,
-  enqueueArticleMutations,
+  enqueueMarkReadJob,
   loadCachedReader,
   loadReaderBody,
   queuedArticleMutations,
+  queuedMarkReadJobs,
   reconcileSnapshotWithLocalMutations,
   requestPersistentStorage,
   saveReaderArticlePage,
@@ -76,6 +82,14 @@ export function filterArticlesByReadState(articles: Article[], filter: ArticleRe
   return articles.filter((article) => filter === 'read' ? article.read : !article.read);
 }
 
+export function markReadCoverageError(coverage: CachedReaderState['coverage'] | null) {
+  if (!coverage) return 'Finish the first reader synchronization before marking this view read';
+  if (!coverage.complete) {
+    return `Only ${coverage.loaded.toLocaleString()} of ${coverage.total.toLocaleString()} articles are cached. Finish synchronization before marking this view read.`;
+  }
+  return null;
+}
+
 function applyMutation(snapshot: ReaderSnapshot, mutation: ArticleMutation) {
   if (mutation.operation === 'read') return applyReadStates(snapshot, new Map([[mutation.articleId, mutation.value]]));
   return {
@@ -114,6 +128,8 @@ export function useReader(userId?: string) {
   const [remotePage, setRemotePage] = useState<RemoteArticlePage | null>(null);
   const [remoteRevision, setRemoteRevision] = useState(0);
   const [loadedBodies, setLoadedBodies] = useState(() => new Map<string, string>());
+  const [remoteUnreadCount, setRemoteUnreadCount] = useState<number | null>(null);
+  const [markReadJobs, setMarkReadJobs] = useState<ReaderMarkReadJobStatus[]>([]);
   const lastSync = useRef(0);
   const activeRequest = useRef<AbortController | null>(null);
   const currentSnapshot = useRef<ReaderSnapshot | null>(null);
@@ -124,7 +140,24 @@ export function useReader(userId?: string) {
   const loadingNextPage = useRef(false);
 
   const refreshPendingCount = useCallback(async () => {
-    setPendingMutations((await queuedArticleMutations(currentCache.current?.accountKey)).length);
+    const accountKey = currentCache.current?.accountKey;
+    const [mutations, jobs] = await Promise.all([queuedArticleMutations(accountKey), queuedMarkReadJobs(accountKey)]);
+    setPendingMutations(mutations.length + jobs.length);
+  }, []);
+
+  const replayPendingMarkReadJobs = useCallback(async (accountKey: string) => {
+    const jobs = await queuedMarkReadJobs(accountKey);
+    for (const job of jobs) {
+      await createMarkReadJob(job);
+      await acknowledgeMarkReadJob(job);
+    }
+    return jobs.length;
+  }, []);
+
+  const refreshMarkReadJobs = useCallback(async () => {
+    if (!navigator.onLine) return;
+    const result = await getMarkReadJobs();
+    setMarkReadJobs(result.jobs);
   }, []);
 
   const replayPendingMutations = useCallback(async (accountKey?: string) => {
@@ -260,14 +293,29 @@ export function useReader(userId?: string) {
       }
       const navigation = await getReaderNavigation(controller.signal);
       await saveReaderNavigation(userId!, navigation);
-      void replayPendingMutations(navigation.accountKey).then((result) => {
-        if (!controller.signal.aborted) reportOutboxResult(result);
-      }).catch(() => {
-        if (!controller.signal.aborted) {
-          setError('Queued changes could not be read and remain on this device');
-          setStatus(navigator.onLine ? 'error' : 'offline');
+      void (async () => {
+        let jobReplayFailed = false;
+        try {
+          await replayPendingMarkReadJobs(navigation.accountKey);
+        } catch {
+          jobReplayFailed = true;
         }
-      });
+        try {
+          const result = await replayPendingMutations(navigation.accountKey);
+          if (controller.signal.aborted) return;
+          reportOutboxResult(result);
+          if (jobReplayFailed) {
+            setError('A queued mark-read job is waiting for its original collection boundary');
+            setStatus(navigator.onLine ? 'error' : 'offline');
+          }
+          await refreshPendingCount();
+        } catch {
+          if (!controller.signal.aborted) {
+            setError('Queued changes could not be read and remain on this device');
+            setStatus(navigator.onLine ? 'error' : 'offline');
+          }
+        }
+      })();
       const cached = currentCache.current;
       const reusable = cached?.accountKey === navigation.accountKey && cached.generation === navigation.generation;
       if (reusable && cached.coverage.complete && cached.coverage.changeToken) {
@@ -307,7 +355,7 @@ export function useReader(userId?: string) {
       setStatus(navigator.onLine ? 'error' : 'offline');
       await refreshPendingCount().catch(() => undefined);
     }
-  }, [applyAvailableChanges, continueBackfill, enabled, publishCachedReader, refreshPendingCount, replayPendingMutations, reportOutboxResult, userId, waitForServerCache]);
+  }, [applyAvailableChanges, continueBackfill, enabled, publishCachedReader, refreshPendingCount, replayPendingMarkReadJobs, replayPendingMutations, reportOutboxResult, userId, waitForServerCache]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -357,6 +405,13 @@ export function useReader(userId?: string) {
   }, [enabled]);
 
   useEffect(() => {
+    if (!enabled || !activeAccountKey || activeAccountKey.startsWith('legacy:') || !navigator.onLine) return;
+    void refreshMarkReadJobs().catch(() => undefined);
+    const interval = window.setInterval(() => void refreshMarkReadJobs().catch(() => undefined), 2_000);
+    return () => window.clearInterval(interval);
+  }, [activeAccountKey, enabled, refreshMarkReadJobs]);
+
+  useEffect(() => {
     const timeout = window.setTimeout(() => setDebouncedQuery(query.trim()), 250);
     return () => window.clearTimeout(timeout);
   }, [query]);
@@ -402,6 +457,24 @@ export function useReader(userId?: string) {
     });
     return () => controller.abort();
   }, [activeAccountKey, debouncedQuery, enabled, filter, readFilter, remoteQueryKey]);
+
+  useEffect(() => {
+    if (!enabled || !activeAccountKey || activeAccountKey.startsWith('legacy:') || !navigator.onLine || debouncedQuery !== query.trim()) {
+      setRemoteUnreadCount(null);
+      return;
+    }
+    const controller = new AbortController();
+    void getReaderArticles({
+      ...readerArticleQuery(filter, 'unread', debouncedQuery),
+      limit: 1,
+      signal: controller.signal,
+    }).then((page) => {
+      if (!controller.signal.aborted && page.accountKey === activeAccountKey) setRemoteUnreadCount(page.total);
+    }).catch(() => {
+      if (!controller.signal.aborted) setRemoteUnreadCount(null);
+    });
+    return () => controller.abort();
+  }, [activeAccountKey, debouncedQuery, enabled, filter, query]);
 
   const loadMoreArticles = useCallback(async () => {
     const current = remotePageRef.current;
@@ -465,6 +538,10 @@ export function useReader(userId?: string) {
     () => filterArticlesByReadState(searchedArticles, readFilter),
     [readFilter, searchedArticles],
   );
+  const localUnreadCount = useMemo(() => localArticles.reduce(
+    (count, article) => count + Number(!article.read),
+    0,
+  ), [localArticles]);
 
   const cachedBodyById = useMemo(() => new Map((snapshot?.articles ?? [])
     .filter((article) => article.contentHtml)
@@ -530,12 +607,6 @@ export function useReader(userId?: string) {
     void bodyRequest.then((body) => {
       if (!active) return;
       setLoadedBodies((current) => new Map(current).set(body.articleId, body.contentHtml));
-      setSnapshot((current) => current ? {
-        ...current,
-        articles: current.articles.map((candidate) => candidate.id === body.articleId
-          ? { ...candidate, contentHtml: body.contentHtml }
-          : candidate),
-      } : current);
     }).catch(() => undefined);
     return () => { active = false; };
   }, [enabled, selectedArticle]);
@@ -589,13 +660,23 @@ export function useReader(userId?: string) {
     }
   }, [articleIndexById, articles, filter, readFilter, refreshPendingCount, remoteQueryKey, replayPendingMutations, reportOutboxResult]);
 
-  const markAllRead = useCallback(async (candidates: Article[]) => {
-    const unread = candidates.filter((article) => !article.read);
+  const markAllRead = useCallback(async () => {
+    const cache = currentCache.current;
+    const coverageError = markReadCoverageError(cache?.coverage ?? null);
+    if (!cache || cache.accountKey.startsWith('legacy:') || coverageError) throw new Error(coverageError ?? 'Finish synchronization before marking this view read');
+    const unread = localArticles.filter((article) => !article.read);
     if (unread.length === 0) return 0;
-    const mutations = unread.map((article) => ({ articleId: article.id, operation: 'read' as const, value: true }));
-    const mutationAccountKey = currentCache.current?.accountKey.startsWith('legacy:')
-      ? undefined
-      : currentCache.current?.accountKey;
+    const job = await enqueueMarkReadJob({
+      idempotencyKey: crypto.randomUUID(),
+      accountKey: cache.accountKey,
+      generation: cache.generation,
+      collectionVersion: cache.versions.collection,
+      stateVersion: cache.versions.state,
+      scope: filter.kind === 'folder' || filter.kind === 'feed' ? { kind: filter.kind, id: filter.id } : { kind: filter.kind },
+      ...(query.trim() ? { search: query.trim() } : {}),
+      coverage: 'complete',
+    });
+    setRemoteUnreadCount(0);
     setSnapshot((current) => current ? applyReadStates(current, new Map(unread.map((article) => [article.id, true]))) : current);
     setRemotePage((current) => {
       if (!current || current.queryKey !== remoteQueryKey) return current;
@@ -608,12 +689,9 @@ export function useReader(userId?: string) {
       return next;
     });
 
-    let queued = false;
     try {
-      await enqueueArticleMutations(mutations, mutationAccountKey);
-      queued = true;
       if (currentCache.current) {
-        await Promise.all(mutations.map((mutation) => applyLocalMutationToReaderCache(currentCache.current!.accountKey, mutation)));
+        await applyLocalReadStateToReaderCache(currentCache.current.accountKey, unread.map((article) => article.id), true);
       }
       await refreshPendingCount();
       if (!navigator.onLine) {
@@ -621,22 +699,20 @@ export function useReader(userId?: string) {
         setError(null);
         return unread.length;
       }
-      reportOutboxResult(await replayPendingMutations());
-      return unread.length;
-    } catch (mutationError) {
-      if (queued) {
-        await refreshPendingCount().catch(() => undefined);
-        setError('Changes saved on this device and will retry automatically');
-        setStatus(navigator.onLine ? 'error' : 'offline');
-        return unread.length;
-      }
+      const accepted = await createMarkReadJob(job);
+      await acknowledgeMarkReadJob(job);
+      setMarkReadJobs((current) => [accepted, ...current.filter((candidate) => candidate.id !== accepted.id)]);
+      await refreshPendingCount();
+      setError(null);
+      setStatus('current');
+      return accepted.targetCount;
+    } catch {
       await refreshPendingCount().catch(() => undefined);
-      setSnapshot((current) => current ? applyReadStates(current, new Map(unread.map((article) => [article.id, false]))) : current);
-      setError(mutationError instanceof Error ? mutationError.message : 'Could not mark articles as read');
+      setError('Mark-read job saved on this device and waiting to retry');
       setStatus(navigator.onLine ? 'error' : 'offline');
-      throw mutationError;
+      return unread.length;
     }
-  }, [filter, readFilter, refreshPendingCount, remoteQueryKey, replayPendingMutations, reportOutboxResult]);
+  }, [filter, localArticles, query, readFilter, refreshPendingCount, remoteQueryKey]);
 
   const clear = useCallback(() => {
     activeRequest.current?.abort();
@@ -650,6 +726,8 @@ export function useReader(userId?: string) {
     setCoverage(null);
     setActiveAccountKey(null);
     setRemotePage(null);
+    setRemoteUnreadCount(null);
+    setMarkReadJobs([]);
     remotePageRef.current = null;
     setStatus(navigator.onLine ? 'current' : 'offline');
   }, []);
@@ -668,6 +746,8 @@ export function useReader(userId?: string) {
     pendingMutations,
     coverage,
     totalArticles: remoteIsCurrent && remotePage ? remotePage.total : articles.length,
+    bulkUnreadCount: remoteUnreadCount ?? localUnreadCount,
+    markReadJobs,
     searchCoverage: query.trim() && (!remoteIsCurrent || !navigator.onLine) ? 'cached-partial' as const : 'complete' as const,
     setFilter,
     setReadFilter,
@@ -680,5 +760,9 @@ export function useReader(userId?: string) {
     toggleRead: (article: Article) => mutate(article, 'read', !article.read),
     toggleStarred: (article: Article) => mutate(article, 'starred', !article.starred),
     markAllRead,
+    retryMarkReadJob: async (jobId: string) => {
+      await retryMarkReadJob(jobId);
+      await refreshMarkReadJobs();
+    },
   };
 }

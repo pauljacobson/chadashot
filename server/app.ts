@@ -5,7 +5,7 @@ import compression from 'compression';
 import express, { type ErrorRequestHandler, type RequestHandler } from 'express';
 import helmet from 'helmet';
 import { z } from 'zod';
-import type { Article, ArticleMutation, ReaderInitializationState, ReaderSnapshot, SavedHighlight } from '../shared/reader.js';
+import type { Article, ArticleMutation, ReaderInitializationState, ReaderMarkReadJobRequest, ReaderSnapshot, SavedHighlight } from '../shared/reader.js';
 import type { AppConfig } from './config.js';
 import { developmentSession, requireDevelopmentUser } from './auth/development.js';
 import { createPasskeyAuthentication } from './auth/passkeys.js';
@@ -16,6 +16,7 @@ import { deleteIntegration, hasIntegration, loadBirchfeed, loadBirchfeedWithGene
 import { ReadwiseClient } from './integrations/readwise.js';
 import { AppLogger, readAppLogs, readLogExport, requestLogger } from './logging.js';
 import { ReaderApi, ReaderCacheUnavailableError, ReaderCursorError } from './reader-api.js';
+import { MarkReadJobConflictError, MarkReadJobNotFoundError, MarkReadJobService } from './mark-read-jobs.js';
 import {
   encodedResponseByteCounter,
   ReaderPerformanceRun,
@@ -113,6 +114,24 @@ const readerChangesQuerySchema = z.object({
   token: z.string().max(8_192).optional(),
   limit: z.coerce.number().int().min(1).max(500).default(200),
 });
+const markReadJobSchema = z.object({
+  idempotencyKey: z.string().uuid(),
+  accountKey: z.string().min(1),
+  generation: z.string().min(1),
+  collectionVersion: z.number().int().nonnegative(),
+  stateVersion: z.number().int().nonnegative(),
+  scope: z.object({
+    kind: z.enum(['inbox', 'all', 'starred', 'uncategorized', 'folder', 'feed']),
+    id: z.string().min(1).max(1_000).optional(),
+  }),
+  search: z.string().trim().max(200).optional(),
+  coverage: z.literal('complete'),
+}).superRefine((value, context) => {
+  const needsId = value.scope.kind === 'folder' || value.scope.kind === 'feed';
+  if (needsId && !value.scope.id) context.addIssue({ code: 'custom', path: ['scope', 'id'], message: 'Scope id is required' });
+  if (!needsId && value.scope.id) context.addIssue({ code: 'custom', path: ['scope', 'id'], message: 'Scope id is not valid here' });
+});
+const markReadJobParamsSchema = z.object({ jobId: z.string().uuid() });
 
 function normalizeFeedUrl(value: string) {
   const url = new URL(value);
@@ -142,6 +161,7 @@ export function createApp(config: AppConfig, dependencies: {
   }>(config.readerSyncTimeoutMs);
   const readerCache = new ReaderCache(database, newId(), config.readerSyncLeaseMs);
   const readerApi = new ReaderApi(database);
+  const markReadJobs = new MarkReadJobService(database, readerCache, logger);
   const activeCacheImports = new Map<string, { work: Promise<void>; controller: AbortController }>();
   app.disable('x-powered-by');
   if (config.nodeEnv === 'production') app.set('trust proxy', 1);
@@ -674,6 +694,23 @@ export function createApp(config: AppConfig, dependencies: {
     throw error;
   }
 
+  function markReadJobFailure(res: express.Response, error: unknown) {
+    if (error instanceof MarkReadJobNotFoundError) return res.status(404).json({ error: 'mark_read_job_not_found' });
+    if (error instanceof MarkReadJobConflictError) {
+      return res.status(409).json({
+        error: error.code === 'account' ? 'reader_account_changed' : error.code === 'boundary' ? 'reader_boundary_changed' : 'idempotency_conflict',
+        message: error.message,
+        preserveQueuedWrites: true,
+      });
+    }
+    throw error;
+  }
+
+  function markReadSubmitter(reader: NonNullable<ReturnType<typeof connectedReader>>) {
+    const client = new GoogleReaderClient(reader.integration.credentials, fetchImplementation);
+    return (mutations: ArticleMutation[]) => client.mutateMany(mutations);
+  }
+
   app.get('/api/reader/navigation', requireUser, (_req, res) => {
     const reader = connectedReader(res);
     if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before loading reader navigation' });
@@ -720,6 +757,7 @@ export function createApp(config: AppConfig, dependencies: {
     const reader = connectedReader(res);
     if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before checking synchronization' });
     res.set('Cache-Control', 'no-store');
+    void markReadJobs.resume(reader.identity, markReadSubmitter(reader));
     return res.json({ accountKey: reader.identity.accountKey, ...readerCache.status(reader.identity) });
   });
 
@@ -781,6 +819,54 @@ export function createApp(config: AppConfig, dependencies: {
     }
     logger.debug('Article state batch synchronized', { mutations: mutations.length });
     res.status(200).json({ mutations, synchronized: true });
+  });
+
+  app.post('/api/reader/mark-read-jobs', requireUser, (req, res) => {
+    const reader = connectedReader(res);
+    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before marking articles read' });
+    const body = markReadJobSchema.parse(req.body) satisfies ReaderMarkReadJobRequest;
+    try {
+      const job = markReadJobs.accept(reader.identity, body);
+      void markReadJobs.run(reader.identity, job.id, markReadSubmitter(reader));
+      res.set('Cache-Control', 'no-store');
+      return res.status(202).json(job);
+    } catch (error) {
+      return markReadJobFailure(res, error);
+    }
+  });
+
+  app.get('/api/reader/mark-read-jobs', requireUser, (_req, res) => {
+    const reader = connectedReader(res);
+    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before checking mark-read jobs' });
+    void markReadJobs.resume(reader.identity, markReadSubmitter(reader));
+    res.set('Cache-Control', 'no-store');
+    return res.json({ jobs: markReadJobs.list(reader.identity) });
+  });
+
+  app.get('/api/reader/mark-read-jobs/:jobId', requireUser, (req, res) => {
+    const reader = connectedReader(res);
+    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before checking mark-read jobs' });
+    const { jobId } = markReadJobParamsSchema.parse(req.params);
+    try {
+      res.set('Cache-Control', 'no-store');
+      return res.json(markReadJobs.get(reader.identity, jobId));
+    } catch (error) {
+      return markReadJobFailure(res, error);
+    }
+  });
+
+  app.post('/api/reader/mark-read-jobs/:jobId/retry', requireUser, (req, res) => {
+    const reader = connectedReader(res);
+    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before retrying mark-read jobs' });
+    const { jobId } = markReadJobParamsSchema.parse(req.params);
+    try {
+      const job = markReadJobs.get(reader.identity, jobId);
+      void markReadJobs.run(reader.identity, jobId, markReadSubmitter(reader));
+      res.set('Cache-Control', 'no-store');
+      return res.status(202).json(job);
+    } catch (error) {
+      return markReadJobFailure(res, error);
+    }
   });
 
   app.post('/api/subscriptions', requireUser, async (req, res) => {

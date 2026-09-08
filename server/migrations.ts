@@ -430,6 +430,49 @@ const migrations: Migration[] = [
       GROUP BY account.current_generation_id;
     `,
   },
+  {
+    version: 8,
+    name: 'durable_mark_read_jobs',
+    sql: `
+      CREATE TABLE reader_mark_read_jobs (
+        id TEXT PRIMARY KEY,
+        account_key TEXT NOT NULL REFERENCES reader_accounts(account_key) ON DELETE CASCADE,
+        idempotency_key TEXT NOT NULL,
+        generation_id TEXT NOT NULL REFERENCES reader_cache_generations(id) ON DELETE RESTRICT,
+        collection_version INTEGER NOT NULL,
+        state_version_boundary INTEGER NOT NULL,
+        scope_kind TEXT NOT NULL CHECK (scope_kind IN ('inbox', 'all', 'starred', 'uncategorized', 'folder', 'feed')),
+        scope_id TEXT,
+        search TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL CHECK (status IN ('accepted', 'running', 'completed', 'failed')),
+        target_count INTEGER NOT NULL DEFAULT 0,
+        completed_count INTEGER NOT NULL DEFAULT 0,
+        superseded_count INTEGER NOT NULL DEFAULT 0,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        UNIQUE(account_key, idempotency_key)
+      );
+
+      CREATE TABLE reader_mark_read_job_targets (
+        job_id TEXT NOT NULL REFERENCES reader_mark_read_jobs(id) ON DELETE CASCADE,
+        article_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'superseded')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        PRIMARY KEY(job_id, article_id),
+        UNIQUE(job_id, ordinal)
+      ) WITHOUT ROWID;
+
+      CREATE INDEX reader_mark_read_jobs_account_status
+        ON reader_mark_read_jobs(account_key, status, created_at);
+      CREATE INDEX reader_mark_read_targets_progress
+        ON reader_mark_read_job_targets(job_id, status, ordinal);
+    `,
+  },
 ];
 
 function ensureMigrationTable(database: AppDatabase) {

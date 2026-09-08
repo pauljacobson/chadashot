@@ -6,6 +6,7 @@ import type {
   ReaderArticlePage,
   ReaderChangesPage,
   ReaderNavigation,
+  ReaderMarkReadJobRequest,
   ReaderSnapshot,
   ReaderVersions,
   SessionState,
@@ -13,7 +14,7 @@ import type {
 import { applyReadStates } from './readerState';
 
 const DATABASE_NAME = 'chadashot';
-const DATABASE_VERSION = 3;
+const DATABASE_VERSION = 4;
 const SNAPSHOT_KEY = 'latest';
 const MAX_CACHED_ARTICLES = 200;
 const MAX_CACHE_BYTES = 100 * 1024 * 1024;
@@ -58,6 +59,11 @@ export type AcknowledgedArticleMutation = QueuedArticleMutation & {
   acknowledgedAt: string;
 };
 
+export type QueuedMarkReadJob = ReaderMarkReadJobRequest & {
+  key: string;
+  createdAt: string;
+};
+
 interface ChadashotDatabase extends DBSchema {
   snapshots: {
     key: string;
@@ -75,6 +81,11 @@ interface ChadashotDatabase extends DBSchema {
   acknowledgements: {
     key: string;
     value: AcknowledgedArticleMutation;
+  };
+  markReadJobs: {
+    key: string;
+    value: QueuedMarkReadJob;
+    indexes: { 'by-created-at': string };
   };
   readerAccounts: {
     key: string;
@@ -124,6 +135,10 @@ function database() {
           bodies.createIndex('by-account', 'accountKey');
           bodies.createIndex('by-accessed-at', 'accessedAt');
           db.createObjectStore('readerSync', { keyPath: 'accountKey' });
+        }
+        if (oldVersion < 4) {
+          const jobs = db.createObjectStore('markReadJobs', { keyPath: 'key' });
+          jobs.createIndex('by-created-at', 'createdAt');
         }
       },
       blocking() {
@@ -179,6 +194,23 @@ export async function loadOfflineSession() {
 
 export async function enqueueArticleMutation(mutation: ArticleMutation, accountKey?: string) {
   return (await enqueueArticleMutations([mutation], accountKey))[0];
+}
+
+export async function enqueueMarkReadJob(job: ReaderMarkReadJobRequest) {
+  const queued = { ...job, key: job.idempotencyKey, createdAt: new Date().toISOString() } satisfies QueuedMarkReadJob;
+  await (await database()).put('markReadJobs', queued);
+  return queued;
+}
+
+export async function queuedMarkReadJobs(accountKey?: string) {
+  const jobs = await (await database()).getAllFromIndex('markReadJobs', 'by-created-at');
+  return accountKey ? jobs.filter((job) => job.accountKey === accountKey) : jobs;
+}
+
+export async function acknowledgeMarkReadJob(job: QueuedMarkReadJob) {
+  const db = await database();
+  const current = await db.get('markReadJobs', job.key);
+  if (current?.accountKey === job.accountKey) await db.delete('markReadJobs', job.key);
 }
 
 /** Atomically persists a local batch before any provider request is attempted. */
@@ -326,13 +358,14 @@ export async function reconcileSnapshotWithLocalMutations(snapshot: ReaderSnapsh
 
 export async function offlineStorageSummary() {
   const db = await database();
-  const [snapshotRecord, queuedChanges] = await Promise.all([
+  const [snapshotRecord, queuedMutations, queuedJobs] = await Promise.all([
     db.get('snapshots', SNAPSHOT_KEY),
     db.count('outbox'),
+    db.count('markReadJobs'),
   ]);
   return {
     articles: snapshotRecord?.snapshot.articles.length ?? 0,
-    queuedChanges,
+    queuedChanges: queuedMutations + queuedJobs,
     estimatedBytes: snapshotRecord?.estimatedBytes ?? 0,
   };
 }
@@ -709,11 +742,26 @@ export async function applyLocalMutationToReaderCache(accountKey: string, mutati
   notifyReaderUpdate(accountKey);
 }
 
+export async function applyLocalReadStateToReaderCache(accountKey: string, articleIds: string[], read: boolean) {
+  if (articleIds.length === 0) return;
+  const db = await database();
+  const transaction = db.transaction('readerArticles', 'readwrite', { durability: 'strict' });
+  const savedAt = new Date().toISOString();
+  for (const articleId of articleIds) {
+    const key = readerRecordKey(accountKey, articleId);
+    const article = await transaction.store.get(key);
+    if (article && article.read !== read) await transaction.store.put({ ...article, read, savedAt });
+  }
+  await transaction.done;
+  notifyReaderUpdate(accountKey);
+}
+
 export async function clearOfflineData() {
   const db = await database();
   const transaction = db.transaction([
     'snapshots', 'sessions', 'outbox', 'acknowledgements', 'readerAccounts', 'readerNavigation',
     'readerArticles', 'readerBodies', 'readerSync',
+    'markReadJobs',
   ], 'readwrite', { durability: 'strict' });
   await Promise.all([
     transaction.objectStore('snapshots').clear(),
@@ -725,6 +773,7 @@ export async function clearOfflineData() {
     transaction.objectStore('readerArticles').clear(),
     transaction.objectStore('readerBodies').clear(),
     transaction.objectStore('readerSync').clear(),
+    transaction.objectStore('markReadJobs').clear(),
   ]);
   await transaction.done;
 }
