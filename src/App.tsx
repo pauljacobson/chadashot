@@ -35,6 +35,7 @@ import {
   offlineStorageSummary,
   saveOfflineSession,
 } from './offlineStore';
+import { finishArticleOpen, markMilestone, recordMountedRows, startArticleOpen } from './performance';
 
 type MobileScreen = 'list' | 'reader';
 const FEED_SORT_ORDER_KEY = 'chadashot.feedSortOrder';
@@ -413,7 +414,12 @@ function ArticleList({
 }) {
   const [confirmingMarkAll, setConfirmingMarkAll] = useState(false);
   const [markingAll, setMarkingAll] = useState(false);
+  const listRef = useRef<HTMLElement>(null);
   const unreadCount = markAllCandidates?.filter((article) => !article.read).length ?? 0;
+
+  useLayoutEffect(() => {
+    recordMountedRows(listRef.current?.querySelectorAll('.article-row').length ?? 0);
+  }, [articles]);
 
   async function confirmMarkAllRead() {
     if (!onMarkAllRead || !markAllCandidates || markingAll) return;
@@ -427,7 +433,7 @@ function ArticleList({
   }
 
   return (
-    <section className="article-list" id="article-list" aria-label={`${title} articles`}>
+    <section ref={listRef} className="article-list" id="article-list" aria-label={`${title} articles`}>
       <header className="list-header">
         <div className="list-heading"><h1>{title}</h1><span>{articles.length}</span></div>
         {showReadFilter && (
@@ -540,6 +546,7 @@ export function ReaderPane({
   const [noteOpen, setNoteOpen] = useState(false);
   const [note, setNote] = useState('');
   const [savingAction, setSavingAction] = useState<'highlight' | 'document' | null>(null);
+  const articleId = article?.id;
   const sanitized = useMemo(() => DOMPurify.sanitize(article?.contentHtml ?? ''), [article?.contentHtml]);
 
   useEffect(() => {
@@ -555,6 +562,12 @@ export function ReaderPane({
   useLayoutEffect(() => {
     if (contentRef.current) renderHighlightMarks(contentRef.current, highlights);
   }, [highlights, sanitized]);
+
+  useLayoutEffect(() => {
+    if (!articleId || !contentRef.current) return;
+    finishArticleOpen();
+    window.requestAnimationFrame(() => markMilestone('first-article'));
+  }, [articleId, sanitized]);
 
   function captureSelection() {
     const current = window.getSelection();
@@ -1224,6 +1237,11 @@ export function App() {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const reader = useReader(Boolean(session?.authenticated));
 
+  useLayoutEffect(() => {
+    if (!session?.authenticated) return;
+    window.requestAnimationFrame(() => markMilestone('shell'));
+  }, [session?.authenticated]);
+
   async function refreshSession() {
     const nextSession = await getSession();
     setSession(nextSession);
@@ -1327,6 +1345,7 @@ export function App() {
   }
 
   function chooseArticle(article: Article) {
+    if (article.id !== reader.selectedArticle?.id) startArticleOpen('cache');
     reader.selectArticle(article.id);
     if (!article.read) void reader.toggleRead(article);
     setMobileScreen('reader');

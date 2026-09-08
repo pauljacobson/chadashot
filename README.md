@@ -28,6 +28,8 @@ Run all verification checks with:
 npm run check
 ```
 
+The isolated 20,000-article benchmark and current baseline are documented in the [reader performance benchmark](docs/20260908%20Reader%20performance%20benchmark.md).
+
 ## Deploy to Railway
 
 Railway builds the root [`Dockerfile`](Dockerfile), checks `/api/health`, and stores the SQLite database and bounded application log in a volume mounted at `/data`. Production requires `APP_ORIGIN`, `ENCRYPTION_KEY`, and an initial `BOOTSTRAP_TOKEN`. Optional Railway environment variables enable Litestream to continuously replicate SQLite to a private Cloudflare R2 bucket and restore it when a new volume starts empty. Follow the staged [Railway deployment guide](docs/20260907%20Railway%20deployment%20guide.md) before replacing the current FreshRSS service.

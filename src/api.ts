@@ -5,6 +5,7 @@ import type {
   RegistrationResponseJSON,
   AuthenticationResponseJSON,
 } from '@simplewebauthn/browser';
+import { recordReaderResponse } from './performance';
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -13,7 +14,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(path: string, init?: RequestInit, measureReaderResponse = false): Promise<T> {
   const response = await fetch(path, {
     credentials: 'same-origin',
     headers: {
@@ -30,6 +31,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (response.status === 204) return undefined as T;
+  if (measureReaderResponse) {
+    const text = await response.text();
+    recordReaderResponse(response, text);
+    return JSON.parse(text) as T;
+  }
   return response.json() as Promise<T>;
 }
 
@@ -38,7 +44,7 @@ export function getSession(signal?: AbortSignal) {
 }
 
 export function getReaderSnapshot(signal?: AbortSignal) {
-  return request<ReaderSnapshot>('/api/reader/snapshot', { signal });
+  return request<ReaderSnapshot>('/api/reader/snapshot', { signal }, true);
 }
 
 export function sendArticleMutation(mutation: ArticleMutation) {

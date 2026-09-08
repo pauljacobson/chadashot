@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { ArticleMutation, ReaderSnapshot } from '../../shared/reader.js';
+import type { ReaderPerformanceRun, ReaderPhase } from '../reader-performance.js';
 
 export const BIRCHFEED_API_URL = 'https://birchfeed.app/api/greader.php';
 
@@ -100,6 +101,7 @@ export class GoogleReaderClient {
   constructor(
     private readonly credentials: GoogleReaderCredentials,
     private readonly fetchImplementation: FetchImplementation = fetch,
+    private readonly performanceRun?: ReaderPerformanceRun,
   ) {}
 
   private get baseUrl() {
@@ -116,15 +118,32 @@ export class GoogleReaderClient {
     }
   }
 
-  private async request(url: string, init?: RequestInit) {
+  private async request(url: string, init?: RequestInit, phase?: ReaderPhase) {
+    if (phase) this.performanceRun?.providerRequestStarted(phase);
     try {
       return await this.fetchImplementation(url, init);
     } catch {
+      if (phase) this.performanceRun?.providerResponseIncomplete(phase);
       throw new Error('Could not reach the RSS service. Check the server URL and try again.');
     }
   }
 
-  private async authenticate() {
+  private async responseText(response: Response, phase?: ReaderPhase, options: { pages?: number; items?: number } = {}) {
+    try {
+      const text = await response.text();
+      if (phase) this.performanceRun?.providerResponseCompleted(phase, response, Buffer.byteLength(text, 'utf8'), options);
+      return text;
+    } catch (error) {
+      if (phase) this.performanceRun?.providerResponseIncomplete(phase);
+      throw error;
+    }
+  }
+
+  private async responseJson(response: Response, phase: ReaderPhase, options: { pages?: number; items?: number } = {}) {
+    return JSON.parse(await this.responseText(response, phase, options)) as unknown;
+  }
+
+  private async authenticate(phase?: ReaderPhase) {
     const body = new URLSearchParams({
       Email: this.credentials.email,
       Passwd: this.credentials.apiKey,
@@ -136,22 +155,28 @@ export class GoogleReaderClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body,
-    });
-    if (!response.ok) throw new Error('The RSS service rejected the email or API key');
-    const auth = (await response.text()).split('\n').find((line) => line.startsWith('Auth='))?.slice(5);
+    }, phase);
+    if (!response.ok) {
+      if (phase) this.performanceRun?.providerResponseIncomplete(phase);
+      throw new Error('The RSS service rejected the email or API key');
+    }
+    const auth = (await this.responseText(response, phase)).split('\n').find((line) => line.startsWith('Auth='))?.slice(5);
     if (!auth) throw new Error('The RSS service returned an invalid authentication response');
     return auth;
   }
 
-  private async authorizedRequest(path: string, auth: string, init?: RequestInit) {
+  private async authorizedRequest(path: string, auth: string, init?: RequestInit, phase?: ReaderPhase) {
     const response = await this.request(`${this.baseUrl}${path}`, {
       ...init,
       headers: {
         Authorization: `GoogleLogin auth=${auth}`,
         ...init?.headers,
       },
-    });
-    if (!response.ok) throw new Error(`RSS service request failed (${response.status})`);
+    }, phase);
+    if (!response.ok) {
+      if (phase) this.performanceRun?.providerResponseIncomplete(phase);
+      throw new Error(`RSS service request failed (${response.status})`);
+    }
     return response;
   }
 
@@ -171,8 +196,12 @@ export class GoogleReaderClient {
       const response = await this.authorizedRequest(
         `/reader/api/0/stream/contents/user/-/state/com.google/reading-list?${query}`,
         auth,
+        undefined,
+        'contentPages',
       );
-      const page = streamSchema.parse(await response.json());
+      const text = await this.responseText(response, 'contentPages');
+      const page = streamSchema.parse(JSON.parse(text));
+      this.performanceRun?.recordItems('contentPages', page.items.length, 1);
       for (const item of page.items) {
         if (itemIds.has(item.id)) continue;
         itemIds.add(item.id);
@@ -206,8 +235,10 @@ export class GoogleReaderClient {
       });
       if (state === 'unread') query.set('xt', 'user/-/state/com.google/read');
       if (continuation) query.set('c', continuation);
-      const response = await this.authorizedRequest(`/reader/api/0/stream/items/ids?${query}`, auth);
-      const page = itemIdsSchema.parse(await response.json());
+      const phase = state === 'unread' ? 'unreadIds' : 'starredIds';
+      const response = await this.authorizedRequest(`/reader/api/0/stream/items/ids?${query}`, auth, undefined, phase);
+      const page = itemIdsSchema.parse(await this.responseJson(response, phase));
+      this.performanceRun?.recordItems(phase, page.itemRefs.length, 1);
       for (const item of page.itemRefs) itemIds.add(comparableItemId(item.id));
 
       const nextContinuation = page.continuation;
@@ -223,71 +254,81 @@ export class GoogleReaderClient {
   }
 
   async snapshot(): Promise<ReaderSnapshot> {
-    const auth = await this.authenticate();
-    const [subscriptionsResponse, streamItems, unreadItemIds, starredItemIds, unreadCountResponse] = await Promise.all([
-      this.authorizedRequest('/reader/api/0/subscription/list?output=json', auth),
-      this.allStreamItems(auth),
-      this.allStateItemIds(auth, 'unread'),
-      this.allStateItemIds(auth, 'starred'),
-      this.authorizedRequest('/reader/api/0/unread-count?output=json', auth),
+    const measure = <T>(phase: ReaderPhase, operation: () => Promise<T>) => this.performanceRun
+      ? this.performanceRun.measure(phase, operation)
+      : operation();
+    const auth = await measure('authentication', () => this.authenticate('authentication'));
+    const [subscriptionData, streamItems, unreadItemIds, starredItemIds] = await Promise.all([
+      measure('subscriptions', async () => {
+        const [subscriptionsResponse, unreadCountResponse] = await Promise.all([
+          this.authorizedRequest('/reader/api/0/subscription/list?output=json', auth, undefined, 'subscriptions'),
+          this.authorizedRequest('/reader/api/0/unread-count?output=json', auth, undefined, 'subscriptions'),
+        ]);
+        const subscriptionsResult = subscriptionListSchema.parse(await this.responseJson(subscriptionsResponse, 'subscriptions'));
+        const unreadCountResult = unreadCountSchema.parse(await this.responseJson(unreadCountResponse, 'subscriptions'));
+        this.performanceRun?.recordItems('subscriptions', subscriptionsResult.subscriptions.length);
+        return { subscriptionsResult, unreadCountResult };
+      }),
+      measure('contentPages', () => this.allStreamItems(auth)),
+      measure('unreadIds', () => this.allStateItemIds(auth, 'unread')),
+      measure('starredIds', () => this.allStateItemIds(auth, 'starred')),
     ]);
-    const subscriptionsResult = subscriptionListSchema.parse(await subscriptionsResponse.json());
-    const unreadCounts = new Map(unreadCountSchema.parse(await unreadCountResponse.json()).unreadcounts
-      .map((entry) => [entry.id, entry.count] as const));
 
-    const subscriptions = subscriptionsResult.subscriptions.map((subscription) => ({
-      id: subscription.id,
-      title: subscription.title,
-      url: subscription.url ?? subscription.id.replace(/^feed\//, ''),
-      siteUrl: subscription.htmlUrl ?? null,
-      iconUrl: this.iconUrl(subscription.iconUrl),
-      folderIds: subscription.categories.map((category) => folderId(category.id)),
-      unreadCount: unreadCounts.get(subscription.id) ?? 0,
-    }));
-    const subscriptionsById = new Map(subscriptions.map((subscription) => [subscription.id, subscription]));
-
-    const articles = streamItems.map((item) => {
-      const html = item.content?.content ?? item.summary?.content ?? '';
-      const text = plainText(html);
-      const subscription = subscriptionsById.get(item.origin.streamId);
-      const comparableId = comparableItemId(item.id);
-      return {
-        id: item.id,
-        feedId: item.origin.streamId,
-        folderIds: subscription?.folderIds ?? [],
-        title: item.title,
-        author: item.author ?? null,
-        source: item.origin.title ?? subscription?.title ?? 'Unknown feed',
-        canonicalUrl: item.canonical?.[0]?.href ?? item.alternate?.[0]?.href ?? item.origin.htmlUrl ?? '#',
-        publishedAt: publishedAt(item),
-        readingMinutes: Math.max(1, Math.ceil(text.split(/\s+/).filter(Boolean).length / 220)),
-        summary: text.slice(0, 240),
-        contentHtml: html,
-        read: !unreadItemIds.has(comparableId),
-        starred: starredItemIds.has(comparableId),
-      };
-    });
-
-    const folderMap = new Map<string, { id: string; title: string; unreadCount: number }>();
-    for (const source of subscriptionsResult.subscriptions) {
-      for (const category of source.categories) {
-        const id = folderId(category.id);
-        folderMap.set(id, {
-          id,
-          title: category.label ?? category.id.split('/').at(-1) ?? 'Folder',
-          unreadCount: unreadCounts.get(category.id)
-            ?? (folderMap.get(id)?.unreadCount ?? 0) + (subscriptionsById.get(source.id)?.unreadCount ?? 0),
-        });
+    const mapSnapshot = () => {
+      const { subscriptionsResult, unreadCountResult } = subscriptionData;
+      const unreadCounts = new Map(unreadCountResult.unreadcounts.map((entry) => [entry.id, entry.count] as const));
+      const subscriptions = subscriptionsResult.subscriptions.map((subscription) => ({
+        id: subscription.id,
+        title: subscription.title,
+        url: subscription.url ?? subscription.id.replace(/^feed\//, ''),
+        siteUrl: subscription.htmlUrl ?? null,
+        iconUrl: this.iconUrl(subscription.iconUrl),
+        folderIds: subscription.categories.map((category) => folderId(category.id)),
+        unreadCount: unreadCounts.get(subscription.id) ?? 0,
+      }));
+      const subscriptionsById = new Map(subscriptions.map((subscription) => [subscription.id, subscription]));
+      const articles = streamItems.map((item) => {
+        const html = item.content?.content ?? item.summary?.content ?? '';
+        const text = plainText(html);
+        const subscription = subscriptionsById.get(item.origin.streamId);
+        const comparableId = comparableItemId(item.id);
+        return {
+          id: item.id,
+          feedId: item.origin.streamId,
+          folderIds: subscription?.folderIds ?? [],
+          title: item.title,
+          author: item.author ?? null,
+          source: item.origin.title ?? subscription?.title ?? 'Unknown feed',
+          canonicalUrl: item.canonical?.[0]?.href ?? item.alternate?.[0]?.href ?? item.origin.htmlUrl ?? '#',
+          publishedAt: publishedAt(item),
+          readingMinutes: Math.max(1, Math.ceil(text.split(/\s+/).filter(Boolean).length / 220)),
+          summary: text.slice(0, 240),
+          contentHtml: html,
+          read: !unreadItemIds.has(comparableId),
+          starred: starredItemIds.has(comparableId),
+        };
+      });
+      const folderMap = new Map<string, { id: string; title: string; unreadCount: number }>();
+      for (const source of subscriptionsResult.subscriptions) {
+        for (const category of source.categories) {
+          const id = folderId(category.id);
+          folderMap.set(id, {
+            id,
+            title: category.label ?? category.id.split('/').at(-1) ?? 'Folder',
+            unreadCount: unreadCounts.get(category.id)
+              ?? (folderMap.get(id)?.unreadCount ?? 0) + (subscriptionsById.get(source.id)?.unreadCount ?? 0),
+          });
+        }
       }
-    }
-
-    return {
-      generatedAt: new Date().toISOString(),
-      source: 'google-reader',
-      folders: [...folderMap.values()],
-      subscriptions,
-      articles,
+      return {
+        generatedAt: new Date().toISOString(),
+        source: 'google-reader' as const,
+        folders: [...folderMap.values()],
+        subscriptions,
+        articles,
+      };
     };
+    return this.performanceRun ? this.performanceRun.measureSync('mapping', mapSnapshot) : mapSnapshot();
   }
 
   async mutate(mutation: ArticleMutation) {
