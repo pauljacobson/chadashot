@@ -6,6 +6,8 @@ import {
   recordMountedRows,
   recordReaderResponse,
   resetBrowserPerformance,
+  startSelectionUpdate,
+  finishSelectionUpdate,
 } from './performance';
 
 const snapshot = (contentHtml = '<p>private article body</p>'): ReaderSnapshot => ({
@@ -50,5 +52,15 @@ describe('browser performance measurements', () => {
     expect(serialized).not.toContain('article text');
     expect(serialized).not.toContain('private.example');
     expect(serialized).not.toContain('Private title');
+  });
+
+  it('records cached selection latency separately from article body loading', () => {
+    resetBrowserPerformance();
+    startSelectionUpdate();
+    finishSelectionUpdate();
+
+    expect(browserPerformanceSnapshot().events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'selection-update', source: 'cache', durationMs: expect.any(Number) }),
+    ]));
   });
 });

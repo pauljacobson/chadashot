@@ -98,6 +98,17 @@ describe('feed tree groups', () => {
     expect(groups.map((group) => group.title)).toEqual(['Writing', 'Technology']);
     expect(groups[1].subscriptions.map((feed) => feed.title)).toEqual(['Zulu', 'Alpha']);
   });
+
+  it('uses server aggregates to sort a partial metadata cache without scanning article rows', () => {
+    const groups = buildFeedGroups(snapshot([
+      subscription({ id: 'feed/alpha', title: 'Alpha', folderIds: ['technology'], latestPublishedAt: '2026-09-04T00:00:00.000Z' }),
+      subscription({ id: 'feed/zulu', title: 'Zulu', folderIds: ['technology'], latestPublishedAt: '2026-09-05T00:00:00.000Z' }),
+      subscription({ id: 'feed/beta', title: 'Beta', folderIds: ['writing'], latestPublishedAt: '2026-09-06T00:00:00.000Z' }),
+    ]), { sortOrder: 'recent' });
+
+    expect(groups.map((group) => group.title)).toEqual(['Writing', 'Technology']);
+    expect(groups[1].subscriptions.map((feed) => feed.title)).toEqual(['Zulu', 'Alpha']);
+  });
 });
 
 describe('feed favicon URL', () => {

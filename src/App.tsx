@@ -1,5 +1,6 @@
 import DOMPurify from 'dompurify';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { type CSSProperties, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { AccountSecurityState, AppLogLevel, AppLogResult, Article, IntegrationStatus, SavedHighlight, SessionState, Subscription } from '../shared/reader';
 import {
@@ -35,7 +36,7 @@ import {
   offlineStorageSummary,
   saveOfflineSession,
 } from './offlineStore';
-import { finishArticleOpen, markMilestone, recordMountedRows, startArticleOpen } from './performance';
+import { finishArticleOpen, finishSelectionUpdate, markMilestone, recordMountedRows, startArticleOpen, startSelectionUpdate } from './performance';
 
 type MobileScreen = 'list' | 'reader';
 const FEED_SORT_ORDER_KEY = 'chadashot.feedSortOrder';
@@ -48,6 +49,9 @@ const MIN_ARTICLE_LIST_WIDTH = 240;
 const MAX_ARTICLE_LIST_WIDTH = 640;
 const MIN_READER_WIDTH = 300;
 const PANEL_RESIZER_WIDTH = 10;
+const ARTICLE_ROW_ESTIMATE = 116;
+const ARTICLE_ROW_OVERSCAN = 12;
+const articleListScrollPositions = new Map<string, number>();
 
 type PanelWidths = typeof DEFAULT_PANEL_WIDTHS;
 const ACCENT_COLORS = [
@@ -387,7 +391,8 @@ function SubscribePanel({ onClose, onSubscribed }: { onClose: () => void; onSubs
   );
 }
 
-function ArticleList({
+export function ArticleList({
+  listKey,
   title,
   articles,
   readFilter,
@@ -399,7 +404,10 @@ function ArticleList({
   onToggleStar,
   onReadFilterChange,
   onMarkAllRead,
+  onLoadMore,
+  total = articles.length,
 }: {
+  listKey: string;
   title: string;
   articles: Article[];
   readFilter: ArticleReadFilter;
@@ -411,15 +419,58 @@ function ArticleList({
   onToggleStar: (article: Article) => void;
   onReadFilterChange: (filter: ArticleReadFilter) => void;
   onMarkAllRead?: (articles: Article[]) => Promise<number>;
+  onLoadMore?: () => void;
+  total?: number;
 }) {
   const [confirmingMarkAll, setConfirmingMarkAll] = useState(false);
   const [markingAll, setMarkingAll] = useState(false);
   const listRef = useRef<HTMLElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const listHasFocus = useRef(false);
   const unreadCount = markAllCandidates?.filter((article) => !article.read).length ?? 0;
+  const articleIndex = useMemo(() => new Map(articles.map((article, index) => [article.id, index])), [articles]);
+  const rowVirtualizer = useVirtualizer({
+    count: articles.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => ARTICLE_ROW_ESTIMATE,
+    getItemKey: (index) => articles[index]?.id ?? index,
+    overscan: ARTICLE_ROW_OVERSCAN,
+    useFlushSync: false,
+  });
+  const virtualRows = rowVirtualizer.getVirtualItems();
 
   useLayoutEffect(() => {
     recordMountedRows(listRef.current?.querySelectorAll('.article-row').length ?? 0);
-  }, [articles]);
+  }, [virtualRows]);
+
+  useLayoutEffect(() => {
+    const scrollElement = scrollRef.current;
+    const savedOffset = articleListScrollPositions.get(listKey);
+    if (scrollElement && savedOffset !== undefined) scrollElement.scrollTop = savedOffset;
+    return () => {
+      articleListScrollPositions.set(listKey, scrollElement?.scrollTop ?? 0);
+    };
+  }, [listKey]);
+
+  useLayoutEffect(() => {
+    if (!selectedId) return;
+    const index = articleIndex.get(selectedId);
+    if (index === undefined) return;
+    rowVirtualizer.scrollToIndex(index, { align: 'auto' });
+    finishSelectionUpdate();
+    if (listHasFocus.current) {
+      window.requestAnimationFrame(() => {
+        scrollRef.current
+          ?.querySelector<HTMLButtonElement>(`[data-virtual-index="${index}"] .article-main-action`)
+          ?.focus({ preventScroll: true });
+      });
+    }
+  }, [articleIndex, rowVirtualizer, selectedId]);
+
+  useEffect(() => {
+    const finalRow = virtualRows.at(-1);
+    if (finalRow && finalRow.index >= articles.length - 10 && articles.length < total) onLoadMore?.();
+  }, [articles.length, onLoadMore, total, virtualRows]);
 
   async function confirmMarkAllRead() {
     if (!onMarkAllRead || !markAllCandidates || markingAll) return;
@@ -435,7 +486,7 @@ function ArticleList({
   return (
     <section ref={listRef} className="article-list" id="article-list" aria-label={`${title} articles`}>
       <header className="list-header">
-        <div className="list-heading"><h1>{title}</h1><span>{articles.length}</span></div>
+        <div className="list-heading"><h1>{title}</h1><span>{total}</span></div>
         {showReadFilter && (
           <div className="article-read-filter" role="group" aria-label="Filter articles by read status">
             {(['all', 'unread', 'read'] as const).map((filter) => (
@@ -463,22 +514,48 @@ function ArticleList({
           </div>
         </div>
       )}
-      <div className="article-list-scroll">
-        {articles.length === 0 ? <div className="empty-list">Nothing here right now.</div> : articles.map((article) => (
-          <article key={article.id} className={`article-row ${selectedId === article.id ? 'active' : ''} ${article.read ? 'read' : ''}`}>
-            <button className="article-main-action" onClick={() => onSelect(article)}>
-              <div className="article-meta"><strong>{article.source}</strong><span>· {article.readingMinutes} min</span><time>{formatAge(article.publishedAt)}</time></div>
-              <h2>{article.title}</h2>
-              <p>{article.summary}</p>
-            </button>
-            <button className="row-read" title={article.read ? 'Mark unread' : 'Mark read'} aria-label={article.read ? 'Mark article unread' : 'Mark article read'} aria-pressed={article.read} onClick={() => onToggleRead(article)}>
-              {article.read ? '○' : '●'}
-            </button>
-            <button className="row-star" aria-label={article.starred ? 'Remove star' : 'Star article'} aria-pressed={article.starred} onClick={() => onToggleStar(article)}>
-              {article.starred ? '★' : '☆'}
-            </button>
-          </article>
-        ))}
+      <div
+        ref={scrollRef}
+        className="article-list-scroll"
+        role="list"
+        aria-label={`${title} results`}
+        onFocusCapture={() => { listHasFocus.current = true; }}
+        onBlurCapture={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) listHasFocus.current = false;
+        }}
+      >
+        {articles.length === 0 ? <div className="empty-list">Nothing here right now.</div> : (
+          <div className="article-list-window" style={{ height: `${rowVirtualizer.getTotalSize()}px` }}>
+            {virtualRows.map((virtualRow) => {
+              const article = articles[virtualRow.index]!;
+              return (
+                <article
+                  key={virtualRow.key}
+                  ref={rowVirtualizer.measureElement}
+                  data-index={virtualRow.index}
+                  data-virtual-index={virtualRow.index}
+                  role="listitem"
+                  aria-posinset={virtualRow.index + 1}
+                  aria-setsize={total}
+                  className={`article-row ${selectedId === article.id ? 'active' : ''} ${article.read ? 'read' : ''}`}
+                  style={{ transform: `translateY(${virtualRow.start}px)` }}
+                >
+                  <button className="article-main-action" aria-current={selectedId === article.id ? 'true' : undefined} tabIndex={selectedId === article.id ? 0 : -1} onClick={() => onSelect(article)}>
+                    <div className="article-meta"><strong>{article.source}</strong><span>· {article.readingMinutes} min</span><time>{formatAge(article.publishedAt)}</time></div>
+                    <h2>{article.title}</h2>
+                    <p>{article.summary}</p>
+                  </button>
+                  <button className="row-read" title={article.read ? 'Mark unread' : 'Mark read'} aria-label={article.read ? 'Mark article unread' : 'Mark article read'} aria-pressed={article.read} onClick={() => onToggleRead(article)}>
+                    {article.read ? '○' : '●'}
+                  </button>
+                  <button className="row-star" aria-label={article.starred ? 'Remove star' : 'Star article'} aria-pressed={article.starred} onClick={() => onToggleStar(article)}>
+                    {article.starred ? '★' : '☆'}
+                  </button>
+                </article>
+              );
+            })}
+          </div>
+        )}
       </div>
     </section>
   );
@@ -1317,9 +1394,8 @@ export function App() {
   useEffect(() => {
     function handleKeydown(event: KeyboardEvent) {
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.metaKey || event.ctrlKey || event.altKey) return;
-      const index = reader.articles.findIndex((article) => article.id === reader.selectedArticle?.id);
-      if (event.key === 'j' && reader.articles[index + 1]) reader.selectArticle(reader.articles[index + 1].id);
-      if (event.key === 'k' && reader.articles[index - 1]) reader.selectArticle(reader.articles[index - 1].id);
+      if (event.key === 'j') { startSelectionUpdate(); void reader.navigateSelection(1); }
+      if (event.key === 'k') { startSelectionUpdate(); void reader.navigateSelection(-1); }
       if (event.key === 's' && reader.selectedArticle) void reader.toggleStarred(reader.selectedArticle);
       if (event.key === 'm' && reader.selectedArticle) void reader.toggleRead(reader.selectedArticle);
       if (event.key === '/') {
@@ -1343,6 +1419,9 @@ export function App() {
     : activeFilter.kind === 'feed'
       ? reader.snapshot?.subscriptions.find((subscription) => subscription.id === activeFilter.id)?.title ?? 'Feed'
       : filterLabels[activeFilter.kind];
+  const activeListKey = activeFilter.kind === 'folder' || activeFilter.kind === 'feed'
+    ? `${activeFilter.kind}:${activeFilter.id}:${reader.readFilter}:${reader.query}`
+    : `${activeFilter.kind}:${reader.readFilter}:${reader.query}`;
 
   function chooseFilter(filter: ReaderFilter) {
     if (filter.kind === 'inbox') reader.setReadFilter('all');
@@ -1351,7 +1430,10 @@ export function App() {
   }
 
   function chooseArticle(article: Article) {
-    if (article.id !== reader.selectedArticle?.id) startArticleOpen('cache');
+    if (article.id !== reader.selectedArticle?.id) {
+      startArticleOpen('cache');
+      startSelectionUpdate();
+    }
     reader.selectArticle(article.id);
     if (!article.read) void reader.toggleRead(article);
     setMobileScreen('reader');
@@ -1395,6 +1477,7 @@ export function App() {
             {reader.coverage && !reader.coverage.complete
               ? ` · ${reader.coverage.loaded.toLocaleString()} of ${reader.coverage.total.toLocaleString()} cached`
               : ''}
+            {reader.searchCoverage === 'cached-partial' ? ' · Cached search only' : ''}
           </span>
           <button aria-label="Refresh" onClick={() => void reader.synchronize()}>↻</button>
           <button aria-label="Open preferences" onClick={() => setPreferencesOpen(true)}>☷</button>
@@ -1414,9 +1497,11 @@ export function App() {
           onResize={(sidebar) => setPanelWidths((current) => ({ ...current, sidebar }))}
         />
         <ArticleList
-          key={activeFilter.kind === 'folder' || activeFilter.kind === 'feed' ? `${activeFilter.kind}:${activeFilter.id}` : activeFilter.kind}
+          key={activeListKey}
+          listKey={activeListKey}
           title={title}
           articles={reader.articles}
+          total={reader.totalArticles}
           readFilter={reader.readFilter}
           showReadFilter={activeFilter.kind !== 'inbox'}
           markAllCandidates={activeFilter.kind === 'feed' && reader.readFilter !== 'read' ? reader.filteredArticles : undefined}
@@ -1425,6 +1510,7 @@ export function App() {
           onToggleRead={(article) => void reader.toggleRead(article)}
           onToggleStar={(article) => void reader.toggleStarred(article)}
           onReadFilterChange={reader.setReadFilter}
+          onLoadMore={() => void reader.loadMoreArticles()}
           onMarkAllRead={activeFilter.kind === 'feed' ? async (articles) => {
             const count = await reader.markAllRead(articles);
             setNotice(`${count} ${count === 1 ? 'item' : 'items'} marked as read`);

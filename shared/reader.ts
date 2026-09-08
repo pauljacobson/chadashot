@@ -88,12 +88,16 @@ export type Subscription = {
   iconUrl: string | null;
   folderIds: string[];
   unreadCount: number;
+  totalCount?: number;
+  latestPublishedAt?: string | null;
 };
 
 export type Folder = {
   id: string;
   title: string;
   unreadCount: number;
+  totalCount?: number;
+  latestPublishedAt?: string | null;
 };
 
 export type ReaderSnapshot = {

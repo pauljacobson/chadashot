@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Article, ArticleMutation, ReaderArticleBody, ReaderSnapshot } from '../shared/reader';
+import type { Article, ArticleMutation, ReaderArticleBody, ReaderArticleMetadata, ReaderSnapshot } from '../shared/reader';
 import {
   ApiError,
   getReaderArticleBody,
@@ -46,6 +46,31 @@ export type ReaderFilter =
 export type SyncStatus = 'offline' | 'syncing' | 'current' | 'error';
 export type ArticleReadFilter = 'all' | 'unread' | 'read';
 
+type RemoteArticlePage = {
+  queryKey: string;
+  accountKey: string;
+  articles: ReaderArticleMetadata[];
+  nextCursor: string | null;
+  total: number;
+};
+
+function readerArticleQuery(filter: ReaderFilter, read: ArticleReadFilter, search: string) {
+  return {
+    scope: filter.kind,
+    ...(filter.kind === 'folder' || filter.kind === 'feed' ? { scopeId: filter.id } : {}),
+    read,
+    ...(search ? { search } : {}),
+  };
+}
+
+function retainsArticleInStateFilter(article: ReaderArticleMetadata, filter: ReaderFilter, readFilter: ArticleReadFilter) {
+  if (filter.kind === 'inbox' && article.read) return false;
+  if (filter.kind === 'starred' && !article.starred) return false;
+  if (readFilter === 'read' && !article.read) return false;
+  if (readFilter === 'unread' && article.read) return false;
+  return true;
+}
+
 export function filterArticlesByReadState(articles: Article[], filter: ArticleReadFilter) {
   if (filter === 'all') return articles;
   return articles.filter((article) => filter === 'read' ? article.read : !article.read);
@@ -84,11 +109,19 @@ export function useReader(userId?: string) {
   const [error, setError] = useState<string | null>(null);
   const [pendingMutations, setPendingMutations] = useState(0);
   const [coverage, setCoverage] = useState<CachedReaderState['coverage'] | null>(null);
+  const [activeAccountKey, setActiveAccountKey] = useState<string | null>(null);
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  const [remotePage, setRemotePage] = useState<RemoteArticlePage | null>(null);
+  const [remoteRevision, setRemoteRevision] = useState(0);
+  const [loadedBodies, setLoadedBodies] = useState(() => new Map<string, string>());
   const lastSync = useRef(0);
   const activeRequest = useRef<AbortController | null>(null);
   const currentSnapshot = useRef<ReaderSnapshot | null>(null);
   const currentCache = useRef<CachedReaderState | null>(null);
   const bodyRequests = useRef(new Map<string, Promise<ReaderArticleBody>>());
+  const remotePageRef = useRef<RemoteArticlePage | null>(null);
+  const remoteRequest = useRef<AbortController | null>(null);
+  const loadingNextPage = useRef(false);
 
   const refreshPendingCount = useCallback(async () => {
     setPendingMutations((await queuedArticleMutations(currentCache.current?.accountKey)).length);
@@ -122,6 +155,7 @@ export function useReader(userId?: string) {
     if (!cached) return null;
     const reconciled = await reconcileSnapshotWithLocalMutations(cached.snapshot, cached.accountKey);
     currentCache.current = { ...cached, snapshot: reconciled.snapshot };
+    setActiveAccountKey(cached.accountKey);
     setCoverage(cached.coverage);
     recordCollectionDiff(currentSnapshot.current, reconciled.snapshot);
     currentSnapshot.current = reconciled.snapshot;
@@ -133,6 +167,7 @@ export function useReader(userId?: string) {
         milestone === 'cached' ? 'first-usable-cached-list' : 'first-server-backed-list',
         { articles: reconciled.snapshot.articles.length },
       ));
+      if (milestone === 'server') setRemoteRevision((current) => current + 1);
     }
     return cached;
   }, [userId]);
@@ -293,7 +328,11 @@ export function useReader(userId?: string) {
       if (document.visibilityState === 'visible' && Date.now() - lastSync.current > 60_000) void synchronize('visibility');
     };
     const handleOnline = () => void synchronize('online');
-    const handleOffline = () => setStatus('offline');
+    const handleOffline = () => {
+      remotePageRef.current = null;
+      setRemotePage(null);
+      setStatus('offline');
+    };
     const unsubscribe = subscribeToReaderUpdates((accountKey) => {
       if (accountKey === currentCache.current?.accountKey) void publishCachedReader();
     });
@@ -318,35 +357,81 @@ export function useReader(userId?: string) {
   }, [enabled]);
 
   useEffect(() => {
-    const account = currentCache.current;
-    const article = snapshot?.articles.find((candidate) => candidate.id === selectedId);
-    if (!enabled || !account || !article || article.contentHtml) return;
-    const requestKey = `${account.accountKey}\0${article.id}\0${account.versions.body}`;
-    let bodyRequest = bodyRequests.current.get(requestKey);
-    if (!bodyRequest) {
-      bodyRequest = (async () => {
-        const cachedBody = await loadReaderBody(account.accountKey, article.id, account.versions.body);
-        if (cachedBody) return cachedBody;
-        if (!navigator.onLine) throw new Error('Article body is not cached on this device');
-        const downloaded = await getReaderArticleBody(article.id);
-        if (downloaded.accountKey !== account.accountKey) throw new Error('Reader account changed while loading article content');
-        await saveReaderBody(downloaded);
-        return downloaded;
-      })().finally(() => bodyRequests.current.delete(requestKey));
-      bodyRequests.current.set(requestKey, bodyRequest);
+    const timeout = window.setTimeout(() => setDebouncedQuery(query.trim()), 250);
+    return () => window.clearTimeout(timeout);
+  }, [query]);
+
+  const remoteQueryKey = useMemo(() => JSON.stringify([
+    activeAccountKey,
+    filter.kind,
+    filter.kind === 'folder' || filter.kind === 'feed' ? filter.id : null,
+    readFilter,
+    debouncedQuery,
+    remoteRevision,
+  ]), [activeAccountKey, debouncedQuery, filter, readFilter, remoteRevision]);
+
+  useEffect(() => {
+    if (!enabled || !activeAccountKey || activeAccountKey.startsWith('legacy:') || !navigator.onLine) {
+      remotePageRef.current = null;
+      setRemotePage(null);
+      return;
     }
-    let active = true;
-    void bodyRequest.then((body) => {
-      if (!active) return;
-      setSnapshot((current) => current ? {
+    const controller = new AbortController();
+    remoteRequest.current?.abort();
+    remoteRequest.current = controller;
+    const requestKey = remoteQueryKey;
+    void getReaderArticles({
+      ...readerArticleQuery(filter, readFilter, debouncedQuery),
+      signal: controller.signal,
+    }).then((page) => {
+      if (controller.signal.aborted || page.accountKey !== activeAccountKey) return;
+      const next = {
+        queryKey: requestKey,
+        accountKey: page.accountKey,
+        articles: page.articles,
+        nextCursor: page.nextCursor,
+        total: page.total,
+      };
+      remotePageRef.current = next;
+      setRemotePage(next);
+    }).catch(() => {
+      if (!controller.signal.aborted) {
+        remotePageRef.current = null;
+        setRemotePage(null);
+      }
+    });
+    return () => controller.abort();
+  }, [activeAccountKey, debouncedQuery, enabled, filter, readFilter, remoteQueryKey]);
+
+  const loadMoreArticles = useCallback(async () => {
+    const current = remotePageRef.current;
+    if (!current?.nextCursor || current.queryKey !== remoteQueryKey || loadingNextPage.current) return;
+    loadingNextPage.current = true;
+    try {
+      const page = await getReaderArticles({
+        ...readerArticleQuery(filter, readFilter, debouncedQuery),
+        cursor: current.nextCursor,
+      });
+      if (page.accountKey !== current.accountKey || remotePageRef.current?.queryKey !== remoteQueryKey) return;
+      const known = new Set(current.articles.map((article) => article.id));
+      const next = {
         ...current,
-        articles: current.articles.map((candidate) => candidate.id === body.articleId
-          ? { ...candidate, contentHtml: body.contentHtml }
-          : candidate),
-      } : current);
-    }).catch(() => undefined);
-    return () => { active = false; };
-  }, [enabled, selectedId, snapshot]);
+        articles: [...current.articles, ...page.articles.filter((article) => !known.has(article.id))],
+        nextCursor: page.nextCursor,
+        total: page.total,
+      };
+      remotePageRef.current = next;
+      setRemotePage(next);
+    } catch (pagingError) {
+      if (pagingError instanceof ApiError && pagingError.status === 409) {
+        remotePageRef.current = null;
+        setRemotePage(null);
+        setRemoteRevision((currentRevision) => currentRevision + 1);
+      }
+    } finally {
+      loadingNextPage.current = false;
+    }
+  }, [debouncedQuery, filter, readFilter, remoteQueryKey]);
 
   const filteredArticles = useMemo(() => {
     if (!snapshot) return [];
@@ -376,15 +461,84 @@ export function useReader(userId?: string) {
     });
   }, [filteredArticles, query]);
 
-  const articles = useMemo(
+  const localArticles = useMemo(
     () => filterArticlesByReadState(searchedArticles, readFilter),
     [readFilter, searchedArticles],
   );
 
+  const cachedBodyById = useMemo(() => new Map((snapshot?.articles ?? [])
+    .filter((article) => article.contentHtml)
+    .map((article) => [article.id, article.contentHtml])), [snapshot]);
+  const remoteIsCurrent = remotePage?.queryKey === remoteQueryKey && debouncedQuery === query.trim();
+  const articles = useMemo(() => remoteIsCurrent && remotePage
+    ? remotePage.articles.map((article) => ({
+      ...article,
+      contentHtml: loadedBodies.get(article.id) ?? cachedBodyById.get(article.id) ?? '',
+    }))
+    : localArticles.map((article) => loadedBodies.has(article.id)
+      ? { ...article, contentHtml: loadedBodies.get(article.id)! }
+      : article), [cachedBodyById, loadedBodies, localArticles, remoteIsCurrent, remotePage]);
+  const articleIndexById = useMemo(() => new Map(articles.map((article, index) => [article.id, index])), [articles]);
+
   const selectedArticle = useMemo(
-    () => articles.find((article) => article.id === selectedId) ?? articles[0] ?? null,
-    [articles, selectedId],
+    () => articles[articleIndexById.get(selectedId ?? '') ?? -1] ?? articles[0] ?? null,
+    [articleIndexById, articles, selectedId],
   );
+
+  useEffect(() => {
+    if (articles.length === 0) {
+      if (selectedId !== null) setSelectedId(null);
+      return;
+    }
+    if (!selectedId || !articleIndexById.has(selectedId)) setSelectedId(articles[0]!.id);
+  }, [articleIndexById, articles, selectedId]);
+
+  const navigateSelection = useCallback(async (direction: -1 | 1) => {
+    const currentIndex = articleIndexById.get(selectedId ?? '') ?? (direction > 0 ? -1 : articles.length);
+    const target = articles[currentIndex + direction];
+    if (target) {
+      setSelectedId(target.id);
+      return;
+    }
+    if (direction > 0 && remoteIsCurrent && remotePageRef.current?.nextCursor) {
+      const priorLength = remotePageRef.current.articles.length;
+      await loadMoreArticles();
+      const next = remotePageRef.current?.articles[priorLength];
+      if (next) setSelectedId(next.id);
+    }
+  }, [articleIndexById, articles, loadMoreArticles, remoteIsCurrent, selectedId]);
+
+  useEffect(() => {
+    const account = currentCache.current;
+    const article = selectedArticle;
+    if (!enabled || !account || !article || article.contentHtml) return;
+    const requestKey = `${account.accountKey}\0${article.id}\0${account.versions.body}`;
+    let bodyRequest = bodyRequests.current.get(requestKey);
+    if (!bodyRequest) {
+      bodyRequest = (async () => {
+        const cachedBody = await loadReaderBody(account.accountKey, article.id, account.versions.body);
+        if (cachedBody) return cachedBody;
+        if (!navigator.onLine) throw new Error('Article body is not cached on this device');
+        const downloaded = await getReaderArticleBody(article.id);
+        if (downloaded.accountKey !== account.accountKey) throw new Error('Reader account changed while loading article content');
+        await saveReaderBody(downloaded);
+        return downloaded;
+      })().finally(() => bodyRequests.current.delete(requestKey));
+      bodyRequests.current.set(requestKey, bodyRequest);
+    }
+    let active = true;
+    void bodyRequest.then((body) => {
+      if (!active) return;
+      setLoadedBodies((current) => new Map(current).set(body.articleId, body.contentHtml));
+      setSnapshot((current) => current ? {
+        ...current,
+        articles: current.articles.map((candidate) => candidate.id === body.articleId
+          ? { ...candidate, contentHtml: body.contentHtml }
+          : candidate),
+      } : current);
+    }).catch(() => undefined);
+    return () => { active = false; };
+  }, [enabled, selectedArticle]);
 
   const mutate = useCallback(async (article: Article, operation: ArticleMutation['operation'], value: boolean) => {
     const mutation = { articleId: article.id, operation, value } satisfies ArticleMutation;
@@ -392,6 +546,22 @@ export function useReader(userId?: string) {
       ? undefined
       : currentCache.current?.accountKey;
     setSnapshot((current) => current ? applyMutation(current, mutation) : current);
+    const changedArticle = { ...article, [operation === 'read' ? 'read' : 'starred']: value };
+    if (!retainsArticleInStateFilter(changedArticle, filter, readFilter)) {
+      const index = articleIndexById.get(article.id) ?? -1;
+      setSelectedId((current) => current === article.id
+        ? articles[index + 1]?.id ?? articles[index - 1]?.id ?? null
+        : current);
+    }
+    setRemotePage((current) => {
+      if (!current || current.queryKey !== remoteQueryKey) return current;
+      const updated = current.articles
+        .map((candidate) => candidate.id === article.id ? changedArticle : candidate)
+        .filter((candidate) => retainsArticleInStateFilter(candidate, filter, readFilter));
+      const next = { ...current, articles: updated, total: Math.max(0, current.total - (current.articles.length - updated.length)) };
+      remotePageRef.current = next;
+      return next;
+    });
 
     let queued = false;
     try {
@@ -417,7 +587,7 @@ export function useReader(userId?: string) {
       setError(mutationError instanceof Error ? mutationError.message : 'Could not save change');
       setStatus(navigator.onLine ? 'error' : 'offline');
     }
-  }, [refreshPendingCount, replayPendingMutations, reportOutboxResult]);
+  }, [articleIndexById, articles, filter, readFilter, refreshPendingCount, remoteQueryKey, replayPendingMutations, reportOutboxResult]);
 
   const markAllRead = useCallback(async (candidates: Article[]) => {
     const unread = candidates.filter((article) => !article.read);
@@ -427,6 +597,16 @@ export function useReader(userId?: string) {
       ? undefined
       : currentCache.current?.accountKey;
     setSnapshot((current) => current ? applyReadStates(current, new Map(unread.map((article) => [article.id, true]))) : current);
+    setRemotePage((current) => {
+      if (!current || current.queryKey !== remoteQueryKey) return current;
+      const changedIds = new Set(unread.map((article) => article.id));
+      const updated = current.articles
+        .map((article) => changedIds.has(article.id) ? { ...article, read: true } : article)
+        .filter((article) => retainsArticleInStateFilter(article, filter, readFilter));
+      const next = { ...current, articles: updated, total: Math.max(0, current.total - (current.articles.length - updated.length)) };
+      remotePageRef.current = next;
+      return next;
+    });
 
     let queued = false;
     try {
@@ -456,7 +636,7 @@ export function useReader(userId?: string) {
       setStatus(navigator.onLine ? 'error' : 'offline');
       throw mutationError;
     }
-  }, [refreshPendingCount, replayPendingMutations, reportOutboxResult]);
+  }, [filter, readFilter, refreshPendingCount, remoteQueryKey, replayPendingMutations, reportOutboxResult]);
 
   const clear = useCallback(() => {
     activeRequest.current?.abort();
@@ -468,6 +648,9 @@ export function useReader(userId?: string) {
     setError(null);
     setPendingMutations(0);
     setCoverage(null);
+    setActiveAccountKey(null);
+    setRemotePage(null);
+    remotePageRef.current = null;
     setStatus(navigator.onLine ? 'current' : 'offline');
   }, []);
 
@@ -484,10 +667,14 @@ export function useReader(userId?: string) {
     error,
     pendingMutations,
     coverage,
+    totalArticles: remoteIsCurrent && remotePage ? remotePage.total : articles.length,
+    searchCoverage: query.trim() && (!remoteIsCurrent || !navigator.onLine) ? 'cached-partial' as const : 'complete' as const,
     setFilter,
     setReadFilter,
     setQuery,
     selectArticle: setSelectedId,
+    navigateSelection,
+    loadMoreArticles,
     synchronize,
     clear,
     toggleRead: (article: Article) => mutate(article, 'read', !article.read),
