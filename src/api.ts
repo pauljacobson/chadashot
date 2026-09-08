@@ -1,4 +1,4 @@
-import type { AccountSecurityState, AppLogLevel, AppLogResult, ArticleMutation, IntegrationStatus, ReaderArticleBody, ReaderArticlePage, ReaderChangesPage, ReaderInitializationState, ReaderNavigation, ReaderSnapshot, ReaderSynchronizationStatus, SavedHighlight, SessionState } from '../shared/reader';
+import type { AccountSecurityState, AppLogLevel, AppLogResult, ArticleMutation, IntegrationStatus, ReaderArticleBody, ReaderArticlePage, ReaderChangesPage, ReaderInitializationState, ReaderMarkReadJobRequest, ReaderMarkReadJobStatus, ReaderNavigation, ReaderSnapshot, ReaderSynchronizationStatus, SavedHighlight, SessionState } from '../shared/reader';
 import type {
   PublicKeyCredentialCreationOptionsJSON,
   PublicKeyCredentialRequestOptionsJSON,
@@ -113,6 +113,22 @@ export function sendArticleMutations(mutations: ArticleMutation[], accountKey?: 
     body: JSON.stringify({ mutations }),
     headers: accountKey ? { 'X-Reader-Account-Key': accountKey } : undefined,
   });
+}
+
+export function createMarkReadJob(job: ReaderMarkReadJobRequest) {
+  return request<ReaderMarkReadJobStatus>('/api/reader/mark-read-jobs', {
+    method: 'POST',
+    body: JSON.stringify(job),
+    headers: { 'X-Reader-Account-Key': job.accountKey },
+  });
+}
+
+export function getMarkReadJobs(signal?: AbortSignal) {
+  return request<{ jobs: ReaderMarkReadJobStatus[] }>('/api/reader/mark-read-jobs', { signal });
+}
+
+export function retryMarkReadJob(jobId: string) {
+  return request<ReaderMarkReadJobStatus>(`/api/reader/mark-read-jobs/${encodeURIComponent(jobId)}/retry`, { method: 'POST' });
 }
 
 export function getBootstrapOptions(displayName: string, bootstrapToken: string) {

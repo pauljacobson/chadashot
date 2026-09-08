@@ -127,6 +127,36 @@ export type ArticleMutation = {
   value: boolean;
 };
 
+export type ReaderMarkReadScope = {
+  kind: 'inbox' | 'all' | 'starred' | 'uncategorized' | 'folder' | 'feed';
+  id?: string;
+};
+
+export type ReaderMarkReadJobRequest = {
+  idempotencyKey: string;
+  accountKey: string;
+  generation: string;
+  collectionVersion: number;
+  stateVersion: number;
+  scope: ReaderMarkReadScope;
+  search?: string;
+  coverage: 'complete';
+};
+
+export type ReaderMarkReadJobStatus = {
+  id: string;
+  idempotencyKey: string;
+  status: 'accepted' | 'running' | 'completed' | 'failed';
+  targetCount: number;
+  completedCount: number;
+  supersededCount: number;
+  attempts: number;
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+};
+
 export type SavedHighlight = {
   id: string;
   articleId: string;

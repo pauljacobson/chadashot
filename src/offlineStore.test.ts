@@ -4,18 +4,21 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import type { ReaderArticlePage, ReaderNavigation, ReaderSnapshot, SessionState } from '../shared/reader';
 import {
   acknowledgeQueuedArticleMutations,
+  acknowledgeMarkReadJob,
   acknowledgedArticleMutations,
   applyReaderChanges,
   applyQueuedArticleMutations,
   clearOfflineData,
   enqueueArticleMutation,
   enqueueArticleMutations,
+  enqueueMarkReadJob,
   loadCachedReader,
   loadCachedSnapshot,
   loadOfflineSession,
   loadReaderBody,
   offlineStorageSummary,
   queuedArticleMutations,
+  queuedMarkReadJobs,
   reconcileSnapshotWithLocalMutations,
   removeQueuedArticleMutation,
   saveCachedSnapshot,
@@ -124,6 +127,25 @@ describe('offline reader storage', () => {
     expect(await queuedArticleMutations()).toHaveLength(425);
   });
 
+  it('queues one compact semantic record for a collection-wide mark-read operation', async () => {
+    const job = await enqueueMarkReadJob({
+      idempotencyKey: crypto.randomUUID(),
+      accountKey: 'account-1',
+      generation: 'generation-1',
+      collectionVersion: 1,
+      stateVersion: 1,
+      scope: { kind: 'folder', id: 'folder-1' },
+      search: 'matching articles',
+      coverage: 'complete',
+    });
+
+    expect(await queuedMarkReadJobs('account-1')).toEqual([job]);
+    expect((await offlineStorageSummary()).queuedChanges).toBe(1);
+    expect(JSON.stringify(job).length).toBeLessThan(1_000);
+    await acknowledgeMarkReadJob(job);
+    expect(await queuedMarkReadJobs()).toEqual([]);
+  });
+
   it('replays queued read and star changes over a fresh server snapshot', async () => {
     const read = await enqueueArticleMutation({ articleId: 'article-1', operation: 'read', value: true });
     const starred = await enqueueArticleMutation({ articleId: 'article-1', operation: 'starred', value: true });
@@ -183,6 +205,7 @@ describe('offline reader storage', () => {
     expect(await loadCachedSnapshot()).toBeNull();
     expect(await loadOfflineSession()).toBeNull();
     expect(await queuedArticleMutations()).toEqual([]);
+    expect(await queuedMarkReadJobs()).toEqual([]);
     expect(await acknowledgedArticleMutations()).toEqual([]);
   });
 

@@ -397,7 +397,7 @@ export function ArticleList({
   articles,
   readFilter,
   showReadFilter = true,
-  markAllCandidates,
+  markAllCount = 0,
   selectedId,
   onSelect,
   onToggleRead,
@@ -412,13 +412,13 @@ export function ArticleList({
   articles: Article[];
   readFilter: ArticleReadFilter;
   showReadFilter?: boolean;
-  markAllCandidates?: Article[];
+  markAllCount?: number;
   selectedId: string | null;
   onSelect: (article: Article) => void;
   onToggleRead: (article: Article) => void;
   onToggleStar: (article: Article) => void;
   onReadFilterChange: (filter: ArticleReadFilter) => void;
-  onMarkAllRead?: (articles: Article[]) => Promise<number>;
+  onMarkAllRead?: () => Promise<number>;
   onLoadMore?: () => void;
   total?: number;
 }) {
@@ -427,7 +427,7 @@ export function ArticleList({
   const listRef = useRef<HTMLElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const listHasFocus = useRef(false);
-  const unreadCount = markAllCandidates?.filter((article) => !article.read).length ?? 0;
+  const unreadCount = markAllCount;
   const articleIndex = useMemo(() => new Map(articles.map((article, index) => [article.id, index])), [articles]);
   const rowVirtualizer = useVirtualizer({
     count: articles.length,
@@ -473,10 +473,10 @@ export function ArticleList({
   }, [articles.length, onLoadMore, total, virtualRows]);
 
   async function confirmMarkAllRead() {
-    if (!onMarkAllRead || !markAllCandidates || markingAll) return;
+    if (!onMarkAllRead || markingAll) return;
     setMarkingAll(true);
     try {
-      await onMarkAllRead(markAllCandidates);
+      await onMarkAllRead();
       setConfirmingMarkAll(false);
     } finally {
       setMarkingAll(false);
@@ -507,7 +507,7 @@ export function ArticleList({
       </header>
       {confirmingMarkAll && unreadCount > 0 && (
         <div className="mark-all-confirmation" role="alertdialog" aria-label="Confirm mark all read">
-          <span>Mark {unreadCount} unread {unreadCount === 1 ? 'item' : 'items'} in this feed as read?</span>
+          <span>Mark {unreadCount} unread {unreadCount === 1 ? 'item' : 'items'} in this view as read?</span>
           <div>
             <button disabled={markingAll} onClick={() => setConfirmingMarkAll(false)}>Cancel</button>
             <button className="primary-action" disabled={markingAll} onClick={() => void confirmMarkAllRead()}>{markingAll ? 'Marking…' : 'Mark all read'}</button>
@@ -1422,6 +1422,14 @@ export function App() {
   const activeListKey = activeFilter.kind === 'folder' || activeFilter.kind === 'feed'
     ? `${activeFilter.kind}:${activeFilter.id}:${reader.readFilter}:${reader.query}`
     : `${activeFilter.kind}:${reader.readFilter}:${reader.query}`;
+  const latestMarkReadJob = reader.markReadJobs[0];
+  const markReadJobLabel = latestMarkReadJob?.status === 'completed'
+    ? `${latestMarkReadJob.completedCount.toLocaleString()} marked read`
+    : latestMarkReadJob?.status === 'failed'
+      ? `Mark-read paused at ${latestMarkReadJob.completedCount.toLocaleString()} of ${latestMarkReadJob.targetCount.toLocaleString()}`
+      : latestMarkReadJob
+        ? `Marking ${latestMarkReadJob.completedCount.toLocaleString()} of ${latestMarkReadJob.targetCount.toLocaleString()} read`
+        : null;
 
   function chooseFilter(filter: ReaderFilter) {
     if (filter.kind === 'inbox') reader.setReadFilter('all');
@@ -1478,6 +1486,10 @@ export function App() {
               ? ` · ${reader.coverage.loaded.toLocaleString()} of ${reader.coverage.total.toLocaleString()} cached`
               : ''}
             {reader.searchCoverage === 'cached-partial' ? ' · Cached search only' : ''}
+            {markReadJobLabel ? ` · ${markReadJobLabel}` : ''}
+            {latestMarkReadJob?.status === 'failed' && (
+              <button className="inline-retry" onClick={() => void reader.retryMarkReadJob(latestMarkReadJob.id)}>Retry</button>
+            )}
           </span>
           <button aria-label="Refresh" onClick={() => void reader.synchronize()}>↻</button>
           <button aria-label="Open preferences" onClick={() => setPreferencesOpen(true)}>☷</button>
@@ -1504,16 +1516,16 @@ export function App() {
           total={reader.totalArticles}
           readFilter={reader.readFilter}
           showReadFilter={activeFilter.kind !== 'inbox'}
-          markAllCandidates={activeFilter.kind === 'feed' && reader.readFilter !== 'read' ? reader.filteredArticles : undefined}
+          markAllCount={reader.readFilter !== 'read' && reader.coverage?.complete ? reader.bulkUnreadCount : 0}
           selectedId={reader.selectedArticle?.id ?? null}
           onSelect={chooseArticle}
           onToggleRead={(article) => void reader.toggleRead(article)}
           onToggleStar={(article) => void reader.toggleStarred(article)}
           onReadFilterChange={reader.setReadFilter}
           onLoadMore={() => void reader.loadMoreArticles()}
-          onMarkAllRead={activeFilter.kind === 'feed' ? async (articles) => {
-            const count = await reader.markAllRead(articles);
-            setNotice(`${count} ${count === 1 ? 'item' : 'items'} marked as read`);
+          onMarkAllRead={reader.readFilter !== 'read' && reader.coverage?.complete ? async () => {
+            const count = await reader.markAllRead();
+            setNotice(`${count} ${count === 1 ? 'item' : 'items'} accepted for marking as read`);
             return count;
           } : undefined}
         />

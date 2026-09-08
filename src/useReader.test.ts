@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Article, ReaderSnapshot } from '../shared/reader';
-import { filterArticlesByReadState, loadReaderSnapshotWithoutWaitingForReplay } from './useReader';
+import { filterArticlesByReadState, loadReaderSnapshotWithoutWaitingForReplay, markReadCoverageError } from './useReader';
 import type { OutboxRunResult } from './outboxWorker';
 
 const articles = [
@@ -41,5 +41,29 @@ describe('reader synchronization', () => {
       skippedBecauseLocked: false,
     });
     await loaded.replayResult;
+  });
+});
+
+describe('bulk mark-read availability', () => {
+  it('defers offline confirmation when the cached scope is incomplete', () => {
+    expect(markReadCoverageError({
+      loaded: 425,
+      total: 20_000,
+      complete: false,
+      nextCursor: 'next',
+      changeToken: null,
+      backfillInterrupted: true,
+    })).toBe('Only 425 of 20,000 articles are cached. Finish synchronization before marking this view read.');
+  });
+
+  it('allows a complete cached boundary', () => {
+    expect(markReadCoverageError({
+      loaded: 20_000,
+      total: 20_000,
+      complete: true,
+      nextCursor: null,
+      changeToken: 'token',
+      backfillInterrupted: false,
+    })).toBeNull();
   });
 });
