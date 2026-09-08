@@ -101,7 +101,7 @@ function chunks<T>(values: T[], size: number) {
 export class ReaderCache {
   constructor(
     private readonly database: AppDatabase,
-    private readonly ownerId = newId(),
+    private readonly ownerId: string = newId(),
     private readonly leaseMs = 45_000,
     private readonly clock: Clock = () => new Date(),
   ) {}
@@ -396,6 +396,74 @@ export class ReaderCache {
     this.heartbeat(importRun);
   }
 
+  private rebuildNavigationActivity(generationId: string) {
+    this.database.prepare(`DELETE FROM reader_navigation_activity WHERE generation_id = ?`).run(generationId);
+    this.database.prepare(`
+      INSERT INTO reader_navigation_activity
+        (generation_id, kind, id, total_count, unread_count, latest_published_at)
+      SELECT subscription.generation_id, 'feed', subscription.id, COUNT(article.id),
+        COALESCE(SUM(CASE WHEN state.is_read = 0 THEN 1 ELSE 0 END), 0), MAX(article.published_at)
+      FROM reader_subscriptions subscription
+      LEFT JOIN reader_articles article
+        ON article.generation_id = subscription.generation_id AND article.feed_id = subscription.id
+      LEFT JOIN reader_article_state state
+        ON state.generation_id = article.generation_id AND state.article_id = article.id
+      WHERE subscription.generation_id = ?
+      GROUP BY subscription.generation_id, subscription.id
+    `).run(generationId);
+    this.database.prepare(`
+      INSERT INTO reader_navigation_activity
+        (generation_id, kind, id, total_count, unread_count, latest_published_at)
+      SELECT folder.generation_id, 'folder', folder.id, COUNT(DISTINCT article.id),
+        COALESCE(SUM(CASE WHEN state.is_read = 0 THEN 1 ELSE 0 END), 0), MAX(article.published_at)
+      FROM reader_folders folder
+      LEFT JOIN reader_article_folders relation
+        ON relation.generation_id = folder.generation_id AND relation.folder_id = folder.id
+      LEFT JOIN reader_articles article
+        ON article.generation_id = relation.generation_id AND article.id = relation.article_id
+      LEFT JOIN reader_article_state state
+        ON state.generation_id = article.generation_id AND state.article_id = article.id
+      WHERE folder.generation_id = ?
+      GROUP BY folder.generation_id, folder.id
+    `).run(generationId);
+    const scopeInsert = this.database.prepare(`
+      INSERT INTO reader_navigation_activity
+        (generation_id, kind, id, total_count, unread_count, latest_published_at)
+      VALUES (?, 'scope', ?, ?, ?, ?)
+    `);
+    const all = this.database.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(CASE WHEN state.is_read = 0 THEN 1 ELSE 0 END), 0) AS unread,
+        MAX(article.published_at) AS latest
+      FROM reader_articles article JOIN reader_article_state state
+        ON state.generation_id = article.generation_id AND state.article_id = article.id
+      WHERE article.generation_id = ?
+    `).get(generationId) as { total: number; unread: number; latest: string | null };
+    scopeInsert.run(generationId, 'all', all.total, all.unread, all.latest);
+    scopeInsert.run(generationId, 'inbox', all.unread, all.unread, all.latest);
+    const starred = this.database.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(CASE WHEN state.is_read = 0 THEN 1 ELSE 0 END), 0) AS unread,
+        MAX(article.published_at) AS latest
+      FROM reader_articles article JOIN reader_article_state state
+        ON state.generation_id = article.generation_id AND state.article_id = article.id
+      WHERE article.generation_id = ? AND state.is_starred = 1
+    `).get(generationId) as { total: number; unread: number; latest: string | null };
+    scopeInsert.run(generationId, 'starred', starred.total, starred.unread, starred.latest);
+    const uncategorized = this.database.prepare(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(CASE WHEN state.is_read = 0 THEN 1 ELSE 0 END), 0) AS unread,
+        MAX(article.published_at) AS latest
+      FROM reader_articles article JOIN reader_article_state state
+        ON state.generation_id = article.generation_id AND state.article_id = article.id
+      WHERE article.generation_id = ? AND NOT EXISTS (
+        SELECT 1 FROM reader_subscription_folders relation
+        WHERE relation.generation_id = article.generation_id AND relation.subscription_id = article.feed_id
+      )
+    `).get(generationId) as { total: number; unread: number; latest: string | null };
+    scopeInsert.run(generationId, 'uncategorized', uncategorized.total, uncategorized.unread, uncategorized.latest);
+  }
+
   private applyState(generationId: string, mutation: ArticleMutation) {
     const current = this.database.prepare(`
       SELECT s.is_read, s.is_starred, a.feed_id
@@ -405,9 +473,16 @@ export class ReaderCache {
     `).get(generationId, mutation.articleId) as { is_read: number; is_starred: number; feed_id: string } | undefined;
     if (!current) return;
     if (mutation.operation === 'starred') {
+      if (Boolean(current.is_starred) === mutation.value) return;
       this.database.prepare(`
         UPDATE reader_article_state SET is_starred = ? WHERE generation_id = ? AND article_id = ?
       `).run(Number(mutation.value), generationId, mutation.articleId);
+      const delta = mutation.value ? 1 : -1;
+      this.database.prepare(`
+        UPDATE reader_navigation_activity
+        SET total_count = MAX(0, total_count + ?), unread_count = MAX(0, unread_count + ?)
+        WHERE generation_id = ? AND kind = 'scope' AND id = 'starred'
+      `).run(delta, current.is_read ? 0 : delta, generationId);
       return;
     }
     if (Boolean(current.is_read) === mutation.value) return;
@@ -425,6 +500,220 @@ export class ReaderCache {
         SELECT folder_id FROM reader_article_folders WHERE generation_id = ? AND article_id = ?
       )
     `).run(unreadDelta, generationId, generationId, mutation.articleId);
+    this.database.prepare(`
+      UPDATE reader_navigation_activity SET unread_count = MAX(0, unread_count + ?)
+      WHERE generation_id = ? AND (
+        (kind = 'scope' AND id = 'all')
+        OR (kind = 'scope' AND id = 'starred' AND ? = 1)
+        OR (kind = 'feed' AND id = ?)
+        OR (kind = 'folder' AND id IN (
+          SELECT folder_id FROM reader_article_folders WHERE generation_id = ? AND article_id = ?
+        ))
+        OR (kind = 'scope' AND id = 'uncategorized' AND NOT EXISTS (
+          SELECT 1 FROM reader_subscription_folders
+          WHERE generation_id = ? AND subscription_id = ?
+        ))
+      )
+    `).run(
+      unreadDelta,
+      generationId,
+      current.is_starred,
+      current.feed_id,
+      generationId,
+      mutation.articleId,
+      generationId,
+      current.feed_id,
+    );
+    this.database.prepare(`
+      UPDATE reader_navigation_activity
+      SET total_count = MAX(0, total_count + ?), unread_count = MAX(0, unread_count + ?)
+      WHERE generation_id = ? AND kind = 'scope' AND id = 'inbox'
+    `).run(unreadDelta, unreadDelta, generationId);
+  }
+
+  private articleDeltaPayload(generationId: string, articleId: string) {
+    const row = this.database.prepare(`
+      SELECT a.id, a.feed_id, a.title, a.author, a.source, a.canonical_url, a.published_at,
+        a.reading_minutes, a.summary, s.is_read, s.is_starred
+      FROM reader_articles a
+      JOIN reader_article_state s ON s.generation_id = a.generation_id AND s.article_id = a.id
+      WHERE a.generation_id = ? AND a.id = ?
+    `).get(generationId, articleId) as {
+      id: string; feed_id: string; title: string; author: string | null; source: string; canonical_url: string;
+      published_at: string; reading_minutes: number; summary: string; is_read: number; is_starred: number;
+    } | undefined;
+    if (!row) return null;
+    const folderIds = (this.database.prepare(`
+      SELECT folder_id FROM reader_article_folders WHERE generation_id = ? AND article_id = ? ORDER BY folder_id
+    `).all(generationId, articleId) as Array<{ folder_id: string }>).map(({ folder_id }) => folder_id);
+    return {
+      id: row.id,
+      feedId: row.feed_id,
+      folderIds,
+      title: row.title,
+      author: row.author,
+      source: row.source,
+      canonicalUrl: row.canonical_url,
+      publishedAt: row.published_at,
+      readingMinutes: row.reading_minutes,
+      summary: row.summary,
+      read: Boolean(row.is_read),
+      starred: Boolean(row.is_starred),
+    };
+  }
+
+  private recordPublishedChanges(
+    accountKey: string,
+    previousGenerationId: string | null,
+    generationId: string,
+    versions: { collection: number; state: number; body: number },
+    createdAt: string,
+  ) {
+    if (!previousGenerationId) return;
+    const insert = this.database.prepare(`
+      INSERT INTO reader_change_log
+        (account_key, article_id, metadata_changed, state_changed, body_changed, deleted,
+          collection_version, state_version, body_version, payload_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    const changed = this.database.prepare(`
+      SELECT n.id,
+        CASE WHEN o.id IS NULL OR n.feed_id IS NOT o.feed_id OR n.title IS NOT o.title
+          OR n.author IS NOT o.author OR n.source IS NOT o.source OR n.canonical_url IS NOT o.canonical_url
+          OR n.published_at IS NOT o.published_at OR n.reading_minutes IS NOT o.reading_minutes
+          OR n.summary IS NOT o.summary
+          OR EXISTS (
+            SELECT folder_id FROM reader_article_folders WHERE generation_id = n.generation_id AND article_id = n.id
+            EXCEPT SELECT folder_id FROM reader_article_folders WHERE generation_id = o.generation_id AND article_id = o.id
+          )
+          OR EXISTS (
+            SELECT folder_id FROM reader_article_folders WHERE generation_id = o.generation_id AND article_id = o.id
+            EXCEPT SELECT folder_id FROM reader_article_folders WHERE generation_id = n.generation_id AND article_id = n.id
+          ) THEN 1 ELSE 0 END AS metadata_changed,
+        CASE WHEN o.id IS NULL OR ns.is_read IS NOT os.is_read OR ns.is_starred IS NOT os.is_starred
+          THEN 1 ELSE 0 END AS state_changed,
+        CASE WHEN o.id IS NULL OR nb.content_html IS NOT ob.content_html THEN 1 ELSE 0 END AS body_changed
+      FROM reader_articles n
+      LEFT JOIN reader_articles o ON o.generation_id = ? AND o.id = n.id
+      JOIN reader_article_state ns ON ns.generation_id = n.generation_id AND ns.article_id = n.id
+      LEFT JOIN reader_article_state os ON os.generation_id = o.generation_id AND os.article_id = o.id
+      JOIN reader_article_bodies nb ON nb.generation_id = n.generation_id AND nb.article_id = n.id
+      LEFT JOIN reader_article_bodies ob ON ob.generation_id = o.generation_id AND ob.article_id = o.id
+      WHERE n.generation_id = ? AND (
+        o.id IS NULL OR n.feed_id IS NOT o.feed_id OR n.title IS NOT o.title OR n.author IS NOT o.author
+        OR n.source IS NOT o.source OR n.canonical_url IS NOT o.canonical_url
+        OR n.published_at IS NOT o.published_at OR n.reading_minutes IS NOT o.reading_minutes
+        OR n.summary IS NOT o.summary OR ns.is_read IS NOT os.is_read OR ns.is_starred IS NOT os.is_starred
+        OR nb.content_html IS NOT ob.content_html
+        OR EXISTS (
+          SELECT folder_id FROM reader_article_folders WHERE generation_id = n.generation_id AND article_id = n.id
+          EXCEPT SELECT folder_id FROM reader_article_folders WHERE generation_id = o.generation_id AND article_id = o.id
+        )
+        OR EXISTS (
+          SELECT folder_id FROM reader_article_folders WHERE generation_id = o.generation_id AND article_id = o.id
+          EXCEPT SELECT folder_id FROM reader_article_folders WHERE generation_id = n.generation_id AND article_id = n.id
+        )
+      )
+      ORDER BY n.id
+    `).all(previousGenerationId, generationId) as Array<{
+      id: string; metadata_changed: number; state_changed: number; body_changed: number;
+    }>;
+    for (const row of changed) {
+      insert.run(
+        accountKey,
+        row.id,
+        row.metadata_changed,
+        row.state_changed,
+        row.body_changed,
+        0,
+        versions.collection,
+        versions.state,
+        versions.body,
+        JSON.stringify(this.articleDeltaPayload(generationId, row.id)),
+        createdAt,
+      );
+    }
+    const removed = this.database.prepare(`
+      SELECT old.id FROM reader_articles old
+      LEFT JOIN reader_articles current ON current.generation_id = ? AND current.id = old.id
+      WHERE old.generation_id = ? AND current.id IS NULL ORDER BY old.id
+    `).all(generationId, previousGenerationId) as Array<{ id: string }>;
+    for (const row of removed) {
+      insert.run(
+        accountKey,
+        row.id,
+        0,
+        0,
+        0,
+        1,
+        versions.collection,
+        versions.state,
+        versions.body,
+        null,
+        createdAt,
+      );
+    }
+    insert.run(
+      accountKey,
+      null,
+      1,
+      0,
+      0,
+      0,
+      versions.collection,
+      versions.state,
+      versions.body,
+      JSON.stringify({ navigationChanged: true }),
+      createdAt,
+    );
+  }
+
+  private recordIncrementalChanges(
+    accountKey: string,
+    generationId: string,
+    changes: Array<{
+      articleId: string;
+      metadata: boolean;
+      state: boolean;
+      body: boolean;
+    }>,
+    versions: { collection: number; state: number; body: number },
+    createdAt: string,
+  ) {
+    const insert = this.database.prepare(`
+      INSERT INTO reader_change_log
+        (account_key, article_id, metadata_changed, state_changed, body_changed, deleted,
+          collection_version, state_version, body_version, payload_json, created_at)
+      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+    `);
+    for (const change of changes) {
+      insert.run(
+        accountKey,
+        change.articleId,
+        Number(change.metadata),
+        Number(change.state),
+        Number(change.body),
+        versions.collection,
+        versions.state,
+        versions.body,
+        JSON.stringify(this.articleDeltaPayload(generationId, change.articleId)),
+        createdAt,
+      );
+    }
+    if (changes.some((change) => change.metadata || change.state)) {
+      this.database.prepare(`
+        INSERT INTO reader_change_log
+          (account_key, article_id, metadata_changed, collection_version, state_version, body_version, payload_json, created_at)
+        VALUES (?, NULL, 1, ?, ?, ?, ?, ?)
+      `).run(
+        accountKey,
+        versions.collection,
+        versions.state,
+        versions.body,
+        JSON.stringify({ navigationChanged: true }),
+        createdAt,
+      );
+    }
   }
 
   knownArticleIds(identity: ReaderCacheIdentity, candidateIds?: string[]) {
@@ -489,8 +778,12 @@ export class ReaderCache {
       const generationId = this.currentGenerationId(run.accountKey);
       if (!generationId) throw new Error('Reader cache has no committed generation');
       let inserted = 0;
+      const insertedIds: string[] = [];
       for (const article of articles) {
-        if (this.insertNewArticle(generationId, article)) inserted += 1;
+        if (this.insertNewArticle(generationId, article)) {
+          inserted += 1;
+          insertedIds.push(article.id);
+        }
       }
       const timestamp = this.timestamp();
       this.database.prepare(`
@@ -503,7 +796,17 @@ export class ReaderCache {
           last_routine_at = excluded.last_routine_at
       `).run(run.accountKey, cutoffSeconds, subscriptionFingerprint, timestamp);
       this.database.prepare(`UPDATE reader_sync_runs SET items_staged = ? WHERE id = ?`).run(inserted, run.runId);
-      if (inserted > 0) this.advanceVersions(run.accountKey, generationId, { collection: true, state: true, body: true });
+      if (inserted > 0) {
+        this.rebuildNavigationActivity(generationId);
+        const versions = this.advanceVersions(run.accountKey, generationId, { collection: true, state: true, body: true });
+        this.recordIncrementalChanges(
+          run.accountKey,
+          generationId,
+          insertedIds.map((articleId) => ({ articleId, metadata: true, state: true, body: true })),
+          versions,
+          timestamp,
+        );
+      }
       return { inserted };
     });
     return apply.immediate();
@@ -517,37 +820,44 @@ export class ReaderCache {
       let inserted = 0;
       let changed = 0;
       let unchanged = 0;
+      const incrementalChanges: Array<{ articleId: string; metadata: boolean; state: boolean; body: boolean }> = [];
       for (const article of articles) {
         const existing = this.database.prepare(`
-          SELECT a.title, a.author, a.source, a.canonical_url, a.published_at, a.reading_minutes, a.summary, b.content_html
+          SELECT a.feed_id, a.title, a.author, a.source, a.canonical_url, a.published_at,
+            a.reading_minutes, a.summary, b.content_html
           FROM reader_articles a JOIN reader_article_bodies b
             ON b.generation_id = a.generation_id AND b.article_id = a.id
           WHERE a.generation_id = ? AND a.id = ?
         `).get(generationId, article.id) as {
-          title: string; author: string | null; source: string; canonical_url: string; published_at: string;
+          feed_id: string; title: string; author: string | null; source: string; canonical_url: string; published_at: string;
           reading_minutes: number; summary: string; content_html: string;
         } | undefined;
         if (!existing) {
-          if (this.insertNewArticle(generationId, article)) inserted += 1;
+          if (this.insertNewArticle(generationId, article)) {
+            inserted += 1;
+            incrementalChanges.push({ articleId: article.id, metadata: true, state: true, body: true });
+          }
           continue;
         }
-        const differs = existing.title !== article.title
+        const metadataChanged = existing.feed_id !== article.feedId
+          || existing.title !== article.title
           || existing.author !== article.author
           || existing.source !== article.source
           || existing.canonical_url !== article.canonicalUrl
           || existing.published_at !== article.publishedAt
           || existing.reading_minutes !== article.readingMinutes
-          || existing.summary !== article.summary
-          || existing.content_html !== article.contentHtml;
-        if (!differs) {
+          || existing.summary !== article.summary;
+        const bodyChanged = existing.content_html !== article.contentHtml;
+        if (!metadataChanged && !bodyChanged) {
           unchanged += 1;
           continue;
         }
         this.database.prepare(`
-          UPDATE reader_articles SET title = ?, author = ?, source = ?, canonical_url = ?,
+          UPDATE reader_articles SET feed_id = ?, title = ?, author = ?, source = ?, canonical_url = ?,
             published_at = ?, reading_minutes = ?, summary = ?
           WHERE generation_id = ? AND id = ?
         `).run(
+          article.feedId,
           article.title,
           article.author,
           article.source,
@@ -561,6 +871,15 @@ export class ReaderCache {
         this.database.prepare(`
           UPDATE reader_article_bodies SET content_html = ? WHERE generation_id = ? AND article_id = ?
         `).run(article.contentHtml, generationId, article.id);
+        if (metadataChanged) {
+          this.database.prepare(`DELETE FROM reader_article_folders WHERE generation_id = ? AND article_id = ?`)
+            .run(generationId, article.id);
+          const insertFolder = this.database.prepare(`
+            INSERT OR IGNORE INTO reader_article_folders (generation_id, article_id, folder_id) VALUES (?, ?, ?)
+          `);
+          for (const folderId of new Set(article.folderIds)) insertFolder.run(generationId, article.id, folderId);
+        }
+        incrementalChanges.push({ articleId: article.id, metadata: metadataChanged, state: false, body: bodyChanged });
         changed += 1;
       }
       const timestamp = this.timestamp();
@@ -572,11 +891,16 @@ export class ReaderCache {
           last_body_at = excluded.last_body_at
       `).run(run.accountKey, cutoffSeconds, timestamp);
       if (inserted > 0 || changed > 0) {
-        this.advanceVersions(run.accountKey, generationId, {
-          collection: inserted > 0 || changed > 0,
-          state: inserted > 0,
-          body: true,
+        const metadataChanged = incrementalChanges.some((change) => change.metadata);
+        const stateChanged = incrementalChanges.some((change) => change.state);
+        const bodyChanged = incrementalChanges.some((change) => change.body);
+        if (metadataChanged || stateChanged) this.rebuildNavigationActivity(generationId);
+        const versions = this.advanceVersions(run.accountKey, generationId, {
+          collection: metadataChanged,
+          state: stateChanged,
+          body: bodyChanged,
         });
+        this.recordIncrementalChanges(run.accountKey, generationId, incrementalChanges, versions, timestamp);
       }
       return { candidates: articles.length, inserted, changed, unchanged };
     });
@@ -592,6 +916,7 @@ export class ReaderCache {
         SELECT article_id, is_read, is_starred FROM reader_article_state WHERE generation_id = ?
       `).all(generationId) as Array<{ article_id: string; is_read: number; is_starred: number }>;
       let changed = 0;
+      const changedIds: string[] = [];
       const update = this.database.prepare(`
         UPDATE reader_article_state SET is_read = ?, is_starred = ? WHERE generation_id = ? AND article_id = ?
       `);
@@ -602,6 +927,7 @@ export class ReaderCache {
         if (Boolean(row.is_read) === read && Boolean(row.is_starred) === starred) continue;
         update.run(Number(read), Number(starred), generationId, row.article_id);
         changed += 1;
+        changedIds.push(row.article_id);
       }
       const overrides = this.database.prepare(`
         SELECT article_id, operation, value FROM reader_state_overrides WHERE account_key = ?
@@ -634,7 +960,17 @@ export class ReaderCache {
         INSERT INTO reader_incremental_checkpoints (account_key, last_state_at) VALUES (?, ?)
         ON CONFLICT(account_key) DO UPDATE SET last_state_at = excluded.last_state_at
       `).run(run.accountKey, timestamp);
-      if (changed > 0) this.advanceVersions(run.accountKey, generationId, { collection: false, state: true, body: false });
+      if (changed > 0) {
+        this.rebuildNavigationActivity(generationId);
+        const versions = this.advanceVersions(run.accountKey, generationId, { collection: false, state: true, body: false });
+        this.recordIncrementalChanges(
+          run.accountKey,
+          generationId,
+          [...new Set(changedIds)].map((articleId) => ({ articleId, metadata: false, state: true, body: false })),
+          versions,
+          timestamp,
+        );
+      }
       return { scanned: rows.length, changed };
     });
     return apply.immediate();
@@ -662,6 +998,7 @@ export class ReaderCache {
     this.database.prepare(`
       UPDATE reader_sync_checkpoints SET collection_version = ?, state_version = ?, body_version = ? WHERE account_key = ?
     `).run(versions.collection, versions.state, versions.body, accountKey);
+    return versions;
   }
 
   completeIncrementalRun(run: ReaderCacheIncrementalRun, options: { releaseLease?: boolean } = {}) {
@@ -715,15 +1052,27 @@ export class ReaderCache {
         }
       }
 
+      this.rebuildNavigationActivity(importRun.generationId);
+
       const account = this.database.prepare(`
-        SELECT collection_version, state_version, body_version FROM reader_accounts WHERE account_key = ?
-      `).get(importRun.accountKey) as { collection_version: number; state_version: number; body_version: number };
+        SELECT current_generation_id, collection_version, state_version, body_version
+        FROM reader_accounts WHERE account_key = ?
+      `).get(importRun.accountKey) as {
+        current_generation_id: string | null; collection_version: number; state_version: number; body_version: number;
+      };
       const versions = {
         collection: account.collection_version + 1,
         state: account.state_version + 1,
         body: account.body_version + 1,
       };
       const committedAt = this.timestamp();
+      this.recordPublishedChanges(
+        importRun.accountKey,
+        account.current_generation_id,
+        importRun.generationId,
+        versions,
+        committedAt,
+      );
       this.database.prepare(`
         UPDATE reader_cache_generations SET
           status = 'committed', committed_at = ?, collection_version = ?, state_version = ?, body_version = ?
@@ -811,8 +1160,11 @@ export class ReaderCache {
     const apply = this.database.transaction(() => {
       this.ensureAccount(identity);
       const account = this.database.prepare(`
-        SELECT current_generation_id, state_version FROM reader_accounts WHERE account_key = ?
-      `).get(identity.accountKey) as { current_generation_id: string | null; state_version: number };
+        SELECT current_generation_id, collection_version, state_version, body_version
+        FROM reader_accounts WHERE account_key = ?
+      `).get(identity.accountKey) as {
+        current_generation_id: string | null; collection_version: number; state_version: number; body_version: number;
+      };
       let revision = account.state_version;
       const confirmedAt = this.timestamp();
       const insertOverride = this.database.prepare(`
@@ -824,7 +1176,22 @@ export class ReaderCache {
       for (const mutation of mutations) {
         revision += 1;
         insertOverride.run(identity.accountKey, mutation.articleId, mutation.operation, Number(mutation.value), revision, confirmedAt);
-        if (account.current_generation_id) this.applyState(account.current_generation_id, mutation);
+        if (account.current_generation_id) {
+          this.applyState(account.current_generation_id, mutation);
+          this.database.prepare(`
+            INSERT INTO reader_change_log
+              (account_key, article_id, state_changed, collection_version, state_version, body_version, payload_json, created_at)
+            VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+          `).run(
+            identity.accountKey,
+            mutation.articleId,
+            account.collection_version,
+            revision,
+            account.body_version,
+            JSON.stringify(this.articleDeltaPayload(account.current_generation_id, mutation.articleId)),
+            confirmedAt,
+          );
+        }
       }
       this.database.prepare(`UPDATE reader_accounts SET state_version = ? WHERE account_key = ?`)
         .run(revision, identity.accountKey);

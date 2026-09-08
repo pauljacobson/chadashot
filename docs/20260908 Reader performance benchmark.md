@@ -131,3 +131,7 @@ Compression retains the decoded legacy snapshot contract and negotiates Brotli, 
 | Brotli quality 4 | 357,165 | 99.32% | 59.54 ms | 89,393 µs user + 3,399 µs system |
 
 These unusually large ratios reflect deliberately repetitive synthetic bodies. They demonstrate correct encoding and measurement, not a forecast for real feeds. An aborted Brotli request logged 49,152 partial bytes while leaving completed encoded bytes unknown, confirming that disconnects do not become false transfer totals. Compression reduces browser transfer but does not remove the 50-request, 61-second live provider traversal measured above.
+
+## Issue #7 paginated API result
+
+The cache-backed API now passes the structural server gates. `npm run benchmark:reader-api` traversed all 20,000 unique IDs in 100-row keyset pages, produced a 43,630-byte decoded first page, and measured the SQLite first-page query at 10.44 ms p95 after one warmup and 20 runs. The standard 2 KiB and large 64 KiB body query components measured 0.03 ms and 1.11 ms p95 respectively. See [the paginated reader API contract](./20260908%20Paginated%20reader%20API.md) for generation resets, search, change replay, and remaining end-to-end evidence.

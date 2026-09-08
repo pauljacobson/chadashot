@@ -265,6 +265,66 @@ const migrations: Migration[] = [
       );
     `,
   },
+  {
+    version: 6,
+    name: 'paginated_reader_api',
+    sql: `
+      CREATE VIRTUAL TABLE reader_article_search USING fts5(
+        generation_id UNINDEXED,
+        article_id UNINDEXED,
+        title,
+        source,
+        author,
+        summary,
+        tokenize = 'trigram'
+      );
+
+      INSERT INTO reader_article_search (generation_id, article_id, title, source, author, summary)
+      SELECT generation_id, id, title, source, COALESCE(author, ''), summary FROM reader_articles;
+
+      CREATE TRIGGER reader_articles_search_insert AFTER INSERT ON reader_articles BEGIN
+        INSERT INTO reader_article_search (generation_id, article_id, title, source, author, summary)
+        VALUES (new.generation_id, new.id, new.title, new.source, COALESCE(new.author, ''), new.summary);
+      END;
+
+      CREATE TRIGGER reader_articles_search_delete AFTER DELETE ON reader_articles BEGIN
+        DELETE FROM reader_article_search WHERE generation_id = old.generation_id AND article_id = old.id;
+      END;
+
+      CREATE TRIGGER reader_articles_search_update AFTER UPDATE OF title, source, author, summary ON reader_articles BEGIN
+        DELETE FROM reader_article_search WHERE generation_id = old.generation_id AND article_id = old.id;
+        INSERT INTO reader_article_search (generation_id, article_id, title, source, author, summary)
+        VALUES (new.generation_id, new.id, new.title, new.source, COALESCE(new.author, ''), new.summary);
+      END;
+
+      CREATE TABLE reader_navigation_activity (
+        generation_id TEXT NOT NULL REFERENCES reader_cache_generations(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL CHECK (kind IN ('scope', 'folder', 'feed')),
+        id TEXT NOT NULL,
+        total_count INTEGER NOT NULL,
+        unread_count INTEGER NOT NULL,
+        latest_published_at TEXT,
+        PRIMARY KEY(generation_id, kind, id)
+      ) WITHOUT ROWID;
+
+      CREATE TABLE reader_change_log (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        account_key TEXT NOT NULL REFERENCES reader_accounts(account_key) ON DELETE CASCADE,
+        article_id TEXT,
+        metadata_changed INTEGER NOT NULL DEFAULT 0 CHECK (metadata_changed IN (0, 1)),
+        state_changed INTEGER NOT NULL DEFAULT 0 CHECK (state_changed IN (0, 1)),
+        body_changed INTEGER NOT NULL DEFAULT 0 CHECK (body_changed IN (0, 1)),
+        deleted INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
+        collection_version INTEGER NOT NULL,
+        state_version INTEGER NOT NULL,
+        body_version INTEGER NOT NULL,
+        payload_json TEXT,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX reader_change_log_account_sequence ON reader_change_log(account_key, sequence);
+    `,
+  },
 ];
 
 function ensureMigrationTable(database: AppDatabase) {
