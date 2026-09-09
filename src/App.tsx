@@ -1725,6 +1725,12 @@ export function App() {
     setContentView('list');
   }
 
+  function goHome() {
+    reader.setQuery('');
+    chooseFilter({ kind: 'inbox' });
+    setFeedsOpen(false);
+  }
+
   function openFeeds(trigger: HTMLButtonElement) {
     activeFeedsTriggerRef.current = trigger;
     setFeedsOpen(true);
@@ -1791,7 +1797,10 @@ export function App() {
               }
             }}
           >☰</button>
-          <span className="app-mark">ח</span><span>Chadashot</span>
+          <button className="brand-home" aria-label="Go to Inbox" onClick={goHome}>
+            <span className="app-mark" aria-hidden="true">ח</span>
+            <span>Chadashot</span>
+          </button>
         </div>
         <label className="search-box" htmlFor="article-search"><span aria-hidden="true">⌕</span><input id="article-search" type="search" value={reader.query} onChange={(event) => { reader.setQuery(event.target.value); setContentView('list'); }} placeholder="Search your reading" /></label>
         <div className="topbar-actions">
