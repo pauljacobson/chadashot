@@ -41,6 +41,7 @@ import { finishArticleOpen, finishSelectionUpdate, markMilestone, recordMountedR
 type ContentView = 'list' | 'reader';
 const FEED_SORT_ORDER_KEY = 'chadashot.feedSortOrder';
 const ACCENT_COLOR_KEY = 'chadashot.accentColor';
+const READING_FONT_KEY = 'chadashot.readingFont';
 const PANEL_WIDTHS_KEY = 'chadashot.panelWidths';
 const DEFAULT_PANEL_WIDTHS = { sidebar: 220 };
 const MIN_SIDEBAR_WIDTH = 160;
@@ -60,6 +61,11 @@ const ACCENT_COLORS = [
   { id: 'rose', label: 'Rose' },
 ] as const;
 type AccentColor = (typeof ACCENT_COLORS)[number]['id'];
+const READING_FONTS = [
+  { id: 'serif', label: 'Serif', description: 'A book-like face for longer reading.' },
+  { id: 'sans-serif', label: 'Sans-serif', description: 'A clean face with simpler letterforms.' },
+] as const;
+type ReadingFont = (typeof READING_FONTS)[number]['id'];
 
 function clamp(value: number, minimum: number, maximum: number) {
   return Math.min(Math.max(value, minimum), maximum);
@@ -163,6 +169,15 @@ function savedAccentColor(): AccentColor {
     return ACCENT_COLORS.some((color) => color.id === saved) ? saved as AccentColor : 'green';
   } catch {
     return 'green';
+  }
+}
+
+function savedReadingFont(): ReadingFont {
+  try {
+    const saved = localStorage.getItem(READING_FONT_KEY);
+    return READING_FONTS.some((font) => font.id === saved) ? saved as ReadingFont : 'serif';
+  } catch {
+    return 'serif';
   }
 }
 
@@ -880,11 +895,13 @@ export function ReaderPane({
   );
 }
 
-function PreferencesPanel({ sortOrder, accentColor, onSortOrderChange, onAccentColorChange, onClose }: {
+function PreferencesPanel({ sortOrder, accentColor, readingFont, onSortOrderChange, onAccentColorChange, onReadingFontChange, onClose }: {
   sortOrder: FeedSortOrder;
   accentColor: AccentColor;
+  readingFont: ReadingFont;
   onSortOrderChange: (sortOrder: FeedSortOrder) => void;
   onAccentColorChange: (accentColor: AccentColor) => void;
+  onReadingFontChange: (readingFont: ReadingFont) => void;
   onClose: () => void;
 }) {
   return (
@@ -908,6 +925,19 @@ function PreferencesPanel({ sortOrder, accentColor, onSortOrderChange, onAccentC
         <div className="setting-section">
           <h2>Appearance</h2>
           <div className="setting-line"><div><strong>Follow system</strong><span>The interface changes with the device light or dark theme.</span></div><span className="setting-state">Automatic</span></div>
+          <fieldset className="preference-options reading-font-options">
+            <legend>Article font</legend>
+            {READING_FONTS.map((font) => (
+              <label className="preference-option reading-font-option" key={font.id}>
+                <input type="radio" name="reading-font" value={font.id} checked={readingFont === font.id} onChange={() => onReadingFontChange(font.id)} />
+                <span>
+                  <strong>{font.label}</strong>
+                  <small>{font.description}</small>
+                  <span className="reading-font-preview" data-font={font.id}>אבג · Reading should feel calm and clear.</span>
+                </span>
+              </label>
+            ))}
+          </fieldset>
           <fieldset className="accent-options">
             <legend>Accent color</legend>
             <div className="accent-grid">
@@ -1443,6 +1473,7 @@ export function App() {
   const [unreadFeedsOnly, setUnreadFeedsOnly] = useState(false);
   const [feedSortOrder, setFeedSortOrder] = useState<FeedSortOrder>(savedFeedSortOrder);
   const [accentColor, setAccentColor] = useState<AccentColor>(savedAccentColor);
+  const [readingFont, setReadingFont] = useState<ReadingFont>(savedReadingFont);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [contentView, setContentView] = useState<ContentView>('list');
   const [notice, setNotice] = useState('');
@@ -1503,6 +1534,15 @@ export function App() {
       // The preference remains available for this session if storage is unavailable.
     }
   }, [accentColor]);
+
+  useEffect(() => {
+    document.documentElement.dataset.readingFont = readingFont;
+    try {
+      localStorage.setItem(READING_FONT_KEY, readingFont);
+    } catch {
+      // The preference remains available for this session if storage is unavailable.
+    }
+  }, [readingFont]);
 
   useEffect(() => {
     const workspace = workspaceRef.current;
@@ -1728,7 +1768,7 @@ export function App() {
         onUnreadOnlyChange={setUnreadFeedsOnly}
         onClose={() => setFeedsOpen(false)}
       />}
-      {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} accentColor={accentColor} onSortOrderChange={setFeedSortOrder} onAccentColorChange={setAccentColor} onClose={() => setPreferencesOpen(false)} />}
+      {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} accentColor={accentColor} readingFont={readingFont} onSortOrderChange={setFeedSortOrder} onAccentColorChange={setAccentColor} onReadingFontChange={setReadingFont} onClose={() => setPreferencesOpen(false)} />}
       {subscribeOpen && <SubscribePanel
         onClose={() => setSubscribeOpen(false)}
         onSubscribed={async (feedUrl) => {
