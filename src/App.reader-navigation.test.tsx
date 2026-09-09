@@ -63,9 +63,9 @@ describe('article navigation toolbar', () => {
     render(
       <ReaderPane
         article={article}
-        position={1}
-        total={1}
-        hasPrevious={false}
+        position={5}
+        total={5}
+        hasPrevious
         hasNext={false}
         onClose={vi.fn()}
         onPrevious={vi.fn()}
@@ -78,7 +78,43 @@ describe('article navigation toolbar', () => {
       />,
     );
 
-    expect(screen.getByRole('button', { name: 'Previous article' })).toBeDisabled();
+    expect(screen.getByText('5 of 5')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Previous article' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Next article' })).toBeDisabled();
+  });
+
+  it('exposes clear action names and states with a five-digit article total', () => {
+    render(
+      <ReaderPane
+        article={article}
+        position={1}
+        total={21_692}
+        hasPrevious={false}
+        hasNext
+        onClose={vi.fn()}
+        onPrevious={vi.fn()}
+        onNext={vi.fn()}
+        onToggleStar={vi.fn()}
+        onToggleRead={vi.fn()}
+        onNotify={vi.fn()}
+        onHighlight={vi.fn()}
+        onSaveToReader={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText('1 of 21692')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Previous article' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Next article' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Mark unread' })).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Star article' })).toHaveAttribute('aria-pressed', 'false');
+
+    const save = screen.getByRole('button', { name: 'Save to Reader' });
+    const original = screen.getByRole('link', { name: 'Open original' });
+    expect(save).toHaveAttribute('aria-label', 'Save to Reader');
+    expect(original).toHaveAttribute('aria-label', 'Open original');
+    expect(within(save).getByText('Save to Reader')).toHaveClass('button-label');
+    expect(within(original).getByText('Open original')).toHaveClass('button-label');
+    expect(within(save).getByText('＋')).toBeInTheDocument();
+    expect(within(original).getByText('↗')).toBeInTheDocument();
   });
 });

@@ -868,16 +868,16 @@ export function ReaderPane({
         </div>
         <span className="toolbar-spacer"></span>
         <div className="reader-actions">
-          <button aria-label={article.read ? 'Mark unread' : 'Mark read'} onClick={() => onToggleRead(article)}>
+          <button aria-label={article.read ? 'Mark unread' : 'Mark read'} aria-pressed={article.read} onClick={() => onToggleRead(article)}>
             <span aria-hidden="true">{article.read ? '○' : '●'}</span><span className="button-label">{article.read ? 'Unread' : 'Read'}</span>
           </button>
           <button aria-label={article.starred ? 'Remove star' : 'Star article'} aria-pressed={article.starred} onClick={() => onToggleStar(article)}>
             <span aria-hidden="true">{article.starred ? '★' : '☆'}</span><span className="button-label">{article.starred ? 'Starred' : 'Star'}</span>
           </button>
-          <button className="save-reader-action" disabled={savingAction !== null} onClick={() => void saveDocument()}>
-            <span aria-hidden="true">↗</span><span className="button-label">{savingAction === 'document' ? 'Saving…' : 'Save to Reader'}</span>
+          <button className="save-reader-action" aria-label={savingAction === 'document' ? 'Saving to Reader' : 'Save to Reader'} disabled={savingAction !== null} onClick={() => void saveDocument()}>
+            <span aria-hidden="true">＋</span><span className="button-label">{savingAction === 'document' ? 'Saving…' : 'Save to Reader'}</span>
           </button>
-          <a className="toolbar-link" href={article.canonicalUrl} target="_blank" rel="noreferrer">
+          <a className="toolbar-link" aria-label="Open original" href={article.canonicalUrl} target="_blank" rel="noreferrer">
             <span aria-hidden="true">↗</span><span className="button-label">Open original</span>
           </a>
         </div>
