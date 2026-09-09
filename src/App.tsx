@@ -42,6 +42,7 @@ type ContentView = 'list' | 'reader';
 const FEED_SORT_ORDER_KEY = 'chadashot.feedSortOrder';
 const ACCENT_COLOR_KEY = 'chadashot.accentColor';
 const READING_FONT_KEY = 'chadashot.readingFont';
+const ARTICLE_TEXT_SIZE_KEY = 'chadashot.articleTextSize';
 const PANEL_WIDTHS_KEY = 'chadashot.panelWidths';
 const DEFAULT_PANEL_WIDTHS = { sidebar: 220 };
 const MIN_SIDEBAR_WIDTH = 160;
@@ -66,6 +67,8 @@ const READING_FONTS = [
   { id: 'sans-serif', label: 'Sans-serif', description: 'A clean face with simpler letterforms.' },
 ] as const;
 type ReadingFont = (typeof READING_FONTS)[number]['id'];
+const ARTICLE_TEXT_SIZES = [80, 90, 100, 110, 120, 130, 140, 150] as const;
+type ArticleTextSize = (typeof ARTICLE_TEXT_SIZES)[number];
 
 function clamp(value: number, minimum: number, maximum: number) {
   return Math.min(Math.max(value, minimum), maximum);
@@ -179,6 +182,19 @@ function savedReadingFont(): ReadingFont {
   } catch {
     return 'serif';
   }
+}
+
+function savedArticleTextSize(): ArticleTextSize {
+  try {
+    const saved = Number(localStorage.getItem(ARTICLE_TEXT_SIZE_KEY));
+    return ARTICLE_TEXT_SIZES.includes(saved as ArticleTextSize) ? saved as ArticleTextSize : 100;
+  } catch {
+    return 100;
+  }
+}
+
+function scaledTextSize(base: number, percentage: ArticleTextSize, unit: 'px' | 'vw' = 'px') {
+  return `${Number(((base * percentage) / 100).toFixed(2))}${unit}`;
 }
 
 const filterLabels: Record<ReaderFilter['kind'], string> = {
@@ -895,13 +911,15 @@ export function ReaderPane({
   );
 }
 
-function PreferencesPanel({ sortOrder, accentColor, readingFont, onSortOrderChange, onAccentColorChange, onReadingFontChange, onClose }: {
+function PreferencesPanel({ sortOrder, accentColor, readingFont, articleTextSize, onSortOrderChange, onAccentColorChange, onReadingFontChange, onArticleTextSizeChange, onClose }: {
   sortOrder: FeedSortOrder;
   accentColor: AccentColor;
   readingFont: ReadingFont;
+  articleTextSize: ArticleTextSize;
   onSortOrderChange: (sortOrder: FeedSortOrder) => void;
   onAccentColorChange: (accentColor: AccentColor) => void;
   onReadingFontChange: (readingFont: ReadingFont) => void;
+  onArticleTextSizeChange: (articleTextSize: ArticleTextSize) => void;
   onClose: () => void;
 }) {
   return (
@@ -938,6 +956,33 @@ function PreferencesPanel({ sortOrder, accentColor, readingFont, onSortOrderChan
               </label>
             ))}
           </fieldset>
+          <div className="article-text-size-control">
+            <div className="article-text-size-heading">
+              <label htmlFor="article-text-size"><strong>Article text size</strong><small id="article-text-size-description">Adjust article titles and body text without changing the interface.</small></label>
+              <output htmlFor="article-text-size" aria-live="polite">{articleTextSize}%</output>
+            </div>
+            <input
+              id="article-text-size"
+              type="range"
+              min="80"
+              max="150"
+              step="10"
+              value={articleTextSize}
+              aria-label="Article text size"
+              aria-describedby="article-text-size-description"
+              aria-valuetext={`${articleTextSize}%`}
+              onChange={(event) => {
+                const nextSize = Number(event.currentTarget.value) as ArticleTextSize;
+                if (ARTICLE_TEXT_SIZES.includes(nextSize)) onArticleTextSizeChange(nextSize);
+              }}
+            />
+            <div className="article-text-size-actions">
+              <span>80%</span>
+              <button type="button" aria-label="Reset article text size" disabled={articleTextSize === 100} onClick={() => onArticleTextSizeChange(100)}>Reset to 100%</button>
+              <span>150%</span>
+            </div>
+            <div className="article-text-size-preview">אבג · Article text changes immediately at this size.</div>
+          </div>
           <fieldset className="accent-options">
             <legend>Accent color</legend>
             <div className="accent-grid">
@@ -1474,6 +1519,7 @@ export function App() {
   const [feedSortOrder, setFeedSortOrder] = useState<FeedSortOrder>(savedFeedSortOrder);
   const [accentColor, setAccentColor] = useState<AccentColor>(savedAccentColor);
   const [readingFont, setReadingFont] = useState<ReadingFont>(savedReadingFont);
+  const [articleTextSize, setArticleTextSize] = useState<ArticleTextSize>(savedArticleTextSize);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [contentView, setContentView] = useState<ContentView>('list');
   const [notice, setNotice] = useState('');
@@ -1543,6 +1589,23 @@ export function App() {
       // The preference remains available for this session if storage is unavailable.
     }
   }, [readingFont]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.dataset.articleTextSize = String(articleTextSize);
+    root.style.setProperty('--article-body-size', scaledTextSize(18, articleTextSize));
+    root.style.setProperty('--article-mobile-body-size', scaledTextSize(17, articleTextSize));
+    root.style.setProperty('--article-title-min-size', scaledTextSize(30, articleTextSize));
+    root.style.setProperty('--article-title-fluid-size', scaledTextSize(3.4, articleTextSize, 'vw'));
+    root.style.setProperty('--article-title-max-size', scaledTextSize(44, articleTextSize));
+    root.style.setProperty('--article-mobile-title-size', scaledTextSize(32, articleTextSize));
+    root.style.setProperty('--article-heading-two-size', scaledTextSize(20, articleTextSize));
+    try {
+      localStorage.setItem(ARTICLE_TEXT_SIZE_KEY, String(articleTextSize));
+    } catch {
+      // The preference remains available for this session if storage is unavailable.
+    }
+  }, [articleTextSize]);
 
   useEffect(() => {
     const workspace = workspaceRef.current;
@@ -1768,7 +1831,7 @@ export function App() {
         onUnreadOnlyChange={setUnreadFeedsOnly}
         onClose={() => setFeedsOpen(false)}
       />}
-      {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} accentColor={accentColor} readingFont={readingFont} onSortOrderChange={setFeedSortOrder} onAccentColorChange={setAccentColor} onReadingFontChange={setReadingFont} onClose={() => setPreferencesOpen(false)} />}
+      {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} accentColor={accentColor} readingFont={readingFont} articleTextSize={articleTextSize} onSortOrderChange={setFeedSortOrder} onAccentColorChange={setAccentColor} onReadingFontChange={setReadingFont} onArticleTextSizeChange={setArticleTextSize} onClose={() => setPreferencesOpen(false)} />}
       {subscribeOpen && <SubscribePanel
         onClose={() => setSubscribeOpen(false)}
         onSubscribed={async (feedUrl) => {
