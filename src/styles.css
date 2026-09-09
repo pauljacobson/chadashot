@@ -258,6 +258,23 @@ textarea:focus-visible {
 }
 .brand-sidebar-toggle:hover { background: var(--surface-muted); color: var(--text); }
 
+.brand-home {
+  min-width: 0;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  letter-spacing: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
 .app-mark {
   width: 28px;
   height: 28px;
@@ -1243,7 +1260,7 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   .app-shell { height: 100dvh; min-height: 0; }
   .topbar { min-height: 56px; gap: 4px; padding: 0 8px; }
   .wordmark { width: auto; gap: 6px; }
-  .wordmark > span:last-child { font-size: 16px; }
+  .brand-home > span:last-child { font-size: 16px; }
   .search-box { display: none; }
   .topbar-status { display: none !important; }
   .topbar-actions { gap: 2px; }

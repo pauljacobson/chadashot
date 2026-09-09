@@ -2,6 +2,7 @@
 import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Article } from '../shared/reader';
 import { App } from './App';
 
 vi.mock('./api', async (importOriginal) => ({
@@ -59,10 +60,35 @@ const reader = vi.hoisted(() => ({
   totalArticles: 0,
 }));
 
+const article: Article = {
+  id: 'article-1',
+  feedId: 'feed-1',
+  folderIds: [],
+  title: 'A selected article',
+  author: 'Paul',
+  source: 'Example',
+  canonicalUrl: 'https://example.test/article-1',
+  publishedAt: '2026-09-09T00:00:00.000Z',
+  readingMinutes: 2,
+  summary: 'A summary.',
+  contentHtml: '<p>Article content.</p>',
+  read: false,
+  starred: false,
+};
+
 vi.mock('./useReader', () => ({ useReader: () => reader }));
 
 class TestResizeObserver implements ResizeObserver {
-  observe() {}
+  constructor(private readonly callback: ResizeObserverCallback) {}
+  observe(target: Element) {
+    this.callback([{
+      target,
+      contentRect: { width: 600, height: 600 } as DOMRectReadOnly,
+      borderBoxSize: [{ blockSize: 600, inlineSize: 600 }],
+      contentBoxSize: [],
+      devicePixelContentBoxSize: [],
+    } as unknown as ResizeObserverEntry], this);
+  }
   unobserve() {}
   disconnect() {}
 }
@@ -95,7 +121,20 @@ function createResponsiveNavigation(initiallyCompact: boolean) {
 describe('responsive feeds navigation', () => {
   beforeEach(() => {
     reader.setFilter.mockClear();
+    reader.setQuery.mockClear();
+    reader.setReadFilter.mockClear();
+    reader.selectArticle.mockClear();
+    reader.toggleRead.mockClear();
+    Reflect.set(reader, 'articles', []);
+    Reflect.set(reader, 'filter', { kind: 'inbox' });
+    Reflect.set(reader, 'query', '');
+    Reflect.set(reader, 'readFilter', 'all');
+    Reflect.set(reader, 'selectedArticle', null);
     Reflect.set(reader, 'snapshot', null);
+    Reflect.set(reader, 'totalArticles', 0);
+    reader.setFilter.mockImplementation((filter) => Reflect.set(reader, 'filter', filter));
+    reader.setQuery.mockImplementation((query) => Reflect.set(reader, 'query', query));
+    reader.setReadFilter.mockImplementation((filter) => Reflect.set(reader, 'readFilter', filter));
     vi.stubGlobal('ResizeObserver', TestResizeObserver);
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
       callback(0);
@@ -211,5 +250,48 @@ describe('responsive feeds navigation', () => {
 
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Feeds' })).not.toBeInTheDocument());
     expect(screen.getByRole('button', { name: 'Expand navigation sidebar' })).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('uses one accessible brand control to clear search and return to the Inbox list', async () => {
+    createResponsiveNavigation(false);
+    Reflect.set(reader, 'articles', [article]);
+    Reflect.set(reader, 'filter', { kind: 'starred' });
+    Reflect.set(reader, 'query', 'selected');
+    Reflect.set(reader, 'selectedArticle', article);
+    Reflect.set(reader, 'totalArticles', 1);
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: /A selected article/ }));
+    expect(screen.getByRole('heading', { name: 'A selected article' })).toBeInTheDocument();
+
+    const home = screen.getByRole('button', { name: 'Go to Inbox' });
+    expect(home).toHaveTextContent('ח');
+    expect(home).toHaveTextContent('Chadashot');
+    expect(home.tagName).toBe('BUTTON');
+    fireEvent.click(home);
+
+    expect(reader.setReadFilter).toHaveBeenLastCalledWith('all');
+    expect(reader.setQuery).toHaveBeenLastCalledWith('');
+    expect(reader.setFilter).toHaveBeenLastCalledWith({ kind: 'inbox' });
+    expect(screen.getByRole('list', { name: 'Inbox results' })).toBeInTheDocument();
+    expect(screen.getByRole('searchbox')).toHaveValue('');
+    expect(reader.toggleRead).not.toHaveBeenCalled();
+
+    fireEvent.click(home);
+    expect(reader.setFilter).toHaveBeenCalledTimes(2);
+  });
+
+  it('dismisses the floating feeds panel when the brand home control is activated', async () => {
+    createResponsiveNavigation(true);
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Open feeds panel' }));
+    expect(await screen.findByRole('dialog', { name: 'Feeds' })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Go to Inbox' }));
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Feeds' })).not.toBeInTheDocument());
+    expect(reader.setQuery).toHaveBeenLastCalledWith('');
+    expect(reader.setFilter).toHaveBeenLastCalledWith({ kind: 'inbox' });
   });
 });
