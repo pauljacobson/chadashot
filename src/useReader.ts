@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Article, ArticleMutation, ReaderArticleBody, ReaderArticleMetadata, ReaderMarkReadJobStatus, ReaderSnapshot } from '../shared/reader';
+import type { Article, ArticleMutation, ReaderArticleBody, ReaderArticleMetadata, ReaderMarkReadJobStatus, ReaderSnapshot, ReaderVersions } from '../shared/reader';
 import {
   ApiError,
   createMarkReadJob,
@@ -36,7 +36,8 @@ import {
   type CachedReaderState,
 } from './offlineStore';
 import { describeOutboxFailure, outboxWorker, type OutboxRunResult } from './outboxWorker';
-import { applyReadStates } from './readerState';
+import { applyArticleMutation, applyReadStates } from './readerState';
+import { readerBoundariesMatch, readerCountStatus, readerScopeTotal } from './readerCounts';
 import {
   markMilestone,
   measureOutboxReplay,
@@ -58,6 +59,8 @@ export type ArticleReadFilter = 'all' | 'unread' | 'read';
 type RemoteArticlePage = {
   queryKey: string;
   accountKey: string;
+  generation: string;
+  versions: ReaderVersions;
   articles: ReaderArticleMetadata[];
   nextCursor: string | null;
   total: number;
@@ -91,16 +94,6 @@ export function markReadCoverageError(coverage: CachedReaderState['coverage'] | 
     return `Only ${coverage.loaded.toLocaleString()} of ${coverage.total.toLocaleString()} articles are cached. Finish synchronization before marking this view read.`;
   }
   return null;
-}
-
-function applyMutation(snapshot: ReaderSnapshot, mutation: ArticleMutation) {
-  if (mutation.operation === 'read') return applyReadStates(snapshot, new Map([[mutation.articleId, mutation.value]]));
-  return {
-    ...snapshot,
-    articles: snapshot.articles.map((article) => article.id === mutation.articleId
-      ? { ...article, starred: mutation.value }
-      : article),
-  };
 }
 
 export async function loadReaderSnapshotWithoutWaitingForReplay(
@@ -240,7 +233,7 @@ export function useReader(userId?: string) {
     do {
       const page = await getReaderChanges(nextToken, signal);
       if (page.accountKey !== accountKey) throw new Error('Reader account changed during synchronization');
-      await applyReaderChanges(page);
+      await applyReaderChanges(page, false);
       nextToken = page.token;
       if (!page.hasMore) return;
     } while (!signal.aborted);
@@ -349,7 +342,8 @@ export function useReader(userId?: string) {
         throw new Error(serverStatus.error ?? 'Reader cache is still initializing');
       }
       const navigation = await getReaderNavigation(controller.signal);
-      await saveReaderNavigation(userId!, navigation);
+      // Publish only after the matching article boundary is durable.
+      await saveReaderNavigation(userId!, navigation, false);
       void (async () => {
         let jobReplayFailed = false;
         try {
@@ -480,7 +474,9 @@ export function useReader(userId?: string) {
     readFilter,
     debouncedQuery,
     remoteRevision,
-  ]), [activeAccountKey, debouncedQuery, filter, readFilter, remoteRevision]);
+    snapshot?.cacheStatus?.versions.collection ?? null,
+    snapshot?.cacheStatus?.versions.state ?? null,
+  ]), [activeAccountKey, debouncedQuery, filter, readFilter, remoteRevision, snapshot?.cacheStatus?.versions.collection, snapshot?.cacheStatus?.versions.state]);
 
   useEffect(() => {
     if (readerPath !== 'paginated' || !enabled || !activeAccountKey || activeAccountKey.startsWith('legacy:') || !navigator.onLine) {
@@ -492,14 +488,32 @@ export function useReader(userId?: string) {
     remoteRequest.current?.abort();
     remoteRequest.current = controller;
     const requestKey = remoteQueryKey;
+    const expectedGeneration = currentCache.current?.generation;
+    const expectedVersions = snapshot?.cacheStatus?.versions;
     void getReaderArticles({
       ...readerArticleQuery(filter, readFilter, debouncedQuery),
       signal: controller.signal,
-    }).then((page) => {
+    }).then(async (page) => {
       if (controller.signal.aborted || page.accountKey !== activeAccountKey) return;
+      if (expectedGeneration && page.generation !== expectedGeneration) {
+        void synchronize('visibility');
+        return;
+      }
+      if (
+        expectedVersions
+        && !readerBoundariesMatch(expectedGeneration, expectedVersions, page.generation, page.versions)
+      ) {
+        const navigation = await getReaderNavigation(controller.signal);
+        if (controller.signal.aborted || navigation.accountKey !== activeAccountKey) return;
+        await saveReaderNavigation(userId!, navigation);
+        await publishCachedReader();
+        return;
+      }
       const next = {
         queryKey: requestKey,
         accountKey: page.accountKey,
+        generation: page.generation,
+        versions: page.versions,
         articles: page.articles,
         nextCursor: page.nextCursor,
         total: page.total,
@@ -513,7 +527,7 @@ export function useReader(userId?: string) {
       }
     });
     return () => controller.abort();
-  }, [activeAccountKey, debouncedQuery, enabled, filter, readFilter, readerPath, remoteQueryKey]);
+  }, [activeAccountKey, debouncedQuery, enabled, filter, publishCachedReader, readFilter, readerPath, remoteQueryKey, snapshot?.cacheStatus?.versions, synchronize, userId]);
 
   useEffect(() => {
     if (readerPath !== 'paginated' || !enabled || !activeAccountKey || activeAccountKey.startsWith('legacy:') || !navigator.onLine || debouncedQuery !== query.trim()) {
@@ -605,6 +619,13 @@ export function useReader(userId?: string) {
     .filter((article) => article.contentHtml)
     .map((article) => [article.id, article.contentHtml])), [snapshot]);
   const remoteIsCurrent = remotePage?.queryKey === remoteQueryKey && debouncedQuery === query.trim();
+  const navigationTotal = readerScopeTotal(snapshot, filter, readFilter, query);
+  const totalArticles = navigationTotal ?? (remoteIsCurrent && remotePage ? remotePage.total : localArticles.length);
+  const totalCountStatus = readerCountStatus(
+    navigationTotal !== null || Boolean(remoteIsCurrent && remotePage),
+    coverage,
+    status === 'current',
+  );
   const articles = useMemo(() => remoteIsCurrent && remotePage
     ? remotePage.articles.map((article) => ({
       ...article,
@@ -674,7 +695,7 @@ export function useReader(userId?: string) {
     const mutationAccountKey = currentCache.current?.accountKey.startsWith('legacy:')
       ? undefined
       : currentCache.current?.accountKey;
-    setSnapshot((current) => current ? applyMutation(current, mutation) : current);
+    setSnapshot((current) => current ? applyArticleMutation(current, article, mutation) : current);
     const changedArticle = { ...article, [operation === 'read' ? 'read' : 'starred']: value };
     if (!retainsArticleInStateFilter(changedArticle, filter, readFilter)) {
       const index = articleIndexById.get(article.id) ?? -1;
@@ -696,7 +717,7 @@ export function useReader(userId?: string) {
     try {
       await enqueueArticleMutation(mutation, mutationAccountKey);
       queued = true;
-      if (currentCache.current) await applyLocalMutationToReaderCache(currentCache.current.accountKey, mutation);
+      if (currentCache.current) await applyLocalMutationToReaderCache(currentCache.current.accountKey, mutation, article);
       await refreshPendingCount();
       if (!navigator.onLine) {
         setStatus('offline');
@@ -712,7 +733,7 @@ export function useReader(userId?: string) {
         return;
       }
       await refreshPendingCount().catch(() => undefined);
-      setSnapshot((current) => current ? applyMutation(current, { ...mutation, value: !value }) : current);
+      setSnapshot((current) => current ? applyArticleMutation(current, changedArticle, { ...mutation, value: !value }) : current);
       setError(mutationError instanceof Error ? mutationError.message : 'Could not save change');
       setStatus(navigator.onLine ? 'error' : 'offline');
     }
@@ -804,7 +825,8 @@ export function useReader(userId?: string) {
     error,
     pendingMutations,
     coverage,
-    totalArticles: remoteIsCurrent && remotePage ? remotePage.total : articles.length,
+    totalArticles,
+    totalCountStatus,
     bulkUnreadCount: remoteUnreadCount ?? localUnreadCount,
     markReadJobs,
     searchCoverage: query.trim() && (!remoteIsCurrent || !navigator.onLine) ? 'cached-partial' as const : 'complete' as const,

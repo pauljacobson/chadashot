@@ -6,6 +6,8 @@ import {
   acknowledgeQueuedArticleMutations,
   acknowledgeMarkReadJob,
   acknowledgedArticleMutations,
+  applyLocalMutationToReaderCache,
+  applyLocalReadStateToReaderCache,
   applyReaderChanges,
   applyQueuedArticleMutations,
   clearOfflineData,
@@ -72,6 +74,7 @@ function page(options: {
   nextCursor?: string | null;
   total?: number;
   bodyVersion?: number;
+  folderIds?: string[];
 } = {}): ReaderArticlePage {
   const accountKey = options.accountKey ?? 'account-1';
   const generation = options.generation ?? 'generation-1';
@@ -83,7 +86,7 @@ function page(options: {
     total: options.total ?? 1,
     nextCursor: options.nextCursor ?? null,
     articles: [{
-      id: articleId, feedId: 'feed-1', folderIds: [], title: articleId, author: null, source: 'Feed',
+      id: articleId, feedId: 'feed-1', folderIds: options.folderIds ?? [], title: articleId, author: null, source: 'Feed',
       canonicalUrl: `https://example.test/${articleId}`, publishedAt: '2026-09-08T00:00:00.000Z',
       readingMinutes: 1, summary: articleId, read: false, starred: false,
     }],
@@ -218,12 +221,60 @@ describe('offline reader storage', () => {
     expect(interrupted?.snapshot.articles).toEqual([
       expect.objectContaining({ id: 'article-1', contentHtml: '' }),
     ]);
+    expect(interrupted?.snapshot.counts).toEqual({ all: 2, inbox: 2, starred: 0, uncategorized: 2 });
     expect(interrupted?.coverage).toMatchObject({ complete: false, nextCursor: 'page-2', changeToken: 'baseline-token' });
 
     await saveReaderArticlePage('user-1', page({ articleId: 'article-2', total: 2 }));
     const complete = await loadCachedReader('user-1');
     expect(complete?.snapshot.articles.map(({ id }) => id).sort()).toEqual(['article-1', 'article-2']);
     expect(complete?.coverage).toMatchObject({ loaded: 2, total: 2, complete: true, nextCursor: null });
+  });
+
+  it('persists full navigation counts through individual and bulk local state changes', async () => {
+    const scopedNavigation = navigation();
+    scopedNavigation.counts.uncategorized = 0;
+    scopedNavigation.folders = [{
+      id: 'folder-1', title: 'Folder', unreadCount: 2, totalCount: 2, latestPublishedAt: '2026-09-08T00:00:00.000Z',
+    }];
+    scopedNavigation.feeds[0]!.folderIds = ['folder-1'];
+    await saveReaderNavigation('user-1', scopedNavigation);
+    await saveReaderArticlePage('user-1', page({ articleId: 'article-1', folderIds: ['folder-1'], nextCursor: 'page-2', total: 2 }), true);
+    await saveReaderArticlePage('user-1', page({ articleId: 'article-2', folderIds: ['folder-1'], total: 2 }));
+
+    await applyLocalMutationToReaderCache('account-1', { articleId: 'article-1', operation: 'read', value: true });
+    await applyLocalMutationToReaderCache('account-1', { articleId: 'article-1', operation: 'starred', value: true });
+    let cached = await loadCachedReader('user-1');
+    expect(cached?.snapshot.counts).toMatchObject({ inbox: 1, starred: 1 });
+    expect(cached?.snapshot.subscriptions[0].unreadCount).toBe(1);
+    expect(cached?.snapshot.folders[0].unreadCount).toBe(1);
+
+    await applyLocalMutationToReaderCache('account-1', { articleId: 'article-1', operation: 'read', value: false });
+    await applyLocalReadStateToReaderCache('account-1', ['article-1', 'article-2'], true);
+    cached = await loadCachedReader('user-1');
+    expect(cached?.snapshot.counts).toMatchObject({ inbox: 0, starred: 1 });
+    expect(cached?.snapshot.subscriptions[0].unreadCount).toBe(0);
+    expect(cached?.snapshot.folders[0].unreadCount).toBe(0);
+  });
+
+  it('persists a mutation for an article reached before its metadata backfill', async () => {
+    await saveReaderNavigation('user-1', navigation());
+    await saveReaderArticlePage('user-1', page({ articleId: 'article-1', nextCursor: 'page-2', total: 2 }), true);
+    const remoteArticle = {
+      ...page({ articleId: 'article-2', total: 2 }).articles[0]!,
+      contentHtml: '',
+    };
+
+    await applyLocalMutationToReaderCache(
+      'account-1',
+      { articleId: 'article-2', operation: 'read', value: true },
+      remoteArticle,
+    );
+
+    const cached = await loadCachedReader('user-1');
+    expect(cached?.snapshot.counts?.inbox).toBe(1);
+    expect(cached?.snapshot.articles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'article-2', read: true }),
+    ]));
   });
 
   it('loads bodies on demand and rejects a cached body from an older body version', async () => {

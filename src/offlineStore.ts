@@ -1,5 +1,6 @@
 import { openDB, type DBSchema } from 'idb';
 import type {
+  Article,
   ArticleMutation,
   ReaderArticleBody,
   ReaderArticleMetadata,
@@ -11,7 +12,7 @@ import type {
   ReaderVersions,
   SessionState,
 } from '../shared/reader';
-import { applyReadStates } from './readerState';
+import { applyReadStates, applyStarredStates } from './readerState';
 
 const DATABASE_NAME = 'chadashot';
 const DATABASE_VERSION = 4;
@@ -286,12 +287,7 @@ export function applyQueuedArticleMutations(snapshot: ReaderSnapshot, mutations:
     .filter((mutation) => mutation.operation === 'starred')
     .map((mutation) => [mutation.articleId, mutation.value]));
   const withReadStates = applyReadStates(snapshot, readStates);
-  return {
-    ...withReadStates,
-    articles: withReadStates.articles.map((article) => starredStates.has(article.id)
-      ? { ...article, starred: starredStates.get(article.id)! }
-      : article),
-  };
+  return applyStarredStates(withReadStates, starredStates);
 }
 
 function snapshotMatchesMutation(snapshot: ReaderSnapshot, mutation: ArticleMutation) {
@@ -424,6 +420,7 @@ function snapshotFromNormalized(
   navigation: ReaderNavigation,
   metadata: ReaderArticleRecord[],
   bodies: ReaderBodyRecord[],
+  includeCompleteCounts = true,
 ): ReaderSnapshot {
   const bodyByArticle = new Map(bodies
     .filter((body) => body.bodyVersion === navigation.versions.body)
@@ -431,6 +428,7 @@ function snapshotFromNormalized(
   return {
     generatedAt: new Date().toISOString(),
     source: 'google-reader',
+    ...(includeCompleteCounts ? { counts: navigation.counts } : {}),
     folders: navigation.folders.map((folder) => ({
       id: folder.id,
       title: folder.title,
@@ -554,15 +552,19 @@ export async function loadCachedReader(userId: string): Promise<CachedReaderStat
     accountKey: account.accountKey,
     generation: account.generation,
     versions: account.versions,
-    snapshot: snapshotFromNormalized(navigationRecord.navigation, articles, bodies),
+    snapshot: snapshotFromNormalized(
+      navigationRecord.navigation,
+      articles,
+      bodies,
+      !account.accountKey.startsWith('legacy:'),
+    ),
     coverage: sync,
   };
 }
 
-export async function saveReaderNavigation(userId: string, navigation: ReaderNavigation) {
+export async function saveReaderNavigation(userId: string, navigation: ReaderNavigation, notify = true) {
   const db = await database();
   const timestamp = new Date().toISOString();
-  const account = await db.get('readerAccounts', navigation.accountKey);
   const transaction = db.transaction(['readerAccounts', 'readerNavigation'], 'readwrite', { durability: 'strict' });
   const userAccounts = await transaction.objectStore('readerAccounts').index('by-user').getAll(userId);
   for (const prior of userAccounts) {
@@ -580,7 +582,7 @@ export async function saveReaderNavigation(userId: string, navigation: ReaderNav
   });
   await transaction.objectStore('readerNavigation').put({ accountKey: navigation.accountKey, navigation, savedAt: timestamp });
   await transaction.done;
-  if (account?.generation !== navigation.generation) notifyReaderUpdate(navigation.accountKey);
+  if (notify) notifyReaderUpdate(navigation.accountKey);
 }
 
 export async function saveReaderArticlePage(userId: string, page: ReaderArticlePage, replaceExisting = false) {
@@ -663,7 +665,7 @@ function isArticleMetadata(value: unknown): value is ReaderArticleMetadata {
     && typeof candidate.starred === 'boolean';
 }
 
-export async function applyReaderChanges(page: ReaderChangesPage) {
+export async function applyReaderChanges(page: ReaderChangesPage, notify = true) {
   const db = await database();
   const timestamp = new Date().toISOString();
   const transaction = db.transaction(['readerAccounts', 'readerArticles', 'readerBodies', 'readerSync'], 'readwrite', { durability: 'strict' });
@@ -699,7 +701,7 @@ export async function applyReaderChanges(page: ReaderChangesPage) {
     });
   }
   await transaction.done;
-  notifyReaderUpdate(page.accountKey);
+  if (notify) notifyReaderUpdate(page.accountKey);
 }
 
 export async function saveReaderBody(body: ReaderArticleBody) {
@@ -729,28 +731,122 @@ export async function loadReaderBody(accountKey: string, articleId: string, body
   return body;
 }
 
-export async function applyLocalMutationToReaderCache(accountKey: string, mutation: ArticleMutation) {
+function applyMutationToNavigation(
+  navigation: ReaderNavigation,
+  article: ReaderArticleMetadata,
+  mutation: ArticleMutation,
+) {
+  if (mutation.operation === 'starred') {
+    if (article.starred === mutation.value) return navigation;
+    const delta = mutation.value ? 1 : -1;
+    return {
+      ...navigation,
+      counts: {
+        ...navigation.counts,
+        starred: Math.max(0, navigation.counts.starred + delta),
+      },
+    };
+  }
+
+  if (article.read === mutation.value) return navigation;
+  const unreadDelta = mutation.value ? -1 : 1;
+  return {
+    ...navigation,
+    counts: {
+      ...navigation.counts,
+      inbox: Math.max(0, navigation.counts.inbox + unreadDelta),
+    },
+    feeds: navigation.feeds.map((feed) => feed.id === article.feedId ? {
+      ...feed,
+      unreadCount: Math.max(0, feed.unreadCount + unreadDelta),
+    } : feed),
+    folders: navigation.folders.map((folder) => article.folderIds.includes(folder.id) ? {
+      ...folder,
+      unreadCount: Math.max(0, folder.unreadCount + unreadDelta),
+    } : folder),
+  };
+}
+
+export async function applyLocalMutationToReaderCache(
+  accountKey: string,
+  mutation: ArticleMutation,
+  fallbackArticle?: Article,
+) {
   const db = await database();
   const key = readerRecordKey(accountKey, mutation.articleId);
-  const article = await db.get('readerArticles', key);
-  if (!article) return;
-  await db.put('readerArticles', {
+  const transaction = db.transaction(['readerArticles', 'readerNavigation', 'readerSync'], 'readwrite', { durability: 'strict' });
+  const storedArticle = await transaction.objectStore('readerArticles').get(key);
+  const article = storedArticle ?? (fallbackArticle ? {
+    id: fallbackArticle.id,
+    feedId: fallbackArticle.feedId,
+    folderIds: fallbackArticle.folderIds,
+    title: fallbackArticle.title,
+    author: fallbackArticle.author,
+    source: fallbackArticle.source,
+    canonicalUrl: fallbackArticle.canonicalUrl,
+    publishedAt: fallbackArticle.publishedAt,
+    readingMinutes: fallbackArticle.readingMinutes,
+    summary: fallbackArticle.summary,
+    read: fallbackArticle.read,
+    starred: fallbackArticle.starred,
+    key,
+    accountKey,
+    savedAt: new Date().toISOString(),
+  } : undefined);
+  if (!article) {
+    await transaction.done;
+    return;
+  }
+  const savedAt = new Date().toISOString();
+  await transaction.objectStore('readerArticles').put({
     ...article,
     [mutation.operation === 'read' ? 'read' : 'starred']: mutation.value,
-    savedAt: new Date().toISOString(),
+    savedAt,
   });
+  if (!storedArticle) {
+    const sync = await transaction.objectStore('readerSync').get(accountKey);
+    if (sync) {
+      await transaction.objectStore('readerSync').put({
+        ...sync,
+        loaded: Math.min(sync.total, sync.loaded + 1),
+        savedAt,
+      });
+    }
+  }
+  const navigationRecord = await transaction.objectStore('readerNavigation').get(accountKey);
+  if (navigationRecord) {
+    await transaction.objectStore('readerNavigation').put({
+      ...navigationRecord,
+      navigation: applyMutationToNavigation(navigationRecord.navigation, article, mutation),
+      savedAt,
+    });
+  }
+  await transaction.done;
   notifyReaderUpdate(accountKey);
 }
 
 export async function applyLocalReadStateToReaderCache(accountKey: string, articleIds: string[], read: boolean) {
   if (articleIds.length === 0) return;
   const db = await database();
-  const transaction = db.transaction('readerArticles', 'readwrite', { durability: 'strict' });
+  const transaction = db.transaction(['readerArticles', 'readerNavigation'], 'readwrite', { durability: 'strict' });
   const savedAt = new Date().toISOString();
+  const navigationRecord = await transaction.objectStore('readerNavigation').get(accountKey);
+  let navigation = navigationRecord?.navigation;
   for (const articleId of articleIds) {
     const key = readerRecordKey(accountKey, articleId);
-    const article = await transaction.store.get(key);
-    if (article && article.read !== read) await transaction.store.put({ ...article, read, savedAt });
+    const article = await transaction.objectStore('readerArticles').get(key);
+    if (!article || article.read === read) continue;
+    await transaction.objectStore('readerArticles').put({ ...article, read, savedAt });
+    if (navigation) {
+      navigation = applyMutationToNavigation(navigation, article, {
+        articleId,
+        operation: 'read',
+        value: read,
+      });
+    }
+  }
+  if (navigationRecord && navigation) {
+    await transaction.objectStore('readerNavigation').put({ ...navigationRecord, navigation, savedAt });
   }
   await transaction.done;
   notifyReaderUpdate(accountKey);
