@@ -10,7 +10,7 @@ describe('database migrations', () => {
     runMigrations(database);
     runMigrations(database);
 
-    expect(currentSchemaVersion(database)).toEqual({ version: 8 });
+    expect(currentSchemaVersion(database)).toEqual({ version: 9 });
     expect(database.prepare('SELECT version, name FROM schema_migrations ORDER BY version').all()).toEqual([
       { version: 1, name: 'initial_schema' },
       { version: 2, name: 'passkey_management_and_recovery' },
@@ -20,6 +20,7 @@ describe('database migrations', () => {
       { version: 6, name: 'paginated_reader_api' },
       { version: 7, name: 'repair_reader_navigation_activity' },
       { version: 8, name: 'durable_mark_read_jobs' },
+      { version: 9, name: 'reader_highlight_delivery' },
     ]);
     expect(database.prepare("PRAGMA table_info('passkey_credentials')").all()).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'name' })]),
@@ -28,6 +29,8 @@ describe('database migrations', () => {
       expect.arrayContaining([
         expect.objectContaining({ name: 'start_offset' }),
         expect.objectContaining({ name: 'end_offset' }),
+        expect.objectContaining({ name: 'reader_document_id' }),
+        expect.objectContaining({ name: 'idempotency_key' }),
       ]),
     );
     expect(database.prepare("PRAGMA table_info('reader_cache_generations')").all()).toEqual(
@@ -72,7 +75,7 @@ describe('database migrations', () => {
     runMigrations(database);
 
     expect(database.prepare('SELECT id, display_name FROM users').get()).toEqual({ id: 'user-1', display_name: 'Paul' });
-    expect(currentSchemaVersion(database)).toEqual({ version: 8 });
+    expect(currentSchemaVersion(database)).toEqual({ version: 9 });
   });
 
   it('repairs a database where the paginated migration was recorded without its navigation table', () => {
@@ -88,6 +91,6 @@ describe('database migrations', () => {
 
     expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reader_navigation_activity'").get())
       .toEqual({ name: 'reader_navigation_activity' });
-    expect(currentSchemaVersion(database)).toEqual({ version: 8 });
+    expect(currentSchemaVersion(database)).toEqual({ version: 9 });
   });
 });

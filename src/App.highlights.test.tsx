@@ -5,11 +5,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Article, SavedHighlight } from '../shared/reader';
 import { ReaderPane } from './App';
 
-const apiMocks = vi.hoisted(() => ({ getArticleHighlights: vi.fn() }));
+const apiMocks = vi.hoisted(() => ({ getArticleHighlights: vi.fn(), retryReadwiseHighlight: vi.fn() }));
 
 vi.mock('./api', async (importOriginal) => ({
   ...await importOriginal<typeof import('./api')>(),
   getArticleHighlights: apiMocks.getArticleHighlights,
+  retryReadwiseHighlight: apiMocks.retryReadwiseHighlight,
 }));
 
 const article: Article = {
@@ -38,6 +39,7 @@ function savedHighlight(text: string, startOffset: number, id = 'highlight-1'): 
     endOffset: startOffset + text.length,
     readwiseStatus: 'saved',
     readwiseId: 'readwise-1',
+    readerDocumentId: 'reader-document-1',
     readwiseError: null,
     createdAt: '2026-09-07T00:00:00.000Z',
   };
@@ -97,6 +99,7 @@ function selectText(startNode: Node, startOffset: number, endNode: Node, endOffs
 beforeEach(() => {
   apiMocks.getArticleHighlights.mockReset();
   apiMocks.getArticleHighlights.mockResolvedValue({ highlights: [] });
+  apiMocks.retryReadwiseHighlight.mockReset();
 });
 
 afterEach(() => {
@@ -203,5 +206,30 @@ describe('article highlights', () => {
     const { onNotify } = renderReaderPane();
 
     await waitFor(() => expect(onNotify).toHaveBeenCalledWith('Could not load saved highlights: Server unavailable'));
+  });
+
+  it('offers a retry for failed Reader delivery and updates the existing mark after confirmation', async () => {
+    const failed = {
+      ...savedHighlight('selected words', 'The '.length),
+      readwiseStatus: 'failed' as const,
+      readwiseId: null,
+      readerDocumentId: 'reader-document-1',
+      readwiseError: 'Readwise Reader timed out; try again',
+    };
+    const confirmed = { ...failed, readwiseStatus: 'saved' as const, readwiseId: 'reader-highlight-1', readwiseError: null };
+    apiMocks.getArticleHighlights.mockResolvedValue({ highlights: [failed] });
+    apiMocks.retryReadwiseHighlight.mockResolvedValue({ highlight: confirmed, synchronized: true, reused: true });
+    const { container, onNotify } = renderReaderPane();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(apiMocks.retryReadwiseHighlight).toHaveBeenCalledWith(failed.id, expect.objectContaining({
+      articleId: article.id,
+      contentHtml: article.contentHtml,
+      articleText: 'The selected words should remain highlighted after saving.',
+    })));
+    expect(onNotify).toHaveBeenCalledWith('Highlight confirmed in Readwise Reader');
+    expect(container.querySelector('mark[data-sync-status="saved"]')).toHaveTextContent('selected words');
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
   });
 });

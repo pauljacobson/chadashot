@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
@@ -13,7 +14,7 @@ import { newId, nowIso, openDatabase, type AppDatabase } from './database.js';
 import { fixtureSnapshot } from './fixtures.js';
 import { BIRCHFEED_API_URL, GoogleReaderClient } from './integrations/google-reader.js';
 import { deleteIntegration, hasIntegration, loadBirchfeed, loadBirchfeedWithGeneration, loadReadwise, saveIntegration } from './integrations/settings.js';
-import { ReadwiseClient } from './integrations/readwise.js';
+import { ReaderHighlightDeliveryError, ReadwiseClient, type ReaderToolSessionFactory } from './integrations/readwise.js';
 import { AppLogger, readAppLogs, readLogExport, requestLogger } from './logging.js';
 import { ReaderApi, ReaderCacheUnavailableError, ReaderCursorError } from './reader-api.js';
 import { MarkReadJobConflictError, MarkReadJobNotFoundError, MarkReadJobService } from './mark-read-jobs.js';
@@ -74,6 +75,8 @@ const highlightSchema = z.object({
   title: z.string().min(1).max(1000),
   author: z.string().max(500).nullable(),
   canonicalUrl: z.url(),
+  contentHtml: z.string().min(1).max(2_000_000),
+  articleText: z.string().min(1).max(2_000_000),
   startOffset: z.number().int().min(0),
   endOffset: z.number().int().positive(),
 }).refine((value) => value.endOffset > value.startOffset, {
@@ -81,12 +84,16 @@ const highlightSchema = z.object({
   path: ['endOffset'],
 });
 const highlightQuerySchema = z.object({ articleId: z.string().min(1) });
+const highlightRetryParamsSchema = z.object({ highlightId: z.string().uuid() });
+const highlightRetrySchema = highlightSchema.omit({ text: true, note: true, startOffset: true, endOffset: true });
 const readerDocumentSchema = z.object({
   articleId: z.string().min(1),
   title: z.string().min(1).max(1000),
   author: z.string().max(500).nullable(),
   canonicalUrl: z.url(),
+  contentHtml: z.string().min(1).max(2_000_000).optional(),
 });
+type HighlightDeliveryBody = z.infer<typeof highlightSchema>;
 const subscriptionSchema = z.object({ feedUrl: z.url() });
 const logQuerySchema = z.object({
   level: z.enum(['debug', 'info', 'warn', 'error']).optional(),
@@ -145,12 +152,14 @@ function normalizeFeedUrl(value: string) {
 export function createApp(config: AppConfig, dependencies: {
   database?: AppDatabase;
   fetchImplementation?: typeof fetch;
+  readerToolSessionFactory?: ReaderToolSessionFactory;
   logger?: AppLogger;
   fixtureSnapshot?: ReaderSnapshot;
 } = {}) {
   const app = express();
   const database = dependencies.database ?? openDatabase(config.dataDir);
   const fetchImplementation = dependencies.fetchImplementation ?? fetch;
+  const readerToolSessionFactory = dependencies.readerToolSessionFactory;
   const logger = dependencies.logger ?? new AppLogger(config);
   const developmentFixture = dependencies.fixtureSnapshot ?? fixtureSnapshot;
   const snapshotComparison = new ReaderSnapshotComparison();
@@ -518,6 +527,7 @@ export function createApp(config: AppConfig, dependencies: {
     end_offset: number;
     readwise_status: SavedHighlight['readwiseStatus'];
     readwise_id: string | null;
+    reader_document_id: string | null;
     readwise_error: string | null;
     created_at: string;
   }): SavedHighlight {
@@ -530,6 +540,7 @@ export function createApp(config: AppConfig, dependencies: {
       endOffset: row.end_offset,
       readwiseStatus: row.readwise_status,
       readwiseId: row.readwise_id,
+      readerDocumentId: row.reader_document_id,
       readwiseError: row.readwise_error,
       createdAt: row.created_at,
     };
@@ -537,7 +548,7 @@ export function createApp(config: AppConfig, dependencies: {
 
   function readHighlight(id: string) {
     return highlightFromRow(database.prepare(`
-      SELECT id, article_id, text, note, start_offset, end_offset, readwise_status, readwise_id, readwise_error, created_at
+      SELECT id, article_id, text, note, start_offset, end_offset, readwise_status, readwise_id, reader_document_id, readwise_error, created_at
       FROM highlights WHERE id = ?
     `).get(id) as Parameters<typeof highlightFromRow>[0]);
   }
@@ -545,7 +556,7 @@ export function createApp(config: AppConfig, dependencies: {
   app.get('/api/highlights', requireUser, (req, res) => {
     const { articleId } = highlightQuerySchema.parse(req.query);
     const rows = database.prepare(`
-      SELECT id, article_id, text, note, start_offset, end_offset, readwise_status, readwise_id, readwise_error, created_at
+      SELECT id, article_id, text, note, start_offset, end_offset, readwise_status, readwise_id, reader_document_id, readwise_error, created_at
       FROM highlights
       WHERE article_id = ? AND start_offset IS NOT NULL AND end_offset IS NOT NULL
       ORDER BY start_offset ASC, created_at ASC
@@ -554,40 +565,146 @@ export function createApp(config: AppConfig, dependencies: {
     res.json({ highlights: rows.map(highlightFromRow) });
   });
 
-  app.post('/api/readwise/highlights', requireUser, async (req, res) => {
-    const body = highlightSchema.parse(req.body);
-    const credentials = loadReadwise(database, config);
-    const id = newId();
-    const timestamp = nowIso();
-    database.prepare(`
-      INSERT INTO highlights (id, article_id, text, note, readwise_status, start_offset, end_offset, created_at, updated_at)
-      VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)
-    `).run(id, body.articleId, body.text, body.note ?? null, body.startOffset, body.endOffset, timestamp, timestamp);
-    if (!credentials) {
-      const message = 'Saved in Chadashot; connect Readwise to synchronize future highlights';
-      database.prepare('UPDATE highlights SET readwise_error = ?, updated_at = ? WHERE id = ?').run(message, nowIso(), id);
-      logger.info('Highlight saved locally without Readwise connection', { hasNote: Boolean(body.note) });
-      return res.status(201).json({ highlight: readHighlight(id), synchronized: false, warning: message });
+  const highlightSynchronizations = new Map<string, Promise<{
+    highlight: SavedHighlight;
+    synchronized: boolean;
+    warning?: string;
+  }>>();
+
+  function highlightIdempotencyKey(body: HighlightDeliveryBody) {
+    return crypto.createHash('sha256')
+      .update(body.articleId).update('\0')
+      .update(String(body.startOffset)).update('\0')
+      .update(String(body.endOffset)).update('\0')
+      .update(body.text)
+      .digest('base64url');
+  }
+
+  function passageProblem(body: HighlightDeliveryBody) {
+    if (body.articleText.slice(body.startOffset, body.endOffset) !== body.text) {
+      return 'The saved passage no longer matches this article at its recorded position; refresh the article before retrying';
     }
+    let occurrences = 0;
+    let position = 0;
+    while ((position = body.articleText.indexOf(body.text, position)) !== -1) {
+      occurrences += 1;
+      position += Math.max(body.text.length, 1);
+    }
+    if (occurrences > 1) {
+      return 'This passage appears more than once in the article, and Reader cannot disambiguate which occurrence to anchor';
+    }
+    return null;
+  }
+
+  async function performHighlightSynchronization(id: string, body: HighlightDeliveryBody) {
+    const credentials = loadReadwise(database, config);
+    if (!credentials) {
+      const message = 'Connect Readwise in Settings, then retry this highlight';
+      database.prepare("UPDATE highlights SET readwise_status = 'pending', readwise_error = ?, updated_at = ? WHERE id = ?")
+        .run(message, nowIso(), id);
+      logger.info('Highlight saved locally without Readwise connection', { highlightId: id, hasNote: Boolean(body.note) });
+      return { highlight: readHighlight(id), synchronized: false, warning: message };
+    }
+
+    const invalidPassage = passageProblem(body);
+    if (invalidPassage) {
+      database.prepare("UPDATE highlights SET readwise_status = 'failed', readwise_error = ?, updated_at = ? WHERE id = ?")
+        .run(invalidPassage, nowIso(), id);
+      return { highlight: readHighlight(id), synchronized: false, warning: invalidPassage };
+    }
+
+    database.prepare("UPDATE highlights SET readwise_status = 'pending', readwise_error = NULL, updated_at = ? WHERE id = ?")
+      .run(nowIso(), id);
     try {
-      const readwiseId = await new ReadwiseClient(credentials, fetchImplementation).createHighlight({
+      const result = await new ReadwiseClient(credentials, fetchImplementation, readerToolSessionFactory).createReaderHighlight({
         text: body.text,
         note: body.note,
         title: body.title,
         author: body.author,
-        sourceUrl: body.canonicalUrl,
-        location: body.startOffset,
+        url: body.canonicalUrl,
+        html: body.contentHtml,
       });
-      database.prepare("UPDATE highlights SET readwise_status = 'saved', readwise_id = ?, updated_at = ? WHERE id = ?")
-        .run(readwiseId, nowIso(), id);
-      logger.info('Readwise highlight saved', { hasNote: Boolean(body.note) });
-      return res.status(201).json({ highlight: readHighlight(id), synchronized: true });
+      database.prepare(`
+        UPDATE highlights
+        SET readwise_status = 'saved', readwise_id = ?, reader_document_id = ?, readwise_error = NULL, updated_at = ?
+        WHERE id = ?
+      `).run(result.highlightId, result.document.id, nowIso(), id);
+      logger.info('Reader highlight confirmed', { highlightId: id, reused: result.reused, hasNote: Boolean(body.note) });
+      return { highlight: readHighlight(id), synchronized: true };
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Could not save highlight to Readwise';
-      database.prepare("UPDATE highlights SET readwise_status = 'failed', readwise_error = ?, updated_at = ? WHERE id = ?").run(message, nowIso(), id);
-      logger.error('Readwise highlight synchronization failed', error);
-      return res.status(201).json({ highlight: readHighlight(id), synchronized: false, warning: message });
+      const message = error instanceof Error ? error.message : 'Could not save highlight to Readwise Reader';
+      const documentId = error instanceof ReaderHighlightDeliveryError ? error.document.id : null;
+      database.prepare(`
+        UPDATE highlights
+        SET readwise_status = 'failed', reader_document_id = COALESCE(?, reader_document_id), readwise_error = ?, updated_at = ?
+        WHERE id = ?
+      `).run(documentId, message, nowIso(), id);
+      logger.warn('Reader highlight delivery failed', { highlightId: id, reason: message });
+      return { highlight: readHighlight(id), synchronized: false, warning: message };
     }
+  }
+
+  async function synchronizeHighlight(id: string, body: HighlightDeliveryBody) {
+    const active = highlightSynchronizations.get(id);
+    if (active) return active;
+    const operation = performHighlightSynchronization(id, body);
+    highlightSynchronizations.set(id, operation);
+    try {
+      return await operation;
+    } finally {
+      if (highlightSynchronizations.get(id) === operation) highlightSynchronizations.delete(id);
+    }
+  }
+
+  app.post('/api/readwise/highlights', requireUser, async (req, res) => {
+    const body = highlightSchema.parse(req.body);
+    const idempotencyKey = highlightIdempotencyKey(body);
+    const existing = database.prepare('SELECT id, readwise_status FROM highlights WHERE idempotency_key = ?').get(idempotencyKey) as {
+      id: string;
+      readwise_status: SavedHighlight['readwiseStatus'];
+    } | undefined;
+    const id = existing?.id ?? newId();
+    if (!existing) {
+      const timestamp = nowIso();
+      database.prepare(`
+        INSERT INTO highlights (
+          id, article_id, text, note, readwise_status, start_offset, end_offset, idempotency_key, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)
+      `).run(id, body.articleId, body.text, body.note ?? null, body.startOffset, body.endOffset, idempotencyKey, timestamp, timestamp);
+    } else if (existing.readwise_status === 'saved') {
+      return res.status(200).json({ highlight: readHighlight(id), synchronized: true, reused: true });
+    }
+
+    const result = await synchronizeHighlight(id, body);
+    return res.status(existing ? 200 : 201).json({ ...result, reused: Boolean(existing) });
+  });
+
+  app.post('/api/readwise/highlights/:highlightId/retry', requireUser, async (req, res) => {
+    const { highlightId } = highlightRetryParamsSchema.parse(req.params);
+    const metadata = highlightRetrySchema.parse(req.body);
+    const row = database.prepare(`
+      SELECT article_id, text, note, start_offset, end_offset, readwise_status
+      FROM highlights WHERE id = ?
+    `).get(highlightId) as {
+      article_id: string;
+      text: string;
+      note: string | null;
+      start_offset: number;
+      end_offset: number;
+      readwise_status: SavedHighlight['readwiseStatus'];
+    } | undefined;
+    if (!row) return res.status(404).json({ error: 'Highlight not found' });
+    if (row.article_id !== metadata.articleId) return res.status(409).json({ error: 'Highlight does not belong to this article' });
+    if (row.readwise_status === 'saved') return res.json({ highlight: readHighlight(highlightId), synchronized: true, reused: true });
+
+    const result = await synchronizeHighlight(highlightId, {
+      ...metadata,
+      text: row.text,
+      note: row.note ?? undefined,
+      startOffset: row.start_offset,
+      endOffset: row.end_offset,
+    });
+    return res.json({ ...result, reused: true });
   });
 
   app.post('/api/readwise/documents', requireUser, async (req, res) => {
@@ -599,6 +716,7 @@ export function createApp(config: AppConfig, dependencies: {
         url: body.canonicalUrl,
         title: body.title,
         author: body.author,
+        html: body.contentHtml,
       });
       logger.info('Document saved to Readwise Reader');
       return res.status(201).json({ articleId: body.articleId, document });
