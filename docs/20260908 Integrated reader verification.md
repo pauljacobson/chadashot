@@ -73,7 +73,7 @@ The full suite is the reproducible evidence source for these controlled cases. I
 
 An isolated rollback test loaded all 20,000 synthetic articles through `/api/reader/snapshot`, showed `Up to date`, mounted 18 rows, and produced no console errors. The compatibility response was 52,616,357 decoded bytes and 357,165 Brotli-encoded bytes. A clean reload made only `/api/reader/config` and `/api/reader/snapshot` reader requests. Reverting `READER_CLIENT_PATH` to `paginated` reused the preserved browser/server cache and resumed status, navigation, changes, list, and body APIs.
 
-Switching paths does not reverse SQLite migrations or clear committed generations, browser article outboxes, acknowledgement barriers, queued mark-read jobs, or durable server jobs. The snapshot browser continues replaying individual queued mutations. It does not create or poll bulk jobs; queued/durable jobs remain stored and resume when the paginated path is restored. Litestream continues replicating the same forward-only SQLite database.
+Switching paths does not reverse SQLite migrations or clear committed generations, browser article outboxes, acknowledgement barriers, queued mark-read jobs, or durable server jobs. The snapshot browser continues replaying individual queued mutations. It does not create or poll bulk jobs; queued/durable jobs remain stored and resume when the paginated path is restored. The feed-bearing SQLite database remains on the Railway volume and is not replicated offsite.
 
 ## Outstanding rollout gates
 
@@ -83,6 +83,6 @@ Switching paths does not reverse SQLite migrations or clear committed generation
 - Exercise an actual PWA application update with a queued synthetic intent and verify convergence after activation.
 - Begin an explicitly authorized production rollout, then observe at least 48 hours including a configured full reconciliation.
 - During that window, explain or eliminate any repeating subscription-fingerprint promotion, duplicate run, data loss, checkpoint advance after failure, or routine full-body retransmission.
-- Verify the deployed Litestream/R2 restore procedure with pending synthetic outbox/job records. This is an operational test and is not authorized by the local verification.
+- Verify that a cold reader cache can be rebuilt from Birchfeed after a fresh deployment. A future configuration-only backup must be restore-tested separately and must not include reader or highlight content.
 
 Only after every gate passes should obsolete snapshot callers be disabled and `/api/reader/snapshot` be retired in a separate pull request. Issue #11 and parent #1 must remain open until then.

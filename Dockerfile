@@ -16,8 +16,6 @@ RUN apt-get update \
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
-FROM litestream/litestream:0.5.16 AS litestream
-
 FROM node:24-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
@@ -29,9 +27,7 @@ RUN apt-get update \
 COPY --from=production-dependencies /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/server-dist ./server-dist
-COPY --from=litestream /usr/local/bin/litestream /usr/local/bin/litestream
 COPY package.json ./
-COPY litestream.yml /etc/litestream.yml
 COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/chadashot-entrypoint
 RUN mkdir -p /data && chown node:node /data
 EXPOSE 8787

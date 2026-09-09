@@ -40,7 +40,7 @@ Only a successful provider mutation writes cached state. The same transaction in
 
 ## Backup and rollback
 
-All cache state is ordinary SQLite data and is included in the existing Litestream/R2 replica. Restore tests serialize and reopen a committed database and confirm that bodies and state remain readable. Staging data may also restore, but only the committed account pointer is served.
+All cache state is ordinary SQLite data on the Railway volume and is deliberately excluded from offsite backups because Birchfeed can rebuild it. Local serialization tests reopen a committed database and confirm that bodies and state remain readable. Staging data may remain across a process restart, but only the committed account pointer is served.
 
 Set `READER_CLIENT_PATH=snapshot` to route the browser through the compatibility snapshot API. Leave `READER_CACHE_ENABLED=true` to assemble that response from the committed SQLite generation. Set `READER_CACHE_ENABLED=false` as well only when the provider-direct, request-blocking server path is required. Neither switch reverses migrations or clears committed generations, browser outboxes, acknowledgement barriers, queued mark-read jobs, or durable server jobs. Restore `READER_CACHE_ENABLED=true` and `READER_CLIENT_PATH=paginated` to resume the incremental path.
 
