@@ -503,9 +503,24 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 .nav-item > span:first-child { width: 17px; color: var(--muted); text-align: center; }
 .nav-count { margin-left: auto; color: var(--faint); font-size: 12px; }
 .feed-tree-folder { margin: 1px 0; }
-.folder-item { font-weight: 600; }
-.nav-item > .folder-chevron {
-  width: 17px;
+.folder-row { display: flex; align-items: stretch; }
+.folder-toggle {
+  width: 32px;
+  min-height: 37px;
+  flex: 0 0 32px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.folder-toggle:hover { background: color-mix(in srgb, var(--surface-active) 70%, transparent); }
+.folder-item { min-width: 0; flex: 1; padding-left: 2px; font-weight: 600; }
+.folder-row .folder-item > span:first-child { width: auto; color: inherit; text-align: left; }
+.folder-chevron {
   color: var(--muted);
   font-size: 18px;
   line-height: 1;
@@ -1189,6 +1204,12 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 
 @keyframes pulse { 50% { opacity: .35; transform: scale(.8); } }
 
+@media (max-width: 1024px) {
+  .workspace { display: block; }
+  .sidebar, .panel-resizer { display: none; }
+  .article-list, .reader-pane { height: 100%; border-right: 0; }
+}
+
 @media (max-width: 900px) {
   .wordmark { width: 182px; }
   .reading-column { padding: 38px 34px 72px; }
@@ -1197,11 +1218,11 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 
 @media (max-width: 720px) {
   .app-shell { height: 100dvh; min-height: 0; }
-  .topbar { min-height: 56px; padding: 0 12px; }
-  .wordmark { width: auto; }
-  .wordmark > span:last-child { font-size: 17px; }
+  .topbar { min-height: 56px; gap: 4px; padding: 0 8px; }
+  .wordmark { width: auto; gap: 6px; }
+  .wordmark > span:last-child { font-size: 16px; }
   .search-box { display: none; }
-  .topbar-status, .sidebar-toggle { display: none !important; }
+  .topbar-status { display: none !important; }
   .topbar-actions { gap: 2px; }
   .topbar-actions button { min-width: 44px; min-height: 44px; border: 0; border-radius: 50%; background: transparent; }
   .workspace { flex: 1; display: block; min-height: 0; }

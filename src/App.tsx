@@ -50,6 +50,7 @@ const MIN_READER_WIDTH = 300;
 const PANEL_RESIZER_WIDTH = 10;
 const ARTICLE_ROW_ESTIMATE = 116;
 const ARTICLE_ROW_OVERSCAN = 12;
+const FLOATING_FEEDS_QUERY = '(max-width: 1024px)';
 const articleListScrollPositions = new Map<string, number>();
 
 type PanelWidths = typeof DEFAULT_PANEL_WIDTHS;
@@ -255,16 +256,21 @@ function FeedTree({ snapshot, filter, unreadOnly, sortOrder, onFilter, onSubscri
       : filter.kind === 'folder' && filter.id === folder.id;
     return (
       <div className="feed-tree-folder" key={folder.id}>
-        <button
-          className={`nav-item folder-item ${active ? 'active' : ''}`}
-          aria-expanded={expanded}
-          onClick={() => {
-            toggleFolder(folder.id);
-            onFilter(folder.uncategorized ? { kind: 'uncategorized' } : { kind: 'folder', id: folder.id });
-          }}
-        >
-          <span className="folder-chevron" aria-hidden="true">{expanded ? '⌄' : '›'}</span><span>{folder.title}</span><span className="nav-count">{folder.unreadCount}</span>
-        </button>
+        <div className="folder-row">
+          <button className="folder-toggle" aria-label={`${expanded ? 'Collapse' : 'Expand'} ${folder.title} feeds`} aria-expanded={expanded} onClick={() => toggleFolder(folder.id)}>
+            <span className="folder-chevron" aria-hidden="true">{expanded ? '⌄' : '›'}</span>
+          </button>
+          <button
+            className={`nav-item folder-item ${active ? 'active' : ''}`}
+            aria-label={`View ${folder.title} folder (${folder.unreadCount} unread)`}
+            onClick={() => {
+              onFilter(folder.uncategorized ? { kind: 'uncategorized' } : { kind: 'folder', id: folder.id });
+              onFeedSelection?.();
+            }}
+          >
+            <span>{folder.title}</span><span className="nav-count">{folder.unreadCount}</span>
+          </button>
+        </div>
         {expanded && (
           <div className="nested-feeds">
             {folder.subscriptions.length === 0 ? <div className="empty-folder">No feeds</div> : folder.subscriptions.map((subscription) => (
@@ -349,10 +355,40 @@ function MobileFeedsPanel({ snapshot, filter, unreadOnly, sortOrder, onFilter, o
   onUnreadOnlyChange: (unreadOnly: boolean) => void;
   onClose: () => void;
 }) {
+  const panelRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    closeButtonRef.current?.focus();
+  }, []);
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLElement>) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== 'Tab') return;
+
+    const focusable = [...(panelRef.current?.querySelectorAll<HTMLElement>(
+      'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ) ?? [])];
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (!first || !last) return;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
-      <section className="mobile-feeds-panel" role="dialog" aria-modal="true" aria-labelledby="mobile-feeds-title">
-        <header><h1 id="mobile-feeds-title">Feeds</h1><button onClick={onSubscribe}>＋ Add feed</button><button aria-label="Close feeds" onClick={onClose}>×</button></header>
+      <section ref={panelRef} id="mobile-feeds-panel" className="mobile-feeds-panel" role="dialog" aria-modal="true" aria-labelledby="mobile-feeds-title" onKeyDown={handleKeyDown}>
+        <header><h1 id="mobile-feeds-title">Feeds</h1><button onClick={onSubscribe}>＋ Add feed</button><button ref={closeButtonRef} aria-label="Close feeds" onClick={onClose}>×</button></header>
         <FeedTree snapshot={snapshot} filter={filter} unreadOnly={unreadOnly} sortOrder={sortOrder} onFilter={onFilter} onFeedSelection={onClose} onSubscribe={onSubscribe} onUnreadOnlyChange={onUnreadOnlyChange} showHeading={false} />
       </section>
     </div>
@@ -1475,11 +1511,14 @@ export function App() {
   const [accentColor, setAccentColor] = useState<AccentColor>(savedAccentColor);
   const [readingFont, setReadingFont] = useState<ReadingFont>(savedReadingFont);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [floatingFeeds, setFloatingFeeds] = useState(() => typeof window.matchMedia === 'function' && window.matchMedia(FLOATING_FEEDS_QUERY).matches);
   const [contentView, setContentView] = useState<ContentView>('list');
   const [notice, setNotice] = useState('');
   const [panelWidths, setPanelWidths] = useState<PanelWidths>(savedPanelWidths);
   const [workspaceWidth, setWorkspaceWidth] = useState(0);
   const workspaceRef = useRef<HTMLDivElement>(null);
+  const headerFeedsTriggerRef = useRef<HTMLButtonElement>(null);
+  const activeFeedsTriggerRef = useRef<HTMLButtonElement>(null);
   const reader = useReader(session?.authenticated ? session.user?.id : undefined);
 
   useLayoutEffect(() => {
@@ -1517,6 +1556,21 @@ export function App() {
     const timeout = window.setTimeout(() => setNotice(''), 2600);
     return () => window.clearTimeout(timeout);
   }, [notice]);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const mediaQuery = window.matchMedia(FLOATING_FEEDS_QUERY);
+    const handleChange = (event: MediaQueryListEvent) => {
+      setFloatingFeeds(event.matches);
+      if (event.matches) return;
+      const panel = document.getElementById('mobile-feeds-panel');
+      const restoreFocus = panel?.contains(document.activeElement) ?? false;
+      setFeedsOpen(false);
+      if (restoreFocus) window.requestAnimationFrame(() => headerFeedsTriggerRef.current?.focus());
+    };
+    mediaQuery.addEventListener('change', handleChange);
+    return () => mediaQuery.removeEventListener('change', handleChange);
+  }, []);
 
   useEffect(() => {
     try {
@@ -1608,6 +1662,16 @@ export function App() {
     setContentView('list');
   }
 
+  function openFeeds(trigger: HTMLButtonElement) {
+    activeFeedsTriggerRef.current = trigger;
+    setFeedsOpen(true);
+  }
+
+  function closeFeeds() {
+    setFeedsOpen(false);
+    window.requestAnimationFrame(() => activeFeedsTriggerRef.current?.focus());
+  }
+
   function chooseArticle(article: Article) {
     if (article.id !== reader.selectedArticle?.id) {
       startArticleOpen('cache');
@@ -1650,11 +1714,19 @@ export function App() {
       <header className="topbar">
         <div className="wordmark">
           <button
+            ref={headerFeedsTriggerRef}
             className="sidebar-toggle brand-sidebar-toggle"
-            aria-label={sidebarOpen ? 'Collapse navigation sidebar' : 'Expand navigation sidebar'}
-            aria-controls="reader-sidebar"
-            aria-expanded={sidebarOpen}
-            onClick={() => setSidebarOpen((current) => !current)}
+            aria-label={floatingFeeds ? (feedsOpen ? 'Close feeds panel' : 'Open feeds panel') : (sidebarOpen ? 'Collapse navigation sidebar' : 'Expand navigation sidebar')}
+            aria-controls={floatingFeeds ? 'mobile-feeds-panel' : 'reader-sidebar'}
+            aria-expanded={floatingFeeds ? feedsOpen : sidebarOpen}
+            onClick={(event) => {
+              if (floatingFeeds) {
+                if (feedsOpen) closeFeeds();
+                else openFeeds(event.currentTarget);
+              } else {
+                setSidebarOpen((current) => !current);
+              }
+            }}
           >☰</button>
           <span className="app-mark">ח</span><span>Chadashot</span>
         </div>
@@ -1752,7 +1824,7 @@ export function App() {
       <nav className="mobile-navigation" aria-label="Primary navigation">
         <button className={reader.filter.kind === 'inbox' ? 'active' : ''} onClick={() => chooseFilter({ kind: 'inbox' })}><span>●</span>Inbox</button>
         <button className={reader.filter.kind === 'starred' ? 'active' : ''} onClick={() => chooseFilter({ kind: 'starred' })}><span>☆</span>Starred</button>
-        <button onClick={() => setFeedsOpen(true)}><span>⌁</span>Feeds</button>
+        <button onClick={(event) => openFeeds(event.currentTarget)}><span>⌁</span>Feeds</button>
         <button onClick={() => setPreferencesOpen(true)}><span>☷</span>Prefs</button>
         <button onClick={() => setSettingsOpen(true)}><span>⚙</span>Settings</button>
       </nav>
@@ -1766,7 +1838,7 @@ export function App() {
         onFilter={chooseFilter}
         onSubscribe={() => { setFeedsOpen(false); setSubscribeOpen(true); }}
         onUnreadOnlyChange={setUnreadFeedsOnly}
-        onClose={() => setFeedsOpen(false)}
+        onClose={closeFeeds}
       />}
       {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} accentColor={accentColor} readingFont={readingFont} onSortOrderChange={setFeedSortOrder} onAccentColorChange={setAccentColor} onReadingFontChange={setReadingFont} onClose={() => setPreferencesOpen(false)} />}
       {subscribeOpen && <SubscribePanel
