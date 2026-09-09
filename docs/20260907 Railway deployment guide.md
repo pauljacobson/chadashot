@@ -20,25 +20,13 @@ Chadashot deploys as one Docker-based Railway service from the repository root. 
 
 Treat `ENCRYPTION_KEY` as permanent application data: changing it makes the saved Birchfeed and Readwise credentials unreadable. Store it in a password manager as well as Railway.
 
-#### Optional Cloudflare R2 backups
+#### Source and configuration recovery
 
-Railway volume backups and Cloudflare R2 serve different purposes. Enable Railway's native volume backups as the fastest same-platform restore path. For an off-platform copy, the production container includes Litestream and Railway supplies its R2 connection entirely through service variables. Backup scheduling and Cloudflare credentials are not handled by Chadashot application code.
+GitHub is the source of truth for Chadashot's application code and deployment configuration. The production container does not replicate `/data/chadashot.sqlite` to Cloudflare R2 because that database is dominated by rebuildable Birchfeed articles, bodies, indexes, and synchronization state.
 
-A separate Railway cron/template service is a good fit for PostgreSQL or MySQL because it can connect to those servers over the network. It cannot safely back up Chadashot's local SQLite file: Railway attaches a volume to one service, and a second service cannot share that mount. Running Litestream beside Chadashot in the same container keeps SQLite locking local and supported while retaining Railway as the configuration surface.
+Keep `ENCRYPTION_KEY` in a password manager or offline recovery record outside both GitHub and Railway. Changing or losing it makes saved Birchfeed and Readwise credentials unreadable. Keep the non-secret Railway configuration documented here and in `.env.example`.
 
-Create a private R2 bucket and an S3 API token restricted to that bucket, then add these Railway variables:
-
-```text
-LITESTREAM_REPLICA_URL=s3://<PRIVATE_BUCKET_NAME>/chadashot?endpoint=<CLOUDFLARE_ACCOUNT_ID>.r2.cloudflarestorage.com&region=auto
-LITESTREAM_ACCESS_KEY_ID=<SCOPED_ACCESS_KEY_ID>
-LITESTREAM_SECRET_ACCESS_KEY=<SCOPED_SECRET_ACCESS_KEY>
-```
-
-All three values are required together; omitting all of them disables offsite replication. Litestream restores `/data/chadashot.sqlite` from R2 when the volume is empty, starts Chadashot, and sends changes to R2 every ten seconds. Its logs appear in Railway's service logs rather than Settings → Application logs because Litestream is infrastructure, not part of the application.
-
-Litestream creates a daily full snapshot and retains a rolling 30-day point-in-time history. Give the scoped R2 token permission to read, write, list, and delete objects in this bucket so Litestream can restore and enforce retention. Do not add an R2 lifecycle rule shorter than 30 days because deleting individual objects can break an incremental restore chain. Keep `ENCRYPTION_KEY` outside both Railway and R2 as part of the recovery record. Integration credentials inside SQLite are encrypted with that key, recovery codes are stored only as hashes, and saved highlight text remains readable inside the database replica.
-
-Test restoration before relying on the backup: confirm Litestream has created objects in R2, deploy the same image and variables with a fresh `/data` volume in a temporary Railway environment, and verify that the account and articles return. The migration runner will apply any newer application migrations after Litestream restores the database. Do not restore a database created by a newer application release into an older release unless that release explicitly supports the newer schema.
+Railway's persistent volume remains the working copy of runtime state. If the volume is lost, redeploy from GitHub, bootstrap a new account and passkey, reconnect Birchfeed and Readwise, and rebuild the reader cache from Birchfeed. A future offsite backup may export only application configuration—account/passkey records, recovery-code hashes, encrypted integration settings, and schema metadata—but it must exclude highlights, sessions, authentication challenges, and every `reader_*` table.
 
 #### Database migrations
 
@@ -49,7 +37,7 @@ Migration rules:
 - Add a new migration for every schema change; never edit one that may already have run in production.
 - Keep migrations forward-only. For rollback, restore the pre-deployment database backup and deploy the previous application image together.
 - Test both a clean database and an upgrade from the previous schema in CI.
-- Take or verify a Railway/R2 backup before deploying a migration that rewrites tables or removes data.
+- Take or verify a recoverable Railway volume snapshot before deploying a migration that rewrites tables or removes data.
 - Keep application code compatible with the migration it ships with; the server applies migrations before it begins listening.
 
 #### Reader import process model
@@ -58,19 +46,19 @@ Run one Railway web service and do not add a separate reader worker in this phas
 
 The lease is stored in SQLite rather than process memory so overlapping Railway deployments cannot publish competing generations. Its default 45-second expiry and 15-second heartbeat allow a replacement process to recover after an old process stops. An expired or replaced owner is fenced from publication even if its old provider request later completes. A failed or interrupted generation remains uncommitted and the last successful generation remains readable.
 
-Litestream replicates the staging rows, lease, checkpoint, and committed generation as ordinary SQLite state. After a restore, only `reader_accounts.current_generation_id` is served. An incomplete generation cannot become visible merely because it was present in a replica; a new process resumes with a new fenced import after the restored lease expires.
+Only `reader_accounts.current_generation_id` is served. An incomplete generation cannot become visible merely because its staging rows remain on the Railway volume; a new process resumes with a new fenced import after the restored lease expires.
 
 #### Safe replacement sequence
 
 1. The existing FreshRSS instance contains no data that needs preserving, so detach or delete its old volume rather than mounting it into Chadashot.
 2. Point the Railway service at this GitHub repository's root. Keep the Dockerfile builder, `/api/health` health check, and create a fresh volume mounted at `/data`.
-3. Add the required production variables and, if desired, the three Litestream/R2 variables above. Remove obsolete FreshRSS variables from the service.
+3. Add the required production variables and remove obsolete FreshRSS or Litestream/R2 variables from the service.
 4. Deploy and verify the health check before completing the custom-domain cutover. The final `chadashot.app` domain must be active before creating a real passkey because passkeys are bound to that domain.
 5. Open Chadashot, enter the Railway `BOOTSTRAP_TOKEN`, create the initial account, register the first passkey, and save the one-time recovery codes.
 6. Remove `BOOTSTRAP_TOKEN` from Railway after setup succeeds. The server also refuses bootstrap after an account exists.
 7. Add a second passkey from Settings → Account security, then verify that one recovery code can sign in and is rejected when reused.
 8. Connect Birchfeed and Readwise from Settings, then verify synchronization, read/star mutations, persistent highlights, and Reader document saving.
-9. If R2 is configured, confirm the Litestream startup and replication messages in Railway's service logs, then confirm objects exist under the `chadashot` prefix in the private bucket.
+9. Confirm the service logs contain no Litestream startup or R2 replication attempts.
 
 #### Rollback boundary
 
