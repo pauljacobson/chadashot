@@ -170,6 +170,7 @@ export type SavedHighlight = {
   endOffset: number;
   readwiseStatus: 'pending' | 'saved' | 'failed';
   readwiseId: string | null;
+  readerDocumentId: string | null;
   readwiseError: string | null;
   createdAt: string;
 };

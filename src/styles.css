@@ -968,6 +968,24 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 .selection-actions .primary-action,
 .primary-action { border-color: var(--accent); background: var(--accent); color: var(--accent-contrast); }
 .selection-actions button:last-child { margin-left: auto; }
+.highlight-delivery-status {
+  position: absolute;
+  right: 20px;
+  bottom: 20px;
+  z-index: 3;
+  display: grid;
+  width: min(460px, calc(100% - 40px));
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--danger) 55%, var(--border));
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: 0 12px 36px var(--shadow);
+}
+.highlight-delivery-status > div { display: flex; align-items: center; gap: 12px; }
+.highlight-delivery-status span { flex: 1; overflow: hidden; color: var(--muted); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.highlight-delivery-status button { min-height: 36px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-muted); cursor: pointer; }
+.highlight-delivery-status button:disabled { cursor: wait; opacity: .65; }
 
 .dialog-backdrop {
   position: fixed;

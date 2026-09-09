@@ -236,6 +236,8 @@ export function createReadwiseHighlight(article: {
   title: string;
   author: string | null;
   canonicalUrl: string;
+  contentHtml: string;
+  articleText: string;
   startOffset: number;
   endOffset: number;
 }) {
@@ -243,6 +245,20 @@ export function createReadwiseHighlight(article: {
     method: 'POST',
     body: JSON.stringify(article),
   });
+}
+
+export function retryReadwiseHighlight(highlightId: string, article: {
+  articleId: string;
+  title: string;
+  author: string | null;
+  canonicalUrl: string;
+  contentHtml: string;
+  articleText: string;
+}) {
+  return request<{ highlight: SavedHighlight; synchronized: boolean; warning?: string; reused: true }>(
+    `/api/readwise/highlights/${encodeURIComponent(highlightId)}/retry`,
+    { method: 'POST', body: JSON.stringify(article) },
+  );
 }
 
 export function getArticleHighlights(articleId: string, signal?: AbortSignal) {
@@ -255,6 +271,7 @@ export function saveReadwiseDocument(article: {
   title: string;
   author: string | null;
   canonicalUrl: string;
+  contentHtml?: string;
 }) {
   return request<{ articleId: string; document: { id: string; url: string } }>('/api/readwise/documents', {
     method: 'POST',

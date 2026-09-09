@@ -473,6 +473,18 @@ const migrations: Migration[] = [
         ON reader_mark_read_job_targets(job_id, status, ordinal);
     `,
   },
+  {
+    version: 9,
+    name: 'reader_highlight_delivery',
+    sql: `
+      ALTER TABLE highlights ADD COLUMN reader_document_id TEXT;
+      ALTER TABLE highlights ADD COLUMN idempotency_key TEXT;
+
+      CREATE UNIQUE INDEX highlights_idempotency_key
+        ON highlights(idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+    `,
+  },
 ];
 
 function ensureMigrationTable(database: AppDatabase) {

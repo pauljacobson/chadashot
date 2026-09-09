@@ -22,6 +22,7 @@ import {
   recoverAccount,
   regenerateRecoveryCodes,
   removePasskey,
+  retryReadwiseHighlight,
   saveReadwiseDocument,
   subscribeToFeed,
   verifyBootstrap,
@@ -619,6 +620,7 @@ type SelectionAnchor = {
   text: string;
   startOffset: number;
   endOffset: number;
+  articleText: string;
 };
 
 function selectionAnchor(root: HTMLElement, current: Selection | null): SelectionAnchor | null {
@@ -633,7 +635,7 @@ function selectionAnchor(root: HTMLElement, current: Selection | null): Selectio
   prefix.selectNodeContents(root);
   prefix.setEnd(range.startContainer, range.startOffset);
   const startOffset = prefix.toString().length + leadingWhitespace;
-  return { text, startOffset, endOffset: startOffset + text.length };
+  return { text, startOffset, endOffset: startOffset + text.length, articleText: root.textContent ?? '' };
 }
 
 function mergeHighlights(loaded: SavedHighlight[], current: SavedHighlight[]) {
@@ -743,6 +745,7 @@ export function ReaderPane({
   const [noteOpen, setNoteOpen] = useState(false);
   const [note, setNote] = useState('');
   const [savingAction, setSavingAction] = useState<'highlight' | 'document' | null>(null);
+  const [retryingHighlightId, setRetryingHighlightId] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<MediaLightboxState | null>(null);
   const articleId = article?.id;
   const sanitized = useMemo(() => DOMPurify.sanitize(article?.contentHtml ?? ''), [article?.contentHtml]);
@@ -855,6 +858,28 @@ export function ReaderPane({
     }
   }
 
+  async function retryHighlight(highlight: SavedHighlight) {
+    if (!article || !contentRef.current) return;
+    setRetryingHighlightId(highlight.id);
+    try {
+      const result = await retryReadwiseHighlight(highlight.id, {
+        articleId: article.id,
+        title: article.title,
+        author: article.author,
+        canonicalUrl: article.canonicalUrl,
+        contentHtml: article.contentHtml,
+        articleText: contentRef.current.textContent ?? '',
+      });
+      setHighlights((current) => current.map((item) => item.id === result.highlight.id ? result.highlight : item));
+      if (result.synchronized) onNotify('Highlight confirmed in Readwise Reader');
+      else if (result.warning) onNotify(`Highlight kept in Chadashot. ${result.warning}`);
+    } catch (error) {
+      onNotify(error instanceof Error ? error.message : 'Could not retry highlight');
+    } finally {
+      setRetryingHighlightId(null);
+    }
+  }
+
   function openMediaFromTarget(target: EventTarget | null) {
     const trigger = target instanceof Element
       ? target.closest<HTMLElement>('[data-chadashot-media-trigger="image"]')
@@ -941,6 +966,18 @@ export function ReaderPane({
           )}
         </article>
       </div>
+      {!selection && highlights.some((highlight) => highlight.readwiseStatus !== 'saved') && (
+        <div className="highlight-delivery-status" role="status" aria-label="Reader highlight delivery status">
+          {highlights.filter((highlight) => highlight.readwiseStatus !== 'saved').map((highlight) => (
+            <div key={highlight.id}>
+              <span>{highlight.readwiseStatus === 'pending' ? 'Reader delivery pending' : 'Reader delivery failed'}: “{highlight.text}”</span>
+              <button disabled={retryingHighlightId !== null} onClick={() => void retryHighlight(highlight)}>
+                {retryingHighlightId === highlight.id ? 'Retrying…' : 'Retry'}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       {selection && (
         <div ref={selectionPanelRef} className="selection-panel" role="toolbar" aria-label="Selected text actions">
           <div className="selection-preview">“{selection.text}”</div>
@@ -1906,8 +1943,9 @@ export function App() {
                 title: article.title,
                 author: article.author,
                 canonicalUrl: article.canonicalUrl,
+                contentHtml: article.contentHtml,
               });
-              if (result.synchronized) setNotice(note ? 'Highlight and note saved to Readwise' : 'Highlight saved to Readwise');
+              if (result.synchronized) setNotice(note ? 'Highlight and note confirmed in Readwise Reader' : 'Highlight confirmed in Readwise Reader');
               return result;
             }}
             onSaveToReader={async (article) => {
@@ -1916,6 +1954,7 @@ export function App() {
                 title: article.title,
                 author: article.author,
                 canonicalUrl: article.canonicalUrl,
+                contentHtml: article.contentHtml,
               });
               setNotice('Article saved to Readwise Reader');
             }}

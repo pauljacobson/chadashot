@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createApp, normalizeReaderServerUrl } from './app.js';
 import { loadConfig } from './config.js';
 import { openMemoryDatabase } from './database.js';
@@ -224,7 +224,7 @@ describe('application API', () => {
     });
   });
 
-  it('saves highlights and documents through separate Readwise actions', async () => {
+  it('confirms Reader highlights, persists both identifiers, and deduplicates repeated actions', async () => {
     const database = openMemoryDatabase();
     const encryptedConfig = loadConfig({
       NODE_ENV: 'test',
@@ -234,11 +234,21 @@ describe('application API', () => {
     const fetchImplementation = async (input: string | URL | Request) => {
       const url = String(input);
       if (url.endsWith('/api/v2/auth/')) return new Response(null, { status: 204 });
-      if (url.endsWith('/api/v2/highlights/')) return new Response(JSON.stringify([{ id: 42, modified_highlights: [99] }]), { status: 200 });
       if (url.endsWith('/api/v3/save/')) return new Response(JSON.stringify({ id: 'doc-1', url: 'https://readwise.io/reader/doc-1' }), { status: 201 });
       return new Response('', { status: 404 });
     };
-    const readwiseApp = createApp(encryptedConfig, { database, fetchImplementation });
+    const remoteHighlights: { id: string; text: string; notes: string | null }[] = [];
+    const callTool = vi.fn(async (name: string, arguments_: Record<string, unknown>) => {
+      if (name === 'reader_create_highlight') remoteHighlights.push({
+        id: 'reader-highlight-1', text: String(arguments_.html_content), notes: typeof arguments_.note === 'string' ? arguments_.note : null,
+      });
+      return { content: [{ type: 'text', text: JSON.stringify({ highlights: remoteHighlights }) }] };
+    });
+    const readwiseApp = createApp(encryptedConfig, {
+      database,
+      fetchImplementation,
+      readerToolSessionFactory: async () => ({ callTool, close: vi.fn().mockResolvedValue(undefined) }),
+    });
     expect((await request(readwiseApp).put('/api/settings/readwise').send({ token: 'readwise-secret' })).status).toBe(200);
 
     const article = {
@@ -246,25 +256,111 @@ describe('application API', () => {
       title: 'Article',
       author: 'Author',
       canonicalUrl: 'https://example.test/article',
+      contentHtml: '<p>Before Important text after.</p>',
+      articleText: 'Before Important text after.',
     };
     const highlight = await request(readwiseApp).post('/api/readwise/highlights').send({
       ...article,
       text: 'Important text',
       note: 'Keep this',
-      startOffset: 12,
-      endOffset: 26,
+      startOffset: 7,
+      endOffset: 21,
     });
     const persistedHighlights = await request(readwiseApp).get('/api/highlights').query({ articleId: 'article-1' });
+    const duplicate = await request(readwiseApp).post('/api/readwise/highlights').send({
+      ...article,
+      text: 'Important text',
+      note: 'Keep this',
+      startOffset: 7,
+      endOffset: 21,
+    });
     const document = await request(readwiseApp).post('/api/readwise/documents').send(article);
     expect(highlight.status).toBe(201);
     expect(highlight.body).toMatchObject({
       synchronized: true,
-      highlight: { text: 'Important text', startOffset: 12, endOffset: 26, readwiseStatus: 'saved', readwiseId: '99' },
+      highlight: {
+        text: 'Important text', startOffset: 7, endOffset: 21, readwiseStatus: 'saved',
+        readwiseId: 'reader-highlight-1', readerDocumentId: 'doc-1',
+      },
     });
+    expect(duplicate.status).toBe(200);
+    expect(duplicate.body).toMatchObject({ synchronized: true, reused: true, highlight: { id: highlight.body.highlight.id } });
     expect(persistedHighlights.body.highlights).toHaveLength(1);
     expect(document.status).toBe(201);
     expect(document.body.document.id).toBe('doc-1');
     expect(database.prepare('SELECT readwise_status FROM highlights').get()).toEqual({ readwise_status: 'saved' });
+    expect(callTool.mock.calls.filter(([name]) => name === 'reader_create_highlight')).toHaveLength(1);
+  });
+
+  it('retains a failed local highlight and retries it without creating another row', async () => {
+    const database = openMemoryDatabase();
+    const encryptedConfig = loadConfig({
+      NODE_ENV: 'test', AUTH_MODE: 'development', ENCRYPTION_KEY: Buffer.alloc(32, 5).toString('base64'),
+    });
+    const fetchImplementation = async (input: string | URL | Request) => String(input).endsWith('/api/v2/auth/')
+      ? new Response(null, { status: 204 })
+      : new Response(JSON.stringify({ id: 'doc-retry', url: 'https://readwise.io/reader/doc-retry' }), { status: 200 });
+    let attempt = 0;
+    const readerToolSessionFactory = async () => {
+      attempt += 1;
+      const remoteHighlights: { id: string; text: string }[] = [];
+      return {
+        callTool: vi.fn(async (name: string, arguments_: Record<string, unknown>) => {
+          if (attempt === 1) throw new Error('request timed out');
+          if (name === 'reader_create_highlight') remoteHighlights.push({ id: 'highlight-retry', text: String(arguments_.html_content) });
+          return { content: [{ type: 'text', text: JSON.stringify({ highlights: remoteHighlights }) }] };
+        }),
+        close: vi.fn().mockResolvedValue(undefined),
+      };
+    };
+    const readwiseApp = createApp(encryptedConfig, { database, fetchImplementation, readerToolSessionFactory });
+    await request(readwiseApp).put('/api/settings/readwise').send({ token: 'readwise-secret' });
+    const article = {
+      articleId: 'article-retry', title: 'Retry article', author: null,
+      canonicalUrl: 'https://example.test/retry', contentHtml: '<p>Retry passage.</p>', articleText: 'Retry passage.',
+    };
+
+    const failed = await request(readwiseApp).post('/api/readwise/highlights').send({
+      ...article, text: 'Retry passage', startOffset: 0, endOffset: 13,
+    });
+    const retried = await request(readwiseApp)
+      .post(`/api/readwise/highlights/${failed.body.highlight.id}/retry`)
+      .send(article);
+
+    expect(failed.body).toMatchObject({
+      synchronized: false,
+      highlight: { readwiseStatus: 'failed', readerDocumentId: 'doc-retry' },
+      warning: expect.stringContaining('timed out'),
+    });
+    expect(retried.body).toMatchObject({
+      synchronized: true,
+      highlight: { id: failed.body.highlight.id, readwiseStatus: 'saved', readwiseId: 'highlight-retry', readerDocumentId: 'doc-retry' },
+    });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM highlights').get()).toEqual({ count: 1 });
+  });
+
+  it('preserves an ambiguous passage locally instead of guessing a Reader occurrence', async () => {
+    const database = openMemoryDatabase();
+    const encryptedConfig = loadConfig({
+      NODE_ENV: 'test', AUTH_MODE: 'development', ENCRYPTION_KEY: Buffer.alloc(32, 6).toString('base64'),
+    });
+    const fetchImplementation = async () => new Response(null, { status: 204 });
+    const readerToolSessionFactory = vi.fn();
+    const readwiseApp = createApp(encryptedConfig, { database, fetchImplementation, readerToolSessionFactory });
+    await request(readwiseApp).put('/api/settings/readwise').send({ token: 'readwise-secret' });
+
+    const response = await request(readwiseApp).post('/api/readwise/highlights').send({
+      articleId: 'article-duplicate', title: 'Duplicate', author: null,
+      canonicalUrl: 'https://example.test/duplicate', contentHtml: '<p>Same text and Same text</p>', articleText: 'Same text and Same text',
+      text: 'Same text', startOffset: 0, endOffset: 9,
+    });
+
+    expect(response.body).toMatchObject({
+      synchronized: false,
+      highlight: { readwiseStatus: 'failed' },
+      warning: expect.stringContaining('more than once'),
+    });
+    expect(readerToolSessionFactory).not.toHaveBeenCalled();
   });
 
   it('retains a local highlight when Readwise is not connected', async () => {
@@ -274,16 +370,18 @@ describe('application API', () => {
       title: 'Article',
       author: null,
       canonicalUrl: 'https://example.test/article',
+      contentHtml: '<p>Keep this locally</p>',
+      articleText: 'Keep this locally',
       text: 'Keep this locally',
-      startOffset: 4,
-      endOffset: 21,
+      startOffset: 0,
+      endOffset: 17,
     });
 
     expect(response.status).toBe(201);
     expect(response.body).toMatchObject({
       synchronized: false,
-      highlight: { text: 'Keep this locally', readwiseStatus: 'pending', startOffset: 4, endOffset: 21 },
+      highlight: { text: 'Keep this locally', readwiseStatus: 'pending', startOffset: 0, endOffset: 17 },
     });
-    expect(response.body.warning).toContain('connect Readwise');
+    expect(response.body.warning).toContain('Connect Readwise');
   });
 });
