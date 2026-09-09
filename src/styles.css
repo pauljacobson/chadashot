@@ -1231,12 +1231,41 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   .workspace { display: block; }
   .sidebar, .panel-resizer { display: none; }
   .article-list, .reader-pane { height: 100%; border-right: 0; }
+  .reader-toolbar {
+    min-height: 0;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-content: center;
+    gap: 6px 10px;
+    padding: 8px 12px;
+    overflow: visible;
+  }
+  .reader-close { grid-column: 1; }
+  .reader-navigation { grid-column: 2; min-width: 0; justify-content: flex-start; }
+  .toolbar-spacer { display: none; }
+  .reader-toolbar button,
+  .reader-toolbar .toolbar-link { min-width: 44px; min-height: 44px; }
+  .reader-actions {
+    min-width: 0;
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .reader-actions button,
+  .reader-actions .toolbar-link {
+    min-width: 0;
+    min-height: 44px;
+    white-space: normal;
+    line-height: 1.2;
+    text-align: center;
+  }
+  .reader-actions .button-label { overflow-wrap: anywhere; }
 }
 
 @media (max-width: 900px) {
   .wordmark { width: 182px; }
   .reading-column { padding: 38px 34px 72px; }
-  .reader-actions .button-label { display: none; }
 }
 
 @media (max-width: 720px) {
@@ -1256,15 +1285,15 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   .article-read-filter { order: 3; width: 100%; }
   .article-read-filter button { flex: 1; min-height: 34px; }
   .article-main-action { min-height: 112px; padding: 15px 42px 14px 17px; }
-  .reader-toolbar { min-height: 56px; gap: 2px; padding: 0 8px; overflow-x: auto; scrollbar-width: none; }
-  .reader-toolbar::-webkit-scrollbar { display: none; }
-  .reader-toolbar button, .toolbar-link { min-width: 44px; min-height: 44px; padding: 0 8px; border: 0; border-radius: 50%; background: transparent; font-size: 0; }
+  .reader-toolbar { min-height: 0; gap: 6px 8px; padding: 6px 8px; overflow: visible; }
+  .reader-toolbar button, .toolbar-link { min-width: 44px; min-height: 44px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; font-size: 12px; }
   .reader-toolbar button > [aria-hidden="true"], .toolbar-link > [aria-hidden="true"] { font-size: 17px; }
-  .reader-toolbar .button-label { display: none; }
-  .reader-navigation { gap: 0; padding-left: 2px; }
-  .reader-actions { gap: 0; }
-  .reader-position { min-width: 50px; }
-  .toolbar-spacer { display: none; }
+  .reader-toolbar > .reader-close .button-label, .reader-navigation .button-label { display: none; }
+  .reader-navigation { display: grid; grid-template-columns: 44px minmax(70px, 1fr) 44px; gap: 0; padding-left: 2px; }
+  .reader-navigation button { min-width: 44px; }
+  .reader-actions { gap: 6px; }
+  .reader-actions .button-label { display: inline; font-size: 10px; }
+  .reader-position { min-width: 0; }
   .reading-column { padding: 28px 22px 70px; }
   .reading-column > h1 { font-size: var(--article-mobile-title-size); }
   .article-content { font-size: var(--article-mobile-body-size); line-height: 1.72; }
@@ -1317,6 +1346,11 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   .logs-panel footer > span { display: none; }
   .toast, .error-banner { right: 12px; bottom: 82px; }
   .error-banner { bottom: 132px; }
+}
+
+@media (max-width: 480px) {
+  .reader-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .reader-actions .button-label { font-size: 11px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
