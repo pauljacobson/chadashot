@@ -30,6 +30,7 @@ import {
   verifyLogin,
 } from './api';
 import { type ArticleReadFilter, type ReaderFilter, type SyncStatus, useReader } from './useReader';
+import { readerCountStatus, type ReaderCountStatus } from './readerCounts';
 import { buildFeedGroups, type FeedSortOrder, feedFaviconUrl } from './feedTree';
 import {
   clearOfflineData,
@@ -318,6 +319,7 @@ function FeedTree({ snapshot, filter, unreadOnly, sortOrder, onFilter, onSubscri
 
 function Navigation({
   snapshot,
+  coverage,
   filter,
   onFilter,
   onSettings,
@@ -328,6 +330,7 @@ function Navigation({
   status,
 }: {
   snapshot: ReturnType<typeof useReader>['snapshot'];
+  coverage: ReturnType<typeof useReader>['coverage'];
   filter: ReaderFilter;
   onFilter: (filter: ReaderFilter) => void;
   onSettings: () => void;
@@ -337,13 +340,17 @@ function Navigation({
   onUnreadOnlyChange: (unreadOnly: boolean) => void;
   status: SyncStatus;
 }) {
-  const unread = snapshot?.articles.filter((article) => !article.read).length ?? 0;
+  const hasCompleteCount = Boolean(snapshot?.counts);
+  const unread = snapshot?.counts?.inbox
+    ?? snapshot?.articles.filter((article) => !article.read).length
+    ?? 0;
+  const countStatus = readerCountStatus(hasCompleteCount, coverage, status === 'current');
   return (
     <aside className="sidebar" id="reader-sidebar">
       <nav aria-label="Reader navigation">
         <div className="nav-group">
           <button className={`nav-item ${filter.kind === 'inbox' ? 'active' : ''}`} onClick={() => onFilter({ kind: 'inbox' })}>
-            <span aria-hidden="true">●</span><span>Inbox</span><span className="nav-count">{unread}</span>
+            <span aria-hidden="true">●</span><span>Inbox</span><ReaderCount value={unread} status={countStatus} className="nav-count" />
           </button>
           <button className={`nav-item ${filter.kind === 'all' ? 'active' : ''}`} onClick={() => onFilter({ kind: 'all' })}>
             <span aria-hidden="true">○</span><span>All articles</span>
@@ -359,6 +366,23 @@ function Navigation({
         <button onClick={onSettings}>Settings</button>
       </div>
     </aside>
+  );
+}
+
+function ReaderCount({ value, status, className }: { value: number; status: ReaderCountStatus; className?: string }) {
+  const partial = status === 'cached-partial';
+  const title = partial
+    ? `At least ${value} items are available in the device cache; the full count is not available offline.`
+    : status === 'last-synced'
+      ? `${value} items at the last successful sync.`
+      : undefined;
+  return (
+    <span
+      className={className}
+      data-count-status={status}
+      title={title}
+      aria-label={title}
+    >{partial ? '≥' : ''}{value}</span>
   );
 }
 
@@ -461,6 +485,7 @@ export function ArticleList({
   onMarkAllRead,
   onLoadMore,
   total = articles.length,
+  totalStatus = 'current',
 }: {
   listKey: string;
   title: string;
@@ -476,6 +501,7 @@ export function ArticleList({
   onMarkAllRead?: () => Promise<number>;
   onLoadMore?: () => void;
   total?: number;
+  totalStatus?: ReaderCountStatus;
 }) {
   const [confirmingMarkAll, setConfirmingMarkAll] = useState(false);
   const [markingAll, setMarkingAll] = useState(false);
@@ -541,7 +567,7 @@ export function ArticleList({
   return (
     <section ref={listRef} className="article-list" id="article-list" aria-label={`${title} articles`}>
       <header className="list-header">
-        <div className="list-heading"><h1>{title}</h1><span>{total}</span></div>
+        <div className="list-heading"><h1>{title}</h1><ReaderCount value={total} status={totalStatus} /></div>
         {showReadFilter && (
           <div className="article-read-filter" role="group" aria-label="Filter articles by read status">
             {(['all', 'unread', 'read'] as const).map((filter) => (
@@ -1888,7 +1914,7 @@ export function App() {
         </div>
       </header>
       <div className="workspace" ref={workspaceRef} style={workspaceStyle}>
-        <Navigation snapshot={reader.snapshot} filter={reader.filter} unreadOnly={unreadFeedsOnly} sortOrder={feedSortOrder} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} onSubscribe={() => setSubscribeOpen(true)} onUnreadOnlyChange={setUnreadFeedsOnly} status={reader.status} />
+        <Navigation snapshot={reader.snapshot} coverage={reader.coverage} filter={reader.filter} unreadOnly={unreadFeedsOnly} sortOrder={feedSortOrder} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} onSubscribe={() => setSubscribeOpen(true)} onUnreadOnlyChange={setUnreadFeedsOnly} status={reader.status} />
         <PanelResizer
           className="sidebar-resizer"
           label="Resize feed sidebar"
@@ -1906,6 +1932,7 @@ export function App() {
             title={title}
             articles={reader.articles}
             total={reader.totalArticles}
+            totalStatus={reader.totalCountStatus}
             readFilter={reader.readFilter}
             showReadFilter={activeFilter.kind !== 'inbox'}
             markAllCount={reader.readFilter !== 'read' && reader.coverage?.complete ? reader.bulkUnreadCount : 0}

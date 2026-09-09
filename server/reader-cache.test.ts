@@ -84,6 +84,7 @@ describe('transactional reader cache', () => {
 
     expect(cache.readSnapshot(identity)).toMatchObject({
       source: 'google-reader',
+      counts: { all: 2, inbox: 1, starred: 1, uncategorized: 0 },
       folders: value.folders,
       subscriptions: value.subscriptions,
       articles: value.articles,

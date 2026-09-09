@@ -25,6 +25,13 @@ export type ReaderVersions = {
   body: number;
 };
 
+export type ReaderScopeCounts = {
+  all: number;
+  inbox: number;
+  starred: number;
+  uncategorized: number;
+};
+
 export type ReaderArticlePage = {
   accountKey: string;
   generation: string;
@@ -45,7 +52,7 @@ export type ReaderNavigation = {
   accountKey: string;
   generation: string;
   versions: ReaderVersions;
-  counts: { all: number; inbox: number; starred: number; uncategorized: number };
+  counts: ReaderScopeCounts;
   folders: Array<Folder & { totalCount: number; latestPublishedAt: string | null }>;
   feeds: Array<Subscription & { totalCount: number; latestPublishedAt: string | null }>;
 };
@@ -107,6 +114,8 @@ export type Folder = {
 export type ReaderSnapshot = {
   generatedAt: string;
   source: 'fixture' | 'google-reader';
+  /** Complete scope totals from the server. Absent on partial legacy snapshots. */
+  counts?: ReaderScopeCounts;
   folders: Folder[];
   subscriptions: Subscription[];
   articles: Article[];

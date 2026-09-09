@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { ReaderSnapshot } from '../shared/reader';
-import { applyReadStates } from './readerState';
+import { applyArticleMutation, applyReadStates } from './readerState';
 
 const snapshot: ReaderSnapshot = {
   generatedAt: '2026-09-07T00:00:00.000Z',
   source: 'fixture',
+  counts: { all: 2, inbox: 2, starred: 0, uncategorized: 0 },
   folders: [{ id: 'folder-1', title: 'Folder', unreadCount: 2 }],
   subscriptions: [{
     id: 'feed-1', title: 'Feed', url: 'https://example.test/feed', siteUrl: null,
@@ -34,6 +35,7 @@ describe('reader state', () => {
     expect(next.articles.every((article) => article.read)).toBe(true);
     expect(next.subscriptions[0].unreadCount).toBe(0);
     expect(next.folders[0].unreadCount).toBe(0);
+    expect(next.counts?.inbox).toBe(0);
   });
 
   it('can mark an article unread and never produces negative counters', () => {
@@ -46,5 +48,20 @@ describe('reader state', () => {
     expect(unreadAgain.articles[0].read).toBe(false);
     expect(unreadAgain.subscriptions[0].unreadCount).toBe(1);
     expect(unreadAgain.folders[0].unreadCount).toBe(1);
+    expect(unreadAgain.counts?.inbox).toBe(1);
+  });
+
+  it('updates complete counts for an article visible beyond the partial device cache', () => {
+    const partial = { ...snapshot, articles: [snapshot.articles[0]!] };
+    const next = applyArticleMutation(partial, snapshot.articles[1]!, {
+      articleId: 'article-2',
+      operation: 'read',
+      value: true,
+    });
+
+    expect(next.articles).toHaveLength(1);
+    expect(next.counts?.inbox).toBe(1);
+    expect(next.subscriptions[0].unreadCount).toBe(1);
+    expect(next.folders[0].unreadCount).toBe(1);
   });
 });

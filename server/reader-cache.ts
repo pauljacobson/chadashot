@@ -1250,6 +1250,11 @@ export class ReaderCache {
       const articleFolderRows = this.database.prepare(`
         SELECT article_id, folder_id FROM reader_article_folders WHERE generation_id = ?
       `).all(generationId) as Array<{ article_id: string; folder_id: string }>;
+      const scopeRows = this.database.prepare(`
+        SELECT id, total_count FROM reader_navigation_activity
+        WHERE generation_id = ? AND kind = 'scope'
+      `).all(generationId) as Array<{ id: string; total_count: number }>;
+      const scopeCounts = new Map(scopeRows.map((row) => [row.id, row.total_count] as const));
       const subscriptionFolders = new Map<string, string[]>();
       for (const row of subscriptionFolderRows) {
         subscriptionFolders.set(row.subscription_id, [...(subscriptionFolders.get(row.subscription_id) ?? []), row.folder_id]);
@@ -1261,6 +1266,12 @@ export class ReaderCache {
       return {
         generatedAt: account.last_success_at ?? nowIso(),
         source: 'google-reader' as const,
+        counts: {
+          all: scopeCounts.get('all') ?? 0,
+          inbox: scopeCounts.get('inbox') ?? 0,
+          starred: scopeCounts.get('starred') ?? 0,
+          uncategorized: scopeCounts.get('uncategorized') ?? 0,
+        },
         folders: folderRows.map((row) => ({ id: row.id, title: row.title, unreadCount: row.unread_count })),
         subscriptions: subscriptionRows.map((row) => ({
           id: row.id,

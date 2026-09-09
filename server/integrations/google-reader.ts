@@ -508,6 +508,12 @@ export class GoogleReaderClient {
       return {
         generatedAt: new Date().toISOString(),
         source: 'google-reader' as const,
+        counts: {
+          all: articles.length,
+          inbox: articles.filter((article) => !article.read).length,
+          starred: articles.filter((article) => article.starred).length,
+          uncategorized: articles.filter((article) => article.folderIds.length === 0).length,
+        },
         folders,
         subscriptions,
         articles,

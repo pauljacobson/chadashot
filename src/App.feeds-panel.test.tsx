@@ -58,6 +58,7 @@ const reader = vi.hoisted(() => ({
   toggleRead: vi.fn(),
   toggleStarred: vi.fn(),
   totalArticles: 0,
+  totalCountStatus: 'current' as const,
 }));
 
 const article: Article = {
@@ -127,11 +128,14 @@ describe('responsive feeds navigation', () => {
     reader.toggleRead.mockClear();
     Reflect.set(reader, 'articles', []);
     Reflect.set(reader, 'filter', { kind: 'inbox' });
+    Reflect.set(reader, 'coverage', null);
     Reflect.set(reader, 'query', '');
     Reflect.set(reader, 'readFilter', 'all');
     Reflect.set(reader, 'selectedArticle', null);
     Reflect.set(reader, 'snapshot', null);
+    Reflect.set(reader, 'status', 'current');
     Reflect.set(reader, 'totalArticles', 0);
+    Reflect.set(reader, 'totalCountStatus', 'current');
     reader.setFilter.mockImplementation((filter) => Reflect.set(reader, 'filter', filter));
     reader.setQuery.mockImplementation((query) => Reflect.set(reader, 'query', query));
     reader.setReadFilter.mockImplementation((filter) => Reflect.set(reader, 'readFilter', filter));
@@ -166,6 +170,60 @@ describe('responsive feeds navigation', () => {
     fireEvent.mouseDown(dialog.parentElement!);
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Feeds' })).not.toBeInTheDocument());
     expect(trigger).toHaveFocus();
+  });
+
+  it('shows one full Inbox total while device metadata coverage is partial', async () => {
+    createResponsiveNavigation(false);
+    Reflect.set(reader, 'coverage', {
+      loaded: 1_600,
+      total: 29_402,
+      complete: false,
+      nextCursor: 'next',
+      changeToken: 'token',
+      backfillInterrupted: true,
+    });
+    Reflect.set(reader, 'snapshot', {
+      generatedAt: '2026-09-09T10:24:00.000Z',
+      source: 'google-reader',
+      counts: { all: 29_402, inbox: 18_916, starred: 20, uncategorized: 4_000 },
+      articles: Array.from({ length: 1_600 }, (_, index) => ({ ...article, id: `article-${index}`, read: index >= 1_192 })),
+      folders: [],
+      subscriptions: [],
+    });
+    Reflect.set(reader, 'totalArticles', 18_916);
+
+    render(<App />);
+
+    expect(await screen.findAllByText('18916')).toHaveLength(2);
+    expect(screen.queryByText('1192')).not.toBeInTheDocument();
+  });
+
+  it('marks a partial offline fallback as a lower bound', async () => {
+    createResponsiveNavigation(false);
+    Reflect.set(reader, 'status', 'offline');
+    Reflect.set(reader, 'coverage', {
+      loaded: 2,
+      total: 20,
+      complete: false,
+      nextCursor: 'next',
+      changeToken: null,
+      backfillInterrupted: true,
+    });
+    Reflect.set(reader, 'snapshot', {
+      generatedAt: '2026-09-09T10:24:00.000Z',
+      source: 'google-reader',
+      articles: [{ ...article, id: 'article-1' }, { ...article, id: 'article-2' }],
+      folders: [],
+      subscriptions: [],
+    });
+    Reflect.set(reader, 'articles', [{ ...article, id: 'article-1' }, { ...article, id: 'article-2' }]);
+    Reflect.set(reader, 'totalArticles', 2);
+    Reflect.set(reader, 'totalCountStatus', 'cached-partial');
+
+    render(<App />);
+
+    expect(await screen.findAllByText('≥2')).toHaveLength(2);
+    expect(screen.getAllByTitle(/full count is not available offline/i)).toHaveLength(2);
   });
 
   it('traps focus, closes with Escape, and restores focus to the active trigger', async () => {
