@@ -1,9 +1,16 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
-import type { Article } from '../shared/reader';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Article, SavedHighlight } from '../shared/reader';
 import { ReaderPane } from './App';
+
+const apiMocks = vi.hoisted(() => ({ getArticleHighlights: vi.fn() }));
+
+vi.mock('./api', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./api')>(),
+  getArticleHighlights: apiMocks.getArticleHighlights,
+}));
 
 const article: Article = {
   id: 'article-1',
@@ -21,26 +28,46 @@ const article: Article = {
   starred: false,
 };
 
-describe('article highlights', () => {
-  it('keeps selected text visibly highlighted after the save completes', async () => {
-    const onHighlight = vi.fn().mockImplementation(async (_article: Article, selection: { text: string; startOffset: number; endOffset: number }) => ({
-      synchronized: true,
-      highlight: {
-        id: 'highlight-1',
-        articleId: article.id,
-        text: selection.text,
-        note: null,
-        startOffset: selection.startOffset,
-        endOffset: selection.endOffset,
-        readwiseStatus: 'saved',
-        readwiseId: 'readwise-1',
-        readwiseError: null,
-        createdAt: '2026-09-07T00:00:00.000Z',
-      },
-    }));
-    const { container } = render(
+function savedHighlight(text: string, startOffset: number, id = 'highlight-1'): SavedHighlight {
+  return {
+    id,
+    articleId: article.id,
+    text,
+    note: null,
+    startOffset,
+    endOffset: startOffset + text.length,
+    readwiseStatus: 'saved',
+    readwiseId: 'readwise-1',
+    readwiseError: null,
+    createdAt: '2026-09-07T00:00:00.000Z',
+  };
+}
+
+type HighlightHandler = (selectedArticle: Article, selection: { text: string; startOffset: number; endOffset: number }, note?: string) => Promise<{
+  highlight: SavedHighlight;
+  synchronized: boolean;
+  warning?: string;
+}>;
+type NotifyHandler = (message: string) => void;
+
+function renderReaderPane({
+  selectedArticle = article,
+  onHighlight = vi.fn(async (_article: Article, selection: { text: string; startOffset: number }) => ({
+    synchronized: true,
+    highlight: savedHighlight(selection.text, selection.startOffset),
+  })),
+  onNotify = vi.fn(),
+}: {
+  selectedArticle?: Article;
+  onHighlight?: HighlightHandler;
+  onNotify?: NotifyHandler;
+} = {}) {
+  return {
+    onHighlight,
+    onNotify,
+    ...render(
       <ReaderPane
-        article={article}
+        article={selectedArticle}
         position={1}
         total={1}
         hasPrevious={false}
@@ -50,22 +77,46 @@ describe('article highlights', () => {
         onNext={vi.fn()}
         onToggleStar={vi.fn()}
         onToggleRead={vi.fn()}
-        onNotify={vi.fn()}
+        onNotify={onNotify}
         onHighlight={onHighlight}
         onSaveToReader={vi.fn()}
       />,
-    );
+    ),
+  };
+}
+
+function selectText(startNode: Node, startOffset: number, endNode: Node, endOffset: number) {
+  const selection = window.getSelection();
+  const range = document.createRange();
+  range.setStart(startNode, startOffset);
+  range.setEnd(endNode, endOffset);
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+beforeEach(() => {
+  apiMocks.getArticleHighlights.mockReset();
+  apiMocks.getArticleHighlights.mockResolvedValue({ highlights: [] });
+});
+
+afterEach(() => {
+  window.getSelection()?.removeAllRanges();
+  cleanup();
+});
+
+describe('article highlights', () => {
+  it('keeps selected text visibly highlighted after the save completes', async () => {
+    const onHighlight = vi.fn().mockImplementation(async (_article: Article, selection: { text: string; startOffset: number; endOffset: number }) => ({
+      synchronized: true,
+      highlight: savedHighlight(selection.text, selection.startOffset),
+    }));
+    const { container } = renderReaderPane({ onHighlight });
     const paragraph = container.querySelector('.article-content p');
     const textNode = paragraph?.firstChild;
     if (!paragraph || !textNode) throw new Error('Article content did not render');
     const text = textNode.textContent ?? '';
     const start = text.indexOf('selected words');
-    const selection = window.getSelection();
-    const range = document.createRange();
-    range.setStart(textNode, start);
-    range.setEnd(textNode, start + 'selected words'.length);
-    selection?.removeAllRanges();
-    selection?.addRange(range);
+    selectText(textNode, start, textNode, start + 'selected words'.length);
 
     fireEvent.mouseUp(paragraph);
     fireEvent.click(await screen.findByRole('button', { name: 'Highlight' }));
@@ -76,5 +127,81 @@ describe('article highlights', () => {
       undefined,
     ));
     expect(container.querySelector('mark[data-chadashot-highlight]')).toHaveTextContent('selected words');
+  });
+
+  it('captures keyboard selection changes across inline formatting', async () => {
+    const selectedArticle = {
+      ...article,
+      contentHtml: '<p>Keyboard <strong>selection</strong> crosses nodes.</p>',
+    };
+    const { container, onHighlight } = renderReaderPane({ selectedArticle });
+    const paragraph = container.querySelector('.article-content p');
+    const startNode = paragraph?.firstChild;
+    const endNode = paragraph?.querySelector('strong')?.firstChild;
+    if (!startNode || !endNode) throw new Error('Cross-node article content did not render');
+
+    selectText(startNode, 0, endNode, 'selection'.length);
+    fireEvent(document, new Event('selectionchange'));
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Highlight' }));
+    await waitFor(() => expect(onHighlight).toHaveBeenCalledWith(
+      selectedArticle,
+      expect.objectContaining({ text: 'Keyboard selection', startOffset: 0, endOffset: 18 }),
+      undefined,
+    ));
+  });
+
+  it('updates touch handle selections and clears actions for selections outside the article', async () => {
+    const { container } = renderReaderPane();
+    const paragraph = container.querySelector('.article-content p');
+    const textNode = paragraph?.firstChild;
+    if (!paragraph || !textNode) throw new Error('Article content did not render');
+    const text = textNode.textContent ?? '';
+    const start = text.indexOf('selected words');
+
+    selectText(textNode, start, textNode, start + 'selected'.length);
+    fireEvent.touchEnd(paragraph);
+    expect(await screen.findByText('“selected”')).toBeInTheDocument();
+
+    selectText(textNode, start, textNode, start + 'selected words should'.length);
+    fireEvent(document, new Event('selectionchange'));
+    expect(await screen.findByText('“selected words should”')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add note' }));
+    expect(screen.getByRole('textbox', { name: 'Highlight note' })).toHaveFocus();
+
+    const outside = document.createElement('p');
+    outside.textContent = 'Outside selection';
+    document.body.append(outside);
+    selectText(outside.firstChild!, 0, outside.firstChild!, outside.textContent.length);
+    fireEvent(document, new Event('selectionchange'));
+    await waitFor(() => expect(screen.queryByRole('toolbar', { name: 'Selected text actions' })).not.toBeInTheDocument());
+    outside.remove();
+  });
+
+  it('does not let a late highlight load erase a newly saved mark', async () => {
+    let resolveLoad!: (value: { highlights: SavedHighlight[] }) => void;
+    apiMocks.getArticleHighlights.mockImplementation(() => new Promise((resolve) => { resolveLoad = resolve; }));
+    const { container } = renderReaderPane();
+    const textNode = container.querySelector('.article-content p')?.firstChild;
+    if (!textNode) throw new Error('Article content did not render');
+    const text = textNode.textContent ?? '';
+    const start = text.indexOf('selected words');
+    selectText(textNode, start, textNode, start + 'selected words'.length);
+
+    fireEvent.mouseUp(textNode.parentElement!);
+    fireEvent.click(await screen.findByRole('button', { name: 'Highlight' }));
+    await waitFor(() => expect(container.querySelector('mark[data-chadashot-highlight]')).toHaveTextContent('selected words'));
+
+    resolveLoad({ highlights: [] });
+    await waitFor(() => expect(apiMocks.getArticleHighlights).toHaveBeenCalledWith(article.id, expect.any(AbortSignal)));
+    expect(container.querySelector('mark[data-chadashot-highlight]')).toHaveTextContent('selected words');
+  });
+
+  it('reports highlight loading failures without claiming saved marks are empty', async () => {
+    apiMocks.getArticleHighlights.mockRejectedValue(new Error('Server unavailable'));
+    const { onNotify } = renderReaderPane();
+
+    await waitFor(() => expect(onNotify).toHaveBeenCalledWith('Could not load saved highlights: Server unavailable'));
   });
 });

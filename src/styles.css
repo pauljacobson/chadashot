@@ -1320,7 +1320,13 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   .media-lightbox-image-area { padding: 58px 8px 8px; }
   .media-lightbox-image { max-height: calc(100dvh - 142px); border-radius: 7px; }
   .media-lightbox-close { min-height: 40px; }
-  .selection-panel { right: 12px; bottom: 12px; width: calc(100% - 24px); }
+  .selection-panel {
+    right: 12px;
+    bottom: calc(82px + env(safe-area-inset-bottom));
+    width: calc(100% - 24px);
+    max-height: calc(100dvh - 106px - env(safe-area-inset-bottom));
+    overflow-y: auto;
+  }
   .selection-actions button { min-height: 44px; }
   .mobile-navigation {
     min-height: 70px;

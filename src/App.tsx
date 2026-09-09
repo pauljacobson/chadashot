@@ -1,7 +1,7 @@
 import DOMPurify from 'dompurify';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { type CSSProperties, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { AccountSecurityState, AppLogLevel, AppLogResult, Article, IntegrationStatus, SavedHighlight, SessionState, Subscription } from '../shared/reader';
 import {
   appLogExportUrl,
@@ -621,6 +621,27 @@ type SelectionAnchor = {
   endOffset: number;
 };
 
+function selectionAnchor(root: HTMLElement, current: Selection | null): SelectionAnchor | null {
+  if (!current || current.isCollapsed || current.rangeCount === 0) return null;
+  const range = current.getRangeAt(0);
+  if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) return null;
+  const rawText = current.toString();
+  const text = rawText.trim().slice(0, 8191);
+  if (!text) return null;
+  const leadingWhitespace = rawText.length - rawText.trimStart().length;
+  const prefix = document.createRange();
+  prefix.selectNodeContents(root);
+  prefix.setEnd(range.startContainer, range.startOffset);
+  const startOffset = prefix.toString().length + leadingWhitespace;
+  return { text, startOffset, endOffset: startOffset + text.length };
+}
+
+function mergeHighlights(loaded: SavedHighlight[], current: SavedHighlight[]) {
+  const merged = new Map(loaded.map((highlight) => [highlight.id, highlight]));
+  current.forEach((highlight) => merged.set(highlight.id, highlight));
+  return [...merged.values()].sort((first, second) => first.startOffset - second.startOffset || first.createdAt.localeCompare(second.createdAt));
+}
+
 type MediaLightboxState = {
   src: string;
   alt: string;
@@ -714,6 +735,7 @@ export function ReaderPane({
   onSaveToReader: (article: Article) => Promise<void>;
 }) {
   const contentRef = useRef<HTMLDivElement>(null);
+  const selectionPanelRef = useRef<HTMLDivElement>(null);
   const lightboxCloseRef = useRef<HTMLButtonElement>(null);
   const lightboxTriggerRef = useRef<HTMLElement | null>(null);
   const [selection, setSelection] = useState<SelectionAnchor | null>(null);
@@ -726,15 +748,44 @@ export function ReaderPane({
   const sanitized = useMemo(() => DOMPurify.sanitize(article?.contentHtml ?? ''), [article?.contentHtml]);
   const sanitizedMarkup = useMemo(() => ({ __html: sanitized }), [sanitized]);
 
+  const captureSelection = useCallback(() => {
+    if (!contentRef.current) {
+      setSelection(null);
+      return;
+    }
+    setSelection(selectionAnchor(contentRef.current, window.getSelection()));
+  }, []);
+
   useEffect(() => {
     setHighlights([]);
     if (!article) return;
     const controller = new AbortController();
     getArticleHighlights(article.id, controller.signal)
-      .then((result) => setHighlights(result.highlights))
-      .catch(() => undefined);
+      .then((result) => setHighlights((current) => mergeHighlights(result.highlights, current)))
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        const message = error instanceof Error ? error.message : 'Unknown error';
+        onNotify(`Could not load saved highlights: ${message}`);
+      });
     return () => controller.abort();
-  }, [article]);
+  }, [article, onNotify]);
+
+  useEffect(() => {
+    let timeout: number | undefined;
+    function handleSelectionChange() {
+      window.clearTimeout(timeout);
+      timeout = window.setTimeout(() => {
+        const current = window.getSelection();
+        if ((!current || current.isCollapsed) && selectionPanelRef.current?.contains(document.activeElement)) return;
+        captureSelection();
+      }, 0);
+    }
+    document.addEventListener('selectionchange', handleSelectionChange);
+    return () => {
+      document.removeEventListener('selectionchange', handleSelectionChange);
+      window.clearTimeout(timeout);
+    };
+  }, [captureSelection]);
 
   useLayoutEffect(() => {
     if (!contentRef.current) return;
@@ -773,28 +824,6 @@ export function ReaderPane({
     finishArticleOpen();
     window.requestAnimationFrame(() => markMilestone('first-article'));
   }, [articleId, sanitized]);
-
-  function captureSelection() {
-    const current = window.getSelection();
-    if (!current || current.isCollapsed || !contentRef.current) {
-      setSelection(null);
-      return;
-    }
-    const range = current.getRangeAt(0);
-    if (!contentRef.current.contains(range.startContainer) || !contentRef.current.contains(range.endContainer)) return;
-    const rawText = current.toString();
-    const text = rawText.trim().slice(0, 8191);
-    if (!text) {
-      setSelection(null);
-      return;
-    }
-    const leadingWhitespace = rawText.length - rawText.trimStart().length;
-    const prefix = document.createRange();
-    prefix.selectNodeContents(contentRef.current);
-    prefix.setEnd(range.startContainer, range.startOffset);
-    const startOffset = prefix.toString().length + leadingWhitespace;
-    setSelection({ text, startOffset, endOffset: startOffset + text.length });
-  }
 
   async function saveHighlight() {
     if (!selection || !article) return;
@@ -913,7 +942,7 @@ export function ReaderPane({
         </article>
       </div>
       {selection && (
-        <div className="selection-panel" role="toolbar" aria-label="Selected text actions">
+        <div ref={selectionPanelRef} className="selection-panel" role="toolbar" aria-label="Selected text actions">
           <div className="selection-preview">“{selection.text}”</div>
           {noteOpen && <textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Why does this matter?" aria-label="Highlight note" autoFocus />}
           <div className="selection-actions">
