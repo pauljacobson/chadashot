@@ -228,7 +228,7 @@ describe('paginated reader API', () => {
 
     const routineLease = cache.acquireLease(identity)!;
     const routine = cache.beginIncrementalRun(routineLease, 'routine');
-    cache.applyRoutineDiscovery(routine, [article('new')], 100, 'fingerprint');
+    cache.applyRoutineDiscovery(routine, [article('new')], [], [], 100, 'fingerprint');
     cache.completeIncrementalRun(routine);
     const routineDelta = api.changes(identity, token, 100);
     token = routineDelta.token;

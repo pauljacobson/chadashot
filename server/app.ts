@@ -192,7 +192,11 @@ export function createApp(config: AppConfig, dependencies: {
       // pass instead of treating the in-flight work as sufficient.
       return activePruning.then(() => pruneReaderCache(trigger));
     }
-    const pruning = runBackgroundReaderPrune(database, 1).then((result) => {
+    const pruning = runBackgroundReaderPrune(
+      database,
+      config.readerCachePruneMaxDeletes,
+      config.readerCachePrunePauseMs,
+    ).then((result) => {
       if (result.outcome === 'insufficient-cleanup-headroom') {
         logger.warn('Reader cache pruning deferred for insufficient filesystem headroom', {
           trigger,
@@ -224,7 +228,9 @@ export function createApp(config: AppConfig, dependencies: {
             bodyBytes: deletion.bodyBytes,
             searchRows: deletion.searchRows,
             durationMs: deletion.durationMs,
+            writerWaitMs: deletion.writerWaitMs,
             writerLockMs: deletion.writerLockMs,
+            phases: deletion.phases,
           })),
           storage: {
             pageCount: result.after.pageCount,
@@ -464,6 +470,8 @@ export function createApp(config: AppConfig, dependencies: {
           const applied = readerCache.applyRoutineDiscovery(
             incrementalRun,
             discovery.articles,
+            discovery.subscriptions,
+            discovery.folders,
             routineCutoffSeconds,
             fingerprint,
           );

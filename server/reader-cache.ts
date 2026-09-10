@@ -70,7 +70,16 @@ export type ReaderGenerationPruneResult = {
   deletions: Array<ReaderGenerationPruneCandidate & {
     searchRows: number;
     durationMs: number;
+    writerWaitMs: number;
     writerLockMs: number;
+    phases: {
+      protectionCheckMs: number;
+      searchCountMs: number;
+      searchDeleteMs: number;
+      searchKeyDeleteMs: number;
+      generationCascadeMs: number;
+      commitMs: number;
+    };
   }>;
   skipped: Array<{ generationId: string; reason: 'became-protected' }>;
   errors: Array<{ generationId: string; message: string }>;
@@ -112,17 +121,13 @@ export function readerCacheIdentity(userId: string, credentials: GoogleReaderCre
 export function readerSubscriptionFingerprint(subscriptions: Subscription[], folders: Folder[] = []) {
   return sha256(JSON.stringify({
     subscriptions: subscriptions
-      .map(({ id, title, url, siteUrl, iconUrl, folderIds }) => ({
+      .map(({ id, folderIds }) => ({
       id,
-      title,
-      url,
-      siteUrl,
-      iconUrl,
       folderIds: [...folderIds].sort(),
     }))
       .sort((first, second) => first.id.localeCompare(second.id)),
     folders: folders
-      .map(({ id, title }) => ({ id, title }))
+      .map(({ id }) => ({ id }))
       .sort((first, second) => first.id.localeCompare(second.id)),
   }));
 }
@@ -345,7 +350,10 @@ export class ReaderCache {
       deferralReason: deferred ? checkpoint?.storage_deferral_reason ?? null : null,
       routineSinceSeconds: Math.max(0, (checkpoint?.routine_cutoff_seconds ?? 0) - cadence.overlapSeconds),
       bodySinceSeconds: Math.max(0, (checkpoint?.body_cutoff_seconds ?? 0) - cadence.overlapSeconds),
-      subscriptionFingerprint: checkpoint?.subscription_fingerprint ?? this.subscriptionFingerprint(identity),
+      // Recompute from the current generation first. This lets a deployment
+      // transition safely from an older fingerprint format without forcing a
+      // one-time full import merely because the hash representation changed.
+      subscriptionFingerprint: this.subscriptionFingerprint(identity) ?? checkpoint?.subscription_fingerprint ?? null,
     };
   }
 
@@ -760,6 +768,7 @@ export class ReaderCache {
     }>,
     versions: { collection: number; state: number; body: number },
     createdAt: string,
+    navigationChanged = changes.some((change) => change.metadata || change.state),
   ) {
     const insert = this.database.prepare(`
       INSERT INTO reader_change_log
@@ -781,7 +790,7 @@ export class ReaderCache {
         createdAt,
       );
     }
-    if (changes.some((change) => change.metadata || change.state)) {
+    if (navigationChanged) {
       this.database.prepare(`
         INSERT INTO reader_change_log
           (account_key, article_id, metadata_changed, collection_version, state_version, body_version, payload_json, created_at)
@@ -853,6 +862,8 @@ export class ReaderCache {
   applyRoutineDiscovery(
     run: ReaderCacheIncrementalRun,
     articles: Article[],
+    subscriptions: Subscription[],
+    folders: Folder[],
     cutoffSeconds: number,
     subscriptionFingerprint: string,
   ) {
@@ -868,6 +879,34 @@ export class ReaderCache {
           insertedIds.push(article.id);
         }
       }
+      let metadataChanged = 0;
+      const updateSubscription = this.database.prepare(`
+        UPDATE reader_subscriptions
+        SET title = ?, url = ?, site_url = ?, icon_url = ?
+        WHERE generation_id = ? AND id = ?
+          AND (title IS NOT ? OR url IS NOT ? OR site_url IS NOT ? OR icon_url IS NOT ?)
+      `);
+      for (const subscription of subscriptions) {
+        metadataChanged += updateSubscription.run(
+          subscription.title,
+          subscription.url,
+          subscription.siteUrl,
+          subscription.iconUrl,
+          generationId,
+          subscription.id,
+          subscription.title,
+          subscription.url,
+          subscription.siteUrl,
+          subscription.iconUrl,
+        ).changes;
+      }
+      const updateFolder = this.database.prepare(`
+        UPDATE reader_folders SET title = ?
+        WHERE generation_id = ? AND id = ? AND title IS NOT ?
+      `);
+      for (const folder of folders) {
+        metadataChanged += updateFolder.run(folder.title, generationId, folder.id, folder.title).changes;
+      }
       const timestamp = this.timestamp();
       this.database.prepare(`
         INSERT INTO reader_incremental_checkpoints
@@ -879,18 +918,23 @@ export class ReaderCache {
           last_routine_at = excluded.last_routine_at
       `).run(run.accountKey, cutoffSeconds, subscriptionFingerprint, timestamp);
       this.database.prepare(`UPDATE reader_sync_runs SET items_staged = ? WHERE id = ?`).run(inserted, run.runId);
-      if (inserted > 0) {
+      if (inserted > 0 || metadataChanged > 0) {
         this.rebuildNavigationActivity(generationId);
-        const versions = this.advanceVersions(run.accountKey, generationId, { collection: true, state: true, body: true });
+        const versions = this.advanceVersions(run.accountKey, generationId, {
+          collection: true,
+          state: inserted > 0,
+          body: inserted > 0,
+        });
         this.recordIncrementalChanges(
           run.accountKey,
           generationId,
           insertedIds.map((articleId) => ({ articleId, metadata: true, state: true, body: true })),
           versions,
           timestamp,
+          true,
         );
       }
-      return { inserted };
+      return { inserted, metadataChanged };
     });
     return apply.immediate();
   }
@@ -1341,10 +1385,12 @@ export class ReaderCache {
     dryRun?: boolean;
     maxDeletes?: number;
     includeCandidateDetails?: boolean;
+    betweenDeletesMs?: number;
   } = {}): Promise<ReaderGenerationPruneResult> {
     const started = performance.now();
     const dryRun = options.dryRun ?? false;
     const maxDeletes = Math.max(0, Math.floor(options.maxDeletes ?? 1));
+    const betweenDeletesMs = Math.max(0, Math.floor(options.betweenDeletesMs ?? 0));
     const candidates = this.pruneCandidates(options.includeCandidateDetails ? Number.POSITIVE_INFINITY : maxDeletes);
     const result: ReaderGenerationPruneResult = {
       dryRun,
@@ -1363,10 +1409,14 @@ export class ReaderCache {
     for (const candidate of candidates.slice(0, maxDeletes)) {
       const deleteStarted = performance.now();
       try {
-        const remove = this.database.transaction(() => {
+        const writerRequested = performance.now();
+        this.database.exec('BEGIN IMMEDIATE');
+        const writerAcquired = performance.now();
+        try {
           // Recheck the account pointer and lease/fence protection while the
           // writer lock is held. A candidate discovered before publication or
           // lease renewal must never be deleted based on stale observations.
+          const protectionStarted = performance.now();
           const deletable = this.database.prepare(`
             SELECT 1
             FROM reader_cache_generations generation
@@ -1382,29 +1432,57 @@ export class ReaderCache {
                 )
               )
           `).get(candidate.generationId, this.timestamp());
-          if (!deletable) return null;
+          const protectionCheckMs = performance.now() - protectionStarted;
+          if (!deletable) {
+            this.database.exec('COMMIT');
+            result.skipped.push({ generationId: candidate.generationId, reason: 'became-protected' });
+            continue;
+          }
 
+          const searchCountStarted = performance.now();
           const searchRows = this.database.prepare(`
             SELECT COUNT(*) AS count FROM reader_article_search_keys WHERE generation_id = ?
           `).get(candidate.generationId) as { count: number };
+          const searchCountMs = performance.now() - searchCountStarted;
+          const searchDeleteStarted = performance.now();
           this.database.prepare(`
             DELETE FROM reader_article_search
             WHERE rowid IN (
               SELECT rowid FROM reader_article_search_keys WHERE generation_id = ?
             )
           `).run(candidate.generationId);
+          const searchDeleteMs = performance.now() - searchDeleteStarted;
+          const searchKeyDeleteStarted = performance.now();
           this.database.prepare(`DELETE FROM reader_article_search_keys WHERE generation_id = ?`)
             .run(candidate.generationId);
+          const searchKeyDeleteMs = performance.now() - searchKeyDeleteStarted;
+          const generationCascadeStarted = performance.now();
           const deleted = this.database.prepare(`DELETE FROM reader_cache_generations WHERE id = ?`)
             .run(candidate.generationId);
-          return deleted.changes === 1 ? searchRows.count : null;
-        });
-        const searchRows = remove.immediate();
-        const durationMs = performance.now() - deleteStarted;
-        if (searchRows === null) {
-          result.skipped.push({ generationId: candidate.generationId, reason: 'became-protected' });
-        } else {
-          result.deletions.push({ ...candidate, searchRows, durationMs, writerLockMs: durationMs });
+          const generationCascadeMs = performance.now() - generationCascadeStarted;
+          if (deleted.changes !== 1) throw new Error('Reader generation disappeared during pruning');
+          const commitStarted = performance.now();
+          this.database.exec('COMMIT');
+          const commitMs = performance.now() - commitStarted;
+          const completed = performance.now();
+          result.deletions.push({
+            ...candidate,
+            searchRows: searchRows.count,
+            durationMs: completed - deleteStarted,
+            writerWaitMs: writerAcquired - writerRequested,
+            writerLockMs: completed - writerAcquired,
+            phases: {
+              protectionCheckMs,
+              searchCountMs,
+              searchDeleteMs,
+              searchKeyDeleteMs,
+              generationCascadeMs,
+              commitMs,
+            },
+          });
+        } catch (error) {
+          if (this.database.inTransaction) this.database.exec('ROLLBACK');
+          throw error;
         }
       } catch (error) {
         result.errors.push({
@@ -1413,7 +1491,12 @@ export class ReaderCache {
         });
         break;
       }
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      const hasAnotherCandidate = result.deletions.length + result.skipped.length < Math.min(candidates.length, maxDeletes);
+      if (hasAnotherCandidate && betweenDeletesMs > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, betweenDeletesMs));
+      } else {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
     }
     result.durationMs = performance.now() - started;
     return result;

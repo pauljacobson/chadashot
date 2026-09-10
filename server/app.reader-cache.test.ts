@@ -23,6 +23,65 @@ function config() {
 describe('reader cache API', () => {
   beforeEach(() => clearGoogleReaderSessionCache());
 
+  it('keeps routine synchronization incremental when provider metadata changes', async () => {
+    const database = openMemoryDatabase();
+    const appConfig = loadConfig({
+      NODE_ENV: 'test',
+      AUTH_MODE: 'development',
+      ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
+      READER_CACHE_ENABLED: 'true',
+      READER_CACHE_AUTO_PRUNE: 'false',
+      READER_ROUTINE_SYNC_INTERVAL_MS: '0',
+      READER_STATE_SYNC_INTERVAL_MS: String(24 * 60 * 60 * 1_000),
+      READER_BODY_SYNC_INTERVAL_MS: String(7 * 24 * 60 * 60 * 1_000),
+      READER_FULL_SYNC_INTERVAL_MS: String(30 * 24 * 60 * 60 * 1_000),
+    });
+    saveIntegration(database, appConfig, 'birchfeed', {
+      serverUrl: 'https://reader.example.test', email: 'reader@example.test', apiKey: 'secret',
+    });
+    let siteUrl = 'https://initial.example.test';
+    const fetchImplementation = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.pathname.includes('/subscription/list')) return jsonResponse({ subscriptions: [{
+        id: 'feed/1',
+        title: 'Feed',
+        url: 'https://example.test/feed',
+        htmlUrl: siteUrl,
+        categories: [],
+      }] });
+      if (url.pathname.includes('/unread-count')) return jsonResponse({ unreadcounts: [{ id: 'feed/1', count: 1 }] });
+      if (url.pathname.includes('/stream/items/ids')) return jsonResponse({ itemRefs: [] });
+      if (url.pathname.includes('/stream/contents/')) return jsonResponse({ items: [{
+        id: 'article-1',
+        title: 'Article',
+        content: { content: '<p>Body</p>' },
+        categories: [],
+        origin: { streamId: 'feed/1', title: 'Feed' },
+      }] });
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const app = createApp(appConfig, { database, fetchImplementation });
+
+    expect((await request(app).get('/api/reader/snapshot')).status).toBe(202);
+    await vi.waitFor(() => {
+      expect(database.prepare('SELECT kind, status FROM reader_sync_runs ORDER BY rowid DESC LIMIT 1').get())
+        .toEqual({ kind: 'full', status: 'succeeded' });
+    });
+
+    siteUrl = 'https://changed.example.test';
+    expect((await request(app).get('/api/reader/snapshot')).status).toBe(200);
+    await vi.waitFor(() => {
+      expect(database.prepare('SELECT COUNT(*) AS count FROM reader_sync_runs').get()).toEqual({ count: 2 });
+      expect(database.prepare('SELECT kind, status FROM reader_sync_runs ORDER BY rowid DESC LIMIT 1').get())
+        .toEqual({ kind: 'routine', status: 'succeeded' });
+    });
+
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_cache_generations').get()).toEqual({ count: 1 });
+    expect(database.prepare('SELECT site_url FROM reader_subscriptions').get())
+      .toEqual({ site_url: 'https://changed.example.test' });
+  });
+
   it('uses ID discovery to download only unknown bodies during a routine refresh', async () => {
     const database = openMemoryDatabase();
     const appConfig = loadConfig({

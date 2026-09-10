@@ -4,7 +4,7 @@ Issue #43 closes the generation-retention defect in the transactional reader cac
 
 ## Safety and consistency contract
 
-`ReaderCache.prune()` is the only generation-deletion interface. It discovers candidates without changing data, then deletes at most the requested number. Each generation receives its own `BEGIN IMMEDIATE` transaction. The transaction rechecks the account's current pointer and the staging lease/fence protection after acquiring the writer lock. It removes the generation's FTS rows by indexed row ID before relying on existing foreign-key cascades for metadata, bodies, state, relationships, and navigation rows. The loop yields to the event loop between generations.
+`ReaderCache.prune()` is the only generation-deletion interface. It discovers candidates without changing data, then deletes at most the requested number. Each generation receives its own `BEGIN IMMEDIATE` transaction. The transaction rechecks the account's current pointer and the staging lease/fence protection after acquiring the writer lock. It removes the generation's FTS rows by indexed row ID before relying on existing foreign-key cascades for metadata, bodies, state, relationships, and navigation rows. The loop pauses between generations so normal writes have a chance to proceed. Per-phase timings separate writer-lock wait, FTS work, relational cascade work, and commit time in structured logs.
 
 The paginated list, body, navigation, and change readers select the account generation and execute every dependent query within one short deferred read transaction. A concurrent publication and prune can therefore finish while an in-flight reader continues from its original SQLite snapshot. A later request carrying an old generation cursor still receives the existing reset response.
 
@@ -12,9 +12,11 @@ Migration 10 adds an indexed `reader_article_search_keys` row-ID map without reb
 
 ## Automatic scheduling
 
-Automatic pruning is enabled by default with `READER_CACHE_AUTO_PRUNE=true`. It runs in a worker thread for file-backed databases so synchronous `better-sqlite3` deletion does not block the web process. At most one generation is removed after a successful full publication, after a failed import, and during startup recovery. Timers are stopped and the run is published or failed before cleanup begins. A pruning error is logged as an independent outcome and cannot change the synchronization result or checkpoint.
+Automatic pruning is enabled by default with `READER_CACHE_AUTO_PRUNE=true`. It runs in a worker thread for file-backed databases so synchronous `better-sqlite3` deletion does not block the web process. A pass removes up to `READER_CACHE_PRUNE_MAX_DELETES` generations (100 by default), one transaction at a time, and waits `READER_CACHE_PRUNE_PAUSE_MS` (two seconds by default) between deletions. This drains an existing backlog during startup while preserving short windows for normal writes. Timers are stopped and the synchronization run is published or failed before cleanup begins. A pruning error is logged as an independent outcome and cannot change the synchronization result or checkpoint.
 
-Set `READER_CACHE_AUTO_PRUNE=false` only as an operational rollback. This stops automatic deletion without reverting migration 10 or changing which generation is served.
+Set `READER_CACHE_AUTO_PRUNE=false` only as an operational rollback. This stops automatic deletion without reverting migration 10 or changing which generation is served. Lower the maximum or increase the pause when a slower storage volume needs a gentler cleanup pass.
+
+Routine synchronization fingerprints only subscription IDs, folder IDs, and subscription-to-folder membership. Provider metadata such as titles, feed URLs, website URLs, icons, and unread counts does not define collection structure. Changed titles and URLs are applied to the current committed generation during the routine transaction instead of promoting the run to a full import. This prevents volatile provider metadata from continually creating replacement generations.
 
 ## Storage guard
 
