@@ -1,6 +1,10 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import type { Article, ReaderSnapshot } from '../shared/reader.js';
-import { openMemoryDatabase } from './database.js';
+import { openDatabase, openMemoryDatabase } from './database.js';
 import { ReaderApi, ReaderCursorError } from './reader-api.js';
 import { ReaderCache, type ReaderCacheIdentity, type ReaderCacheImport } from './reader-cache.js';
 
@@ -121,6 +125,20 @@ describe('paginated reader API', () => {
     expect(api.articles(identity, query({ scope: 'folder', scopeId: 'folder-1', read: 'unread' })).total).toBe(1);
     expect(api.articles(identity, query({ scope: 'feed', scopeId: 'feed-2', read: 'read' })).total).toBe(1);
     expect(api.articles(identity, query({ scope: 'starred' })).articles.map((item) => item.id)).toEqual(['two']);
+
+    const lease = cache.acquireLease(identity)!;
+    const bodyRun = cache.beginIncrementalRun(lease, 'body');
+    cache.applyBodyReconciliation(bodyRun, [article('one', { title: 'Renamed searchable title' })], 100);
+    cache.completeIncrementalRun(bodyRun);
+    expect(api.articles(identity, query({ search: 'Renamed' })).articles.map((item) => item.id)).toEqual(['one']);
+    const searchKey = database.prepare(`
+      SELECT search.rowid AS search_rowid, key.rowid AS key_rowid
+      FROM reader_article_search search
+      JOIN reader_article_search_keys key
+        ON key.generation_id = search.generation_id AND key.article_id = search.article_id
+      WHERE search.article_id = 'one'
+    `).get() as { search_rowid: number; key_rowid: number };
+    expect(searchKey.search_rowid).toBe(searchKey.key_rowid);
   });
 
   it('rejects malformed, cross-scope, and stale-generation cursors', () => {
@@ -154,7 +172,7 @@ describe('paginated reader API', () => {
     expect(api.body(identity, 'one')!.etag).toBe(bodyBefore);
   });
 
-  it('replays state, metadata, body invalidations, and deletions in bounded repeatable pages', () => {
+  it('replays state, metadata, body invalidations, and deletions in bounded repeatable pages', async () => {
     const database = openMemoryDatabase();
     const cache = new ReaderCache(database, 'worker');
     publish(cache, snapshot([article('changed'), article('deleted'), article('state')]));
@@ -166,6 +184,7 @@ describe('paginated reader API', () => {
       article('state', { read: true }),
       article('new'),
     ]));
+    await cache.prune({ maxDeletes: 1 });
 
     const collected: ReturnType<ReaderApi['changes']>['changes'] = [];
     let token = baseline.token;
@@ -243,5 +262,60 @@ describe('paginated reader API', () => {
       expect.objectContaining({ kind: 'navigation' }),
     ]));
     expect(api.navigation(identity).counts).toMatchObject({ all: 2, inbox: 1 });
+  });
+
+  it('keeps list, body, and navigation reads consistent while another connection publishes and prunes', () => {
+    function interleavedRead<T>(
+      initial: ReaderSnapshot,
+      replacement: ReaderSnapshot,
+      read: (api: ReaderApi) => T,
+    ) {
+      const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chadashot-reader-snapshot-'));
+      const writer = openDatabase(dataDir);
+      const writerCache = new ReaderCache(writer, 'writer');
+      publish(writerCache, initial);
+      const reader = new Database(path.join(dataDir, 'chadashot.sqlite'));
+      reader.pragma('journal_mode = WAL');
+      reader.pragma('foreign_keys = ON');
+      let interleaved = false;
+      const api = new ReaderApi(reader, () => new Date(), () => {
+        if (interleaved) return;
+        interleaved = true;
+        publish(writerCache, replacement);
+        void writerCache.prune({ maxDeletes: 1 });
+      });
+      const result = read(api);
+      return { result, reader, writer };
+    }
+
+    const list = interleavedRead(
+      snapshot([article('old-one'), article('old-two')]),
+      snapshot([article('new-only')]),
+      (api) => api.articles(identity, query({ limit: 1 })),
+    );
+    expect(list.result).toMatchObject({ total: 2, articles: [expect.objectContaining({ id: 'old-two' })] });
+    expect(() => new ReaderApi(list.reader).articles(identity, query({ limit: 1, cursor: list.result.nextCursor! })))
+      .toThrow('restart from the first page');
+    list.reader.close();
+    list.writer.close();
+
+    const body = interleavedRead(
+      snapshot([article('same', { contentHtml: '<p>Old body</p>' })]),
+      snapshot([article('same', { contentHtml: '<p>New body</p>' })]),
+      (api) => api.body(identity, 'same'),
+    );
+    expect(body.result?.contentHtml).toBe('<p>Old body</p>');
+    body.reader.close();
+    body.writer.close();
+
+    const navigation = interleavedRead(
+      snapshot([article('old-one'), article('old-two')]),
+      snapshot([article('new-only', { read: true })]),
+      (api) => api.navigation(identity),
+    );
+    expect(navigation.result.counts).toMatchObject({ all: 2, inbox: 2 });
+    expect(navigation.result.feeds[0]).toMatchObject({ totalCount: 2, unreadCount: 2 });
+    navigation.reader.close();
+    navigation.writer.close();
   });
 });

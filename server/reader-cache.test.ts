@@ -1,7 +1,10 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import Database from 'better-sqlite3';
 import { describe, expect, it } from 'vitest';
 import type { Article, ReaderSnapshot } from '../shared/reader.js';
-import { openMemoryDatabase } from './database.js';
+import { openDatabase, openMemoryDatabase } from './database.js';
 import {
   ReaderCache,
   ReaderCacheFencedError,
@@ -335,4 +338,119 @@ describe('transactional reader cache', () => {
 
     expect(restored?.articles[0]).toMatchObject({ id: 'restored', contentHtml: '<p>Body restored</p>' });
   });
+
+  it('keeps ten full imports bounded to the current generation and preserves search data', async () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database, 'worker-1');
+
+    for (let generation = 1; generation <= 10; generation += 1) {
+      publish(cache, snapshot([
+        article(`shared-${generation}`, { title: `Searchable generation ${generation}` }),
+        article(`retained-${generation}`, { contentHtml: `<p>${'body '.repeat(200)}</p>` }),
+      ]));
+      await cache.prune({ maxDeletes: 1 });
+    }
+
+    expect(database.prepare('SELECT id, status FROM reader_cache_generations').all()).toEqual([
+      expect.objectContaining({ status: 'committed' }),
+    ]);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_articles').get()).toEqual({ count: 2 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_article_bodies').get()).toEqual({ count: 2 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_article_search').get()).toEqual({ count: 2 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_article_search_keys').get()).toEqual({ count: 2 });
+    expect(database.prepare(`
+      SELECT article_id FROM reader_article_search WHERE reader_article_search MATCH 'Searchable'
+    `).all()).toEqual([{ article_id: 'shared-10' }]);
+    expect(database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+  });
+
+  it('protects every account current generation and only a correctly leased staging generation', async () => {
+    const database = openMemoryDatabase();
+    let now = new Date('2026-09-08T00:00:00.000Z');
+    const first = new ReaderCache(database, 'first-worker', 1_000, () => now);
+    const secondIdentity = { ...identity, accountKey: 'account-2', providerIdentity: 'provider-2' };
+    publish(first, snapshot([article('first-current')]), identity);
+    publish(first, snapshot([article('first-replacement')]), identity);
+    publish(first, snapshot([article('second-current')]), secondIdentity);
+    const failed = begin(first, identity);
+    first.stageArticles(failed, [article('failed-staging')]);
+    first.fail(failed, new Error('provider failed'));
+    const active = begin(first, secondIdentity);
+    first.stageArticles(active, [article('active-staging')]);
+
+    now = new Date('2026-09-08T00:00:00.500Z');
+    const dryRun = await first.prune({ dryRun: true, maxDeletes: 20 });
+    expect(dryRun.candidates.map((candidate) => candidate.generationId)).not.toContain(active.generationId);
+    expect(dryRun.candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ accountKey: identity.accountKey, reason: 'superseded' }),
+      expect.objectContaining({ generationId: failed.generationId, reason: 'failed' }),
+    ]));
+
+    now = new Date('2026-09-08T00:00:02.000Z');
+    const pruned = await first.prune({ maxDeletes: 20 });
+    expect(pruned.deletions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ generationId: active.generationId, reason: 'abandoned' }),
+      expect.objectContaining({ generationId: failed.generationId, reason: 'failed' }),
+    ]));
+    const retained = database.prepare(`
+      SELECT account_key, id FROM reader_cache_generations ORDER BY account_key
+    `).all();
+    expect(retained).toHaveLength(2);
+    expect(retained).toEqual(expect.arrayContaining([
+      expect.objectContaining({ account_key: identity.accountKey }),
+      expect.objectContaining({ account_key: secondIdentity.accountKey }),
+    ]));
+    expect(() => first.stageArticles(active, [article('stale')])).toThrow(ReaderCacheFencedError);
+  });
+
+  it('makes dry-run idempotent and uses the generation index for FTS pruning', async () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database, 'worker-1');
+    publish(cache, snapshot([article('old')]));
+    publish(cache, snapshot([article('current')]));
+    const before = database.serialize();
+
+    const first = await cache.prune({ dryRun: true, maxDeletes: 1 });
+    const second = await cache.prune({ dryRun: true, maxDeletes: 1 });
+
+    expect(first.candidates).toEqual(second.candidates);
+    expect(first.deletions).toEqual([]);
+    expect(database.serialize()).toEqual(before);
+    const plan = database.prepare(`
+      EXPLAIN QUERY PLAN SELECT rowid FROM reader_article_search_keys WHERE generation_id = ?
+    `).all(first.candidates[0]!.generationId) as Array<{ detail: string }>;
+    expect(plan.some((row) => row.detail.includes('reader_article_search_keys_generation'))).toBe(true);
+  });
+
+  it('reuses freed pages on later full imports instead of growing with generation history', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'chadashot-reader-reuse-'));
+    const database = openDatabase(dataDir);
+    const cache = new ReaderCache(database, 'file-worker');
+    const value = snapshot(Array.from({ length: 300 }, (_, index) => article(`article-${index}`, {
+      contentHtml: `<p>${'production-shaped body '.repeat(200)}</p>`,
+    })));
+
+    publish(cache, value);
+    publish(cache, value);
+    await cache.prune({ maxDeletes: 1 });
+    const pageCountAfterPrune = Number(database.pragma('page_count', { simple: true }));
+    const freePagesAfterPrune = Number(database.pragma('freelist_count', { simple: true }));
+    expect(freePagesAfterPrune).toBeGreaterThan(0);
+
+    publish(cache, value);
+    const pageCountAfterReuse = Number(database.pragma('page_count', { simple: true }));
+    const freePagesAfterReuse = Number(database.pragma('freelist_count', { simple: true }));
+    expect(freePagesAfterReuse).toBeLessThan(freePagesAfterPrune);
+    expect(pageCountAfterReuse).toBeLessThanOrEqual(pageCountAfterPrune + 128);
+    await cache.prune({ maxDeletes: 1 });
+
+    for (let generation = 4; generation <= 10; generation += 1) {
+      publish(cache, value);
+      await cache.prune({ maxDeletes: 1 });
+    }
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_cache_generations').get()).toEqual({ count: 1 });
+    expect(Number(database.pragma('page_count', { simple: true }))).toBeLessThanOrEqual(pageCountAfterPrune + 256);
+    expect(database.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+    database.close();
+  }, 20_000);
 });

@@ -1,5 +1,12 @@
 import crypto from 'node:crypto';
-import type { Article, ArticleMutation, Folder, ReaderSnapshot, Subscription } from '../shared/reader.js';
+import type {
+  Article,
+  ArticleMutation,
+  Folder,
+  ReaderSnapshot,
+  ReaderStorageDeferralReason,
+  Subscription,
+} from '../shared/reader.js';
 import type { AppDatabase } from './database.js';
 import { newId, nowIso } from './database.js';
 import { normalizeGoogleReaderItemId, type GoogleReaderCredentials } from './integrations/google-reader.js';
@@ -38,9 +45,36 @@ export type ReaderSyncPlan = {
   routine: boolean;
   state: boolean;
   body: boolean;
+  deferredUntil: string | null;
+  deferralReason: string | null;
   routineSinceSeconds: number;
   bodySinceSeconds: number;
   subscriptionFingerprint: string | null;
+};
+
+export type ReaderGenerationPruneCandidate = {
+  generationId: string;
+  accountKey: string;
+  generationNumber: number;
+  status: 'staging' | 'committed' | 'failed';
+  reason: 'superseded' | 'failed' | 'abandoned';
+  articleCount: number | null;
+  bodyBytes: number | null;
+  startedAt: string;
+};
+
+export type ReaderGenerationPruneResult = {
+  dryRun: boolean;
+  maxDeletes: number;
+  candidates: ReaderGenerationPruneCandidate[];
+  deletions: Array<ReaderGenerationPruneCandidate & {
+    searchRows: number;
+    durationMs: number;
+    writerLockMs: number;
+  }>;
+  skipped: Array<{ generationId: string; reason: 'became-protected' }>;
+  errors: Array<{ generationId: string; message: string }>;
+  durationMs: number;
 };
 
 export type ReaderCacheStatus = {
@@ -49,6 +83,7 @@ export type ReaderCacheStatus = {
   lastAttemptAt: string | null;
   lastSuccessAt: string | null;
   error: string | null;
+  storageDeferral: { until: string; reason: ReaderStorageDeferralReason } | null;
   versions: { collection: number; state: number; body: number };
 };
 
@@ -96,6 +131,28 @@ function chunks<T>(values: T[], size: number) {
   const result: T[][] = [];
   for (let offset = 0; offset < values.length; offset += size) result.push(values.slice(offset, offset + size));
   return result;
+}
+
+function bytes(...values: Array<string | null | undefined>) {
+  return values.reduce<number>((total, value) => total + Buffer.byteLength(value ?? '', 'utf8'), 0);
+}
+
+function articleCoreLogicalBytes(article: Omit<Article, 'folderIds' | 'read' | 'starred'>) {
+  return bytes(
+    article.id,
+    article.feedId,
+    article.title,
+    article.author,
+    article.source,
+    article.canonicalUrl,
+    article.publishedAt,
+    article.summary,
+    article.contentHtml,
+  ) + 112;
+}
+
+function articleLogicalBytes(article: Article) {
+  return articleCoreLogicalBytes(article) + bytes(...article.folderIds) + (article.folderIds.length * 96);
 }
 
 export class ReaderCache {
@@ -258,9 +315,12 @@ export class ReaderCache {
     overlapSeconds: number;
   }): ReaderSyncPlan {
     const checkpoint = this.database.prepare(`
-      SELECT routine_cutoff_seconds, body_cutoff_seconds, subscription_fingerprint,
-        last_routine_at, last_state_at, last_body_at, last_full_at
-      FROM reader_incremental_checkpoints WHERE account_key = ?
+      SELECT checkpoint.routine_cutoff_seconds, checkpoint.body_cutoff_seconds, checkpoint.subscription_fingerprint,
+        checkpoint.last_routine_at, checkpoint.last_state_at, checkpoint.last_body_at, checkpoint.last_full_at,
+        account.storage_deferred_until, account.storage_deferral_reason
+      FROM reader_accounts account
+      LEFT JOIN reader_incremental_checkpoints checkpoint ON checkpoint.account_key = account.account_key
+      WHERE account.account_key = ?
     `).get(identity.accountKey) as {
       routine_cutoff_seconds: number | null;
       body_cutoff_seconds: number | null;
@@ -269,15 +329,20 @@ export class ReaderCache {
       last_state_at: string | null;
       last_body_at: string | null;
       last_full_at: string | null;
+      storage_deferred_until: string | null;
+      storage_deferral_reason: string | null;
     } | undefined;
     const now = this.clock().getTime();
     const due = (value: string | null | undefined, interval: number) => !value || now - Date.parse(value) >= interval;
-    const full = !this.currentGenerationId(identity.accountKey) || due(checkpoint?.last_full_at, cadence.fullMs);
+    const deferred = Boolean(checkpoint?.storage_deferred_until && Date.parse(checkpoint.storage_deferred_until) > now);
+    const full = !deferred && (!this.currentGenerationId(identity.accountKey) || due(checkpoint?.last_full_at, cadence.fullMs));
     return {
       full,
-      routine: full || due(checkpoint?.last_routine_at, cadence.routineMs),
-      state: full || due(checkpoint?.last_state_at, cadence.stateMs),
-      body: full || due(checkpoint?.last_body_at, cadence.bodyMs),
+      routine: !deferred && (full || due(checkpoint?.last_routine_at, cadence.routineMs)),
+      state: !deferred && (full || due(checkpoint?.last_state_at, cadence.stateMs)),
+      body: !deferred && (full || due(checkpoint?.last_body_at, cadence.bodyMs)),
+      deferredUntil: deferred ? checkpoint?.storage_deferred_until ?? null : null,
+      deferralReason: deferred ? checkpoint?.storage_deferral_reason ?? null : null,
       routineSinceSeconds: Math.max(0, (checkpoint?.routine_cutoff_seconds ?? 0) - cadence.overlapSeconds),
       bodySinceSeconds: Math.max(0, (checkpoint?.body_cutoff_seconds ?? 0) - cadence.overlapSeconds),
       subscriptionFingerprint: checkpoint?.subscription_fingerprint ?? this.subscriptionFingerprint(identity),
@@ -286,6 +351,7 @@ export class ReaderCache {
 
   stageFolders(importRun: ReaderCacheImport, folders: Folder[]) {
     for (const batch of chunks(folders, READER_IMPORT_BATCH_SIZE)) {
+      const logicalBytes = batch.reduce((total, folder) => total + bytes(folder.id, folder.title) + 16, 0);
       const stage = this.database.transaction(() => {
         this.assertLease(importRun);
         const insert = this.database.prepare(`
@@ -293,6 +359,8 @@ export class ReaderCache {
           ON CONFLICT(generation_id, id) DO UPDATE SET title = excluded.title, unread_count = excluded.unread_count
         `);
         for (const folder of batch) insert.run(importRun.generationId, folder.id, folder.title, folder.unreadCount);
+        this.database.prepare(`UPDATE reader_cache_generations SET logical_bytes = logical_bytes + ? WHERE id = ?`)
+          .run(logicalBytes, importRun.generationId);
       });
       stage.immediate();
       this.heartbeat(importRun);
@@ -301,6 +369,14 @@ export class ReaderCache {
 
   stageSubscriptions(importRun: ReaderCacheImport, subscriptions: Subscription[]) {
     for (const batch of chunks(subscriptions, READER_IMPORT_BATCH_SIZE)) {
+      const logicalBytes = batch.reduce((total, subscription) => total + bytes(
+        subscription.id,
+        subscription.title,
+        subscription.url,
+        subscription.siteUrl,
+        subscription.iconUrl,
+        ...subscription.folderIds,
+      ) + 32 + (subscription.folderIds.length * 96), 0);
       const stage = this.database.transaction(() => {
         this.assertLease(importRun);
         const insert = this.database.prepare(`
@@ -332,6 +408,8 @@ export class ReaderCache {
             insertFolder.run(importRun.generationId, subscription.id, folderId);
           }
         }
+        this.database.prepare(`UPDATE reader_cache_generations SET logical_bytes = logical_bytes + ? WHERE id = ?`)
+          .run(logicalBytes, importRun.generationId);
       });
       stage.immediate();
       this.heartbeat(importRun);
@@ -342,6 +420,7 @@ export class ReaderCache {
     if (articles.length > READER_IMPORT_BATCH_SIZE) {
       throw new Error(`Reader import batch exceeds ${READER_IMPORT_BATCH_SIZE} articles`);
     }
+    const logicalBytes = articles.reduce((total, article) => total + articleLogicalBytes(article), 0);
     const stage = this.database.transaction(() => {
       this.assertLease(importRun);
       const insertArticle = this.database.prepare(`
@@ -391,6 +470,8 @@ export class ReaderCache {
       }
       this.database.prepare(`UPDATE reader_sync_runs SET items_staged = items_staged + ? WHERE id = ?`)
         .run(articles.length, importRun.runId);
+      this.database.prepare(`UPDATE reader_cache_generations SET logical_bytes = logical_bytes + ? WHERE id = ?`)
+        .run(logicalBytes, importRun.generationId);
     });
     stage.immediate();
     this.heartbeat(importRun);
@@ -753,6 +834,8 @@ export class ReaderCache {
       INSERT OR IGNORE INTO reader_article_folders (generation_id, article_id, folder_id) VALUES (?, ?, ?)
     `);
     for (const folderId of new Set(article.folderIds)) insertFolder.run(generationId, article.id, folderId);
+    this.database.prepare(`UPDATE reader_cache_generations SET logical_bytes = logical_bytes + ? WHERE id = ?`)
+      .run(articleLogicalBytes(article), generationId);
     if (!article.read) {
       this.database.prepare(`
         UPDATE reader_subscriptions SET unread_count = unread_count + 1 WHERE generation_id = ? AND id = ?
@@ -871,6 +954,22 @@ export class ReaderCache {
         this.database.prepare(`
           UPDATE reader_article_bodies SET content_html = ? WHERE generation_id = ? AND article_id = ?
         `).run(article.contentHtml, generationId, article.id);
+        const priorLogicalBytes = articleCoreLogicalBytes({
+          id: article.id,
+          feedId: existing.feed_id,
+          title: existing.title,
+          author: existing.author,
+          source: existing.source,
+          canonicalUrl: existing.canonical_url,
+          publishedAt: existing.published_at,
+          readingMinutes: existing.reading_minutes,
+          summary: existing.summary,
+          contentHtml: existing.content_html,
+        });
+        const nextLogicalBytes = articleCoreLogicalBytes(article);
+        this.database.prepare(`
+          UPDATE reader_cache_generations SET logical_bytes = MAX(0, logical_bytes + ?) WHERE id = ?
+        `).run(nextLogicalBytes - priorLogicalBytes, generationId);
         if (metadataChanged) {
           this.database.prepare(`DELETE FROM reader_article_folders WHERE generation_id = ? AND article_id = ?`)
             .run(generationId, article.id);
@@ -1080,7 +1179,7 @@ export class ReaderCache {
       `).run(committedAt, versions.collection, versions.state, versions.body, importRun.generationId);
       this.database.prepare(`
         UPDATE reader_accounts SET current_generation_id = ?, collection_version = ?, state_version = ?, body_version = ?,
-          last_success_at = ?, last_error = NULL
+          last_success_at = ?, last_error = NULL, storage_deferred_until = NULL, storage_deferral_reason = NULL
         WHERE account_key = ?
       `).run(importRun.generationId, versions.collection, versions.state, versions.body, committedAt, importRun.accountKey);
       this.database.prepare(`
@@ -1153,6 +1252,171 @@ export class ReaderCache {
       }
     });
     fail.immediate();
+  }
+
+  deferForStorage(lease: ReaderCacheLease, reason: ReaderStorageDeferralReason, retryAfterMs: number) {
+    const defer = this.database.transaction(() => {
+      this.assertLease(lease);
+      const timestamp = this.timestamp();
+      const deferredUntil = new Date(this.clock().getTime() + retryAfterMs).toISOString();
+      this.database.prepare(`
+        UPDATE reader_accounts SET last_attempt_at = ?, last_error = ?,
+          storage_deferred_until = ?, storage_deferral_reason = ?
+        WHERE account_key = ?
+      `).run(
+        timestamp,
+        'Reader synchronization is deferred until safe storage headroom is available',
+        deferredUntil,
+        JSON.stringify(reason),
+        lease.accountKey,
+      );
+      this.database.prepare(`
+        DELETE FROM reader_sync_leases WHERE account_key = ? AND owner_id = ? AND fence_token = ?
+      `).run(lease.accountKey, lease.ownerId, lease.fenceToken);
+      return deferredUntil;
+    });
+    return defer.immediate();
+  }
+
+  clearStorageDeferral(accountKey: string) {
+    this.database.prepare(`
+      UPDATE reader_accounts SET storage_deferred_until = NULL, storage_deferral_reason = NULL
+      WHERE account_key = ?
+    `).run(accountKey);
+  }
+
+  private pruneCandidates(detailLimit: number): ReaderGenerationPruneCandidate[] {
+    const timestamp = this.timestamp();
+    const rows = this.database.prepare(`
+      SELECT generation.id, generation.account_key, generation.generation_number, generation.status,
+        generation.started_at
+      FROM reader_cache_generations generation
+      JOIN reader_accounts account ON account.account_key = generation.account_key
+      WHERE generation.id IS NOT account.current_generation_id
+        AND NOT (
+          generation.status = 'staging' AND EXISTS (
+            SELECT 1 FROM reader_sync_leases lease
+            WHERE lease.account_key = generation.account_key
+              AND lease.fence_token = generation.fence_token
+              AND lease.expires_at > ?
+          )
+        )
+      ORDER BY
+        CASE generation.status WHEN 'failed' THEN 0 WHEN 'staging' THEN 1 ELSE 2 END,
+        generation.generation_number,
+        generation.id
+    `).all(timestamp) as Array<{
+      id: string;
+      account_key: string;
+      generation_number: number;
+      status: ReaderGenerationPruneCandidate['status'];
+      started_at: string;
+    }>;
+    const candidates: ReaderGenerationPruneCandidate[] = rows.map((row) => ({
+      generationId: row.id,
+      accountKey: row.account_key,
+      generationNumber: row.generation_number,
+      status: row.status,
+      reason: row.status === 'committed' ? 'superseded' : row.status === 'failed' ? 'failed' : 'abandoned',
+      articleCount: null,
+      bodyBytes: null,
+      startedAt: row.started_at,
+    }));
+    for (const candidate of candidates.slice(0, detailLimit)) {
+      const details = this.database.prepare(`
+        SELECT COUNT(article.id) AS article_count,
+          COALESCE(SUM(LENGTH(body.content_html)), 0) AS body_bytes
+        FROM reader_articles article
+        LEFT JOIN reader_article_bodies body
+          ON body.generation_id = article.generation_id AND body.article_id = article.id
+        WHERE article.generation_id = ?
+      `).get(candidate.generationId) as { article_count: number; body_bytes: number };
+      candidate.articleCount = details.article_count;
+      candidate.bodyBytes = details.body_bytes;
+    }
+    return candidates;
+  }
+
+  async prune(options: {
+    dryRun?: boolean;
+    maxDeletes?: number;
+    includeCandidateDetails?: boolean;
+  } = {}): Promise<ReaderGenerationPruneResult> {
+    const started = performance.now();
+    const dryRun = options.dryRun ?? false;
+    const maxDeletes = Math.max(0, Math.floor(options.maxDeletes ?? 1));
+    const candidates = this.pruneCandidates(options.includeCandidateDetails ? Number.POSITIVE_INFINITY : maxDeletes);
+    const result: ReaderGenerationPruneResult = {
+      dryRun,
+      maxDeletes,
+      candidates,
+      deletions: [],
+      skipped: [],
+      errors: [],
+      durationMs: 0,
+    };
+    if (dryRun || maxDeletes === 0) {
+      result.durationMs = performance.now() - started;
+      return result;
+    }
+
+    for (const candidate of candidates.slice(0, maxDeletes)) {
+      const deleteStarted = performance.now();
+      try {
+        const remove = this.database.transaction(() => {
+          // Recheck the account pointer and lease/fence protection while the
+          // writer lock is held. A candidate discovered before publication or
+          // lease renewal must never be deleted based on stale observations.
+          const deletable = this.database.prepare(`
+            SELECT 1
+            FROM reader_cache_generations generation
+            JOIN reader_accounts account ON account.account_key = generation.account_key
+            WHERE generation.id = ?
+              AND generation.id IS NOT account.current_generation_id
+              AND NOT (
+                generation.status = 'staging' AND EXISTS (
+                  SELECT 1 FROM reader_sync_leases lease
+                  WHERE lease.account_key = generation.account_key
+                    AND lease.fence_token = generation.fence_token
+                    AND lease.expires_at > ?
+                )
+              )
+          `).get(candidate.generationId, this.timestamp());
+          if (!deletable) return null;
+
+          const searchRows = this.database.prepare(`
+            SELECT COUNT(*) AS count FROM reader_article_search_keys WHERE generation_id = ?
+          `).get(candidate.generationId) as { count: number };
+          this.database.prepare(`
+            DELETE FROM reader_article_search
+            WHERE rowid IN (
+              SELECT rowid FROM reader_article_search_keys WHERE generation_id = ?
+            )
+          `).run(candidate.generationId);
+          this.database.prepare(`DELETE FROM reader_article_search_keys WHERE generation_id = ?`)
+            .run(candidate.generationId);
+          const deleted = this.database.prepare(`DELETE FROM reader_cache_generations WHERE id = ?`)
+            .run(candidate.generationId);
+          return deleted.changes === 1 ? searchRows.count : null;
+        });
+        const searchRows = remove.immediate();
+        const durationMs = performance.now() - deleteStarted;
+        if (searchRows === null) {
+          result.skipped.push({ generationId: candidate.generationId, reason: 'became-protected' });
+        } else {
+          result.deletions.push({ ...candidate, searchRows, durationMs, writerLockMs: durationMs });
+        }
+      } catch (error) {
+        result.errors.push({
+          generationId: candidate.generationId,
+          message: error instanceof Error ? error.message : 'Unknown reader cache pruning error',
+        });
+        break;
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    result.durationMs = performance.now() - started;
+    return result;
   }
 
   applyConfirmedMutations(identity: ReaderCacheIdentity, mutations: ArticleMutation[]) {
@@ -1313,7 +1577,7 @@ export class ReaderCache {
   status(identity: ReaderCacheIdentity): ReaderCacheStatus {
     const account = this.database.prepare(`
       SELECT current_generation_id, collection_version, state_version, body_version,
-        last_attempt_at, last_success_at, last_error
+        last_attempt_at, last_success_at, last_error, storage_deferred_until, storage_deferral_reason
       FROM reader_accounts WHERE account_key = ?
     `).get(identity.accountKey) as {
       current_generation_id: string | null;
@@ -1323,6 +1587,8 @@ export class ReaderCache {
       last_attempt_at: string | null;
       last_success_at: string | null;
       last_error: string | null;
+      storage_deferred_until: string | null;
+      storage_deferral_reason: string | null;
     } | undefined;
     const running = this.database.prepare(`
       SELECT r.items_staged FROM reader_sync_runs r
@@ -1337,12 +1603,24 @@ export class ReaderCache {
         ? (hasSnapshot ? 'refreshing' : 'initializing')
         : account?.last_error ? 'empty'
           : hasSnapshot ? 'current' : 'empty';
+    let storageDeferral: ReaderCacheStatus['storageDeferral'] = null;
+    if (account?.storage_deferred_until && account.storage_deferral_reason) {
+      try {
+        const reason = JSON.parse(account.storage_deferral_reason) as ReaderStorageDeferralReason;
+        if (reason.code === 'reader_storage_deferred') {
+          storageDeferral = { until: account.storage_deferred_until, reason };
+        }
+      } catch {
+        storageDeferral = null;
+      }
+    }
     return {
       state,
       itemsStaged: running?.items_staged ?? 0,
       lastAttemptAt: account?.last_attempt_at ?? null,
       lastSuccessAt: account?.last_success_at ?? null,
       error: account?.last_error ?? null,
+      storageDeferral,
       versions: {
         collection: account?.collection_version ?? 0,
         state: account?.state_version ?? 0,

@@ -12,6 +12,8 @@
     "dev:server": "tsx watch server/index.ts",
     "benchmark:dev": "PERFORMANCE_FIXTURE=1 DATA_DIR=./data/performance PORT=8788 API_PORT=8788 npm run dev",
     "benchmark:reader-api": "tsx server/reader-api-benchmark.ts",
+    "benchmark:reader-cache-prune": "tsx server/reader-prune-benchmark.ts",
+    "reader-cache:prune": "tsx server/reader-cache-admin.ts",
     "build": "vite build && tsc -p server/tsconfig.json",
     "start": "node server-dist/server/index.js",
     "typecheck": "tsc --noEmit -p tsconfig.app.json && tsc --noEmit -p server/tsconfig.json",
