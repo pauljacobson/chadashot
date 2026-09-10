@@ -211,4 +211,127 @@ describe('reader cache API', () => {
     expect(cached.body.subscriptions[0].unreadCount).toBe(0);
     expect(cached.body.cacheStatus.versions.state).toBeGreaterThan(1);
   });
+
+  it('defers a full import without an empty collection and resumes after storage recovers', async () => {
+    const database = openMemoryDatabase();
+    const appConfig = config();
+    saveIntegration(database, appConfig, 'birchfeed', {
+      serverUrl: 'https://reader.example.test', email: 'reader@example.test', apiKey: 'secret',
+    });
+    let availableBytes = 0;
+    const fetchImplementation = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.includes('/subscription/list')) return jsonResponse({ subscriptions: [{
+        id: 'feed/1', title: 'Feed', url: 'https://example.test/feed', categories: [],
+      }] });
+      if (url.includes('/unread-count')) return jsonResponse({ unreadcounts: [] });
+      if (url.includes('/stream/items/ids')) return jsonResponse({ itemRefs: [] });
+      if (url.includes('/stream/contents/')) return jsonResponse({ items: [{
+        id: 'article-1', title: 'Article', categories: [], origin: { streamId: 'feed/1', title: 'Feed' },
+      }] });
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const app = createApp(appConfig, {
+      database,
+      fetchImplementation,
+      readerStorageAvailableBytes: () => availableBytes,
+    });
+
+    const initializing = await request(app).get('/api/reader/snapshot');
+    expect(initializing.status).toBe(202);
+    await vi.waitFor(() => {
+      expect(database.prepare(`
+        SELECT storage_deferred_until, storage_deferral_reason FROM reader_accounts
+      `).get()).toEqual(expect.objectContaining({
+        storage_deferred_until: expect.any(String),
+        storage_deferral_reason: expect.stringContaining('reader_storage_deferred'),
+      }));
+    });
+    expect(fetchImplementation).not.toHaveBeenCalled();
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_sync_leases').get()).toEqual({ count: 0 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_sync_runs').get()).toEqual({ count: 0 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_sync_checkpoints').get()).toEqual({ count: 0 });
+    const deferred = await request(app).get('/api/reader/status');
+    expect(deferred.body).toMatchObject({
+      state: 'empty',
+      storageDeferral: {
+        until: expect.any(String),
+        reason: expect.objectContaining({ code: 'reader_storage_deferred' }),
+      },
+    });
+
+    availableBytes = Number.MAX_SAFE_INTEGER;
+    expect((await request(app).post('/api/reader/refresh')).status).toBe(202);
+    await vi.waitFor(() => {
+      expect(database.prepare('SELECT current_generation_id FROM reader_accounts').get())
+        .toEqual(expect.objectContaining({ current_generation_id: expect.any(String) }));
+    });
+    expect(database.prepare(`
+      SELECT storage_deferred_until, storage_deferral_reason FROM reader_accounts
+    `).get()).toEqual({ storage_deferred_until: null, storage_deferral_reason: null });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const checkpoint = database.prepare('SELECT * FROM reader_sync_checkpoints').get();
+    availableBytes = 0;
+    const cachedDuringDeferral = await request(app).get('/api/reader/snapshot');
+    expect(cachedDuringDeferral.status).toBe(200);
+    expect(cachedDuringDeferral.body.articles).toEqual([expect.objectContaining({ id: 'article-1' })]);
+    await vi.waitFor(() => {
+      expect(database.prepare('SELECT storage_deferred_until FROM reader_accounts').get())
+        .toEqual(expect.objectContaining({ storage_deferred_until: expect.any(String) }));
+    });
+    expect(database.prepare('SELECT * FROM reader_sync_checkpoints').get()).toEqual(checkpoint);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_sync_leases').get()).toEqual({ count: 0 });
+  });
+
+  it('keeps publication successful when best-effort pruning fails', async () => {
+    const database = openMemoryDatabase();
+    const appConfig = config();
+    saveIntegration(database, appConfig, 'birchfeed', {
+      serverUrl: 'https://reader.example.test', email: 'reader@example.test', apiKey: 'secret',
+    });
+    const fetchImplementation = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.includes('/subscription/list')) return jsonResponse({ subscriptions: [{
+        id: 'feed/1', title: 'Feed', url: 'https://example.test/feed', categories: [],
+      }] });
+      if (url.includes('/unread-count')) return jsonResponse({ unreadcounts: [] });
+      if (url.includes('/stream/items/ids')) return jsonResponse({ itemRefs: [] });
+      if (url.includes('/stream/contents/')) return jsonResponse({ items: [{
+        id: 'article-1', title: 'Article', categories: [], origin: { streamId: 'feed/1', title: 'Feed' },
+      }] });
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const app = createApp(appConfig, { database, fetchImplementation });
+    await request(app).get('/api/reader/snapshot');
+    await vi.waitFor(() => {
+      expect(database.prepare('SELECT COUNT(*) AS count FROM reader_sync_runs WHERE status = ?').get('succeeded'))
+        .toEqual({ count: 1 });
+    });
+    database.exec(`
+      CREATE TRIGGER test_forbid_generation_delete
+      BEFORE DELETE ON reader_cache_generations BEGIN
+        SELECT RAISE(ABORT, 'test pruning failure');
+      END;
+    `);
+
+    await request(app).get('/api/reader/snapshot');
+    await vi.waitFor(() => {
+      expect(database.prepare('SELECT COUNT(*) AS count FROM reader_sync_runs WHERE status = ?').get('succeeded'))
+        .toEqual({ count: 2 });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const account = database.prepare(`
+      SELECT current_generation_id, last_error FROM reader_accounts
+    `).get() as { current_generation_id: string; last_error: string | null };
+    expect(account.last_error).toBeNull();
+    expect(database.prepare(`SELECT generation_number, status FROM reader_cache_generations WHERE id = ?`)
+      .get(account.current_generation_id)).toEqual({ generation_number: 2, status: 'committed' });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_cache_generations').get()).toEqual({ count: 2 });
+    expect(database.prepare('SELECT generation_id FROM reader_sync_checkpoints').get())
+      .toEqual({ generation_id: account.current_generation_id });
+  });
 });

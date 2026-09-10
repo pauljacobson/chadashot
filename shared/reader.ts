@@ -25,6 +25,14 @@ export type ReaderVersions = {
   body: number;
 };
 
+export type ReaderStorageDeferralReason = {
+  code: 'reader_storage_deferred';
+  availableBytes: number;
+  requiredBytes: number;
+  reusableDatabaseBytes: number;
+  walReserveBytes: number;
+};
+
 export type ReaderScopeCounts = {
   all: number;
   inbox: number;
@@ -84,6 +92,7 @@ export type ReaderSynchronizationStatus = {
   lastAttemptAt: string | null;
   lastSuccessAt: string | null;
   error: string | null;
+  storageDeferral: { until: string; reason: ReaderStorageDeferralReason } | null;
   versions: ReaderVersions;
 };
 
@@ -123,6 +132,7 @@ export type ReaderSnapshot = {
     state: 'refreshing' | 'current' | 'stale';
     lastSuccessAt: string | null;
     error: string | null;
+    storageDeferral?: { until: string; reason: ReaderStorageDeferralReason } | null;
     versions: { collection: number; state: number; body: number };
   };
 };
@@ -132,6 +142,7 @@ export type ReaderInitializationState = {
   progress: { itemsStaged: number };
   retryAfterSeconds: number;
   error: string | null;
+  storageDeferral?: { until: string; reason: ReaderStorageDeferralReason } | null;
 };
 
 export type ArticleMutation = {

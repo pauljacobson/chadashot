@@ -485,6 +485,148 @@ const migrations: Migration[] = [
         WHERE idempotency_key IS NOT NULL;
     `,
   },
+  {
+    version: 10,
+    name: 'bounded_reader_cache_generations',
+    sql: `
+      -- FTS5 cannot index UNINDEXED generation/article columns. Preserve the
+      -- existing search index while adding a relational rowid map so pruning
+      -- can delete one generation without scanning the full FTS table once per
+      -- cascading article deletion.
+      DROP TRIGGER reader_articles_search_insert;
+      DROP TRIGGER reader_articles_search_delete;
+      DROP TRIGGER reader_articles_search_update;
+
+      CREATE TABLE reader_article_search_keys (
+        rowid INTEGER PRIMARY KEY,
+        generation_id TEXT NOT NULL,
+        article_id TEXT NOT NULL,
+        UNIQUE(generation_id, article_id),
+        FOREIGN KEY(generation_id, article_id)
+          REFERENCES reader_articles(generation_id, id) ON DELETE CASCADE
+      );
+
+      INSERT INTO reader_article_search_keys (rowid, generation_id, article_id)
+      SELECT rowid, generation_id, article_id FROM reader_article_search;
+
+      CREATE INDEX reader_article_search_keys_generation
+        ON reader_article_search_keys(generation_id, rowid);
+
+      CREATE TRIGGER reader_articles_search_insert AFTER INSERT ON reader_articles BEGIN
+        INSERT INTO reader_article_search (generation_id, article_id, title, source, author, summary)
+        VALUES (new.generation_id, new.id, new.title, new.source, COALESCE(new.author, ''), new.summary);
+        INSERT INTO reader_article_search_keys (rowid, generation_id, article_id)
+        VALUES (last_insert_rowid(), new.generation_id, new.id);
+      END;
+
+      CREATE TRIGGER reader_articles_search_delete AFTER DELETE ON reader_articles BEGIN
+        DELETE FROM reader_article_search
+        WHERE rowid = (
+          SELECT rowid FROM reader_article_search_keys
+          WHERE generation_id = old.generation_id AND article_id = old.id
+        );
+        DELETE FROM reader_article_search_keys
+        WHERE generation_id = old.generation_id AND article_id = old.id;
+      END;
+
+      CREATE TRIGGER reader_articles_search_update
+      AFTER UPDATE OF title, source, author, summary ON reader_articles BEGIN
+        UPDATE reader_article_search SET
+          generation_id = new.generation_id,
+          article_id = new.id,
+          title = new.title,
+          source = new.source,
+          author = COALESCE(new.author, ''),
+          summary = new.summary
+        WHERE rowid = (
+          SELECT rowid FROM reader_article_search_keys
+          WHERE generation_id = old.generation_id AND article_id = old.id
+        );
+      END;
+
+      -- A mark-read job's source generation is immutable historical metadata.
+      -- Accepted target membership is already frozen in the target table, so
+      -- retaining a physical cache generation would only prevent pruning.
+      CREATE TABLE reader_mark_read_jobs_v10 (
+        id TEXT PRIMARY KEY,
+        account_key TEXT NOT NULL REFERENCES reader_accounts(account_key) ON DELETE CASCADE,
+        idempotency_key TEXT NOT NULL,
+        generation_id TEXT NOT NULL,
+        collection_version INTEGER NOT NULL,
+        state_version_boundary INTEGER NOT NULL,
+        scope_kind TEXT NOT NULL CHECK (scope_kind IN ('inbox', 'all', 'starred', 'uncategorized', 'folder', 'feed')),
+        scope_id TEXT,
+        search TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL CHECK (status IN ('accepted', 'running', 'completed', 'failed')),
+        target_count INTEGER NOT NULL DEFAULT 0,
+        completed_count INTEGER NOT NULL DEFAULT 0,
+        superseded_count INTEGER NOT NULL DEFAULT 0,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        finished_at TEXT,
+        UNIQUE(account_key, idempotency_key)
+      );
+
+      CREATE TABLE reader_mark_read_job_targets_v10 (
+        job_id TEXT NOT NULL REFERENCES reader_mark_read_jobs_v10(id) ON DELETE CASCADE,
+        article_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'superseded')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        PRIMARY KEY(job_id, article_id),
+        UNIQUE(job_id, ordinal)
+      ) WITHOUT ROWID;
+
+      INSERT INTO reader_mark_read_jobs_v10
+      SELECT * FROM reader_mark_read_jobs;
+      INSERT INTO reader_mark_read_job_targets_v10
+      SELECT * FROM reader_mark_read_job_targets;
+
+      DROP TABLE reader_mark_read_job_targets;
+      DROP TABLE reader_mark_read_jobs;
+      ALTER TABLE reader_mark_read_jobs_v10 RENAME TO reader_mark_read_jobs;
+      ALTER TABLE reader_mark_read_job_targets_v10 RENAME TO reader_mark_read_job_targets;
+
+      CREATE INDEX reader_mark_read_jobs_account_status
+        ON reader_mark_read_jobs(account_key, status, created_at);
+      CREATE INDEX reader_mark_read_targets_progress
+        ON reader_mark_read_job_targets(job_id, status, ordinal);
+
+      ALTER TABLE reader_accounts ADD COLUMN storage_deferred_until TEXT;
+      ALTER TABLE reader_accounts ADD COLUMN storage_deferral_reason TEXT;
+
+      ALTER TABLE reader_cache_generations ADD COLUMN logical_bytes INTEGER NOT NULL DEFAULT 0;
+      UPDATE reader_cache_generations SET logical_bytes =
+        COALESCE((
+          SELECT SUM(
+            LENGTH(article.id) + LENGTH(article.feed_id) + LENGTH(article.title)
+            + LENGTH(COALESCE(article.author, '')) + LENGTH(article.source)
+            + LENGTH(article.canonical_url) + LENGTH(article.published_at)
+            + LENGTH(article.summary) + 32
+          ) FROM reader_articles article
+          WHERE article.generation_id = reader_cache_generations.id
+        ), 0)
+        + COALESCE((
+          SELECT SUM(LENGTH(body.content_html) + LENGTH(body.article_id) + 16)
+          FROM reader_article_bodies body
+          WHERE body.generation_id = reader_cache_generations.id
+        ), 0)
+        + COALESCE((
+          SELECT COUNT(*) * 64 FROM reader_article_state state
+          WHERE state.generation_id = reader_cache_generations.id
+        ), 0)
+        + COALESCE((
+          SELECT COUNT(*) * 96 FROM reader_article_folders relation
+          WHERE relation.generation_id = reader_cache_generations.id
+        ), 0)
+      WHERE id IN (
+        SELECT current_generation_id FROM reader_accounts WHERE current_generation_id IS NOT NULL
+      );
+    `,
+  },
 ];
 
 function ensureMigrationTable(database: AppDatabase) {
@@ -497,7 +639,7 @@ function ensureMigrationTable(database: AppDatabase) {
   `);
 }
 
-export function runMigrations(database: AppDatabase) {
+export function runMigrations(database: AppDatabase, maximumVersion = Number.POSITIVE_INFINITY) {
   ensureMigrationTable(database);
   const applied = new Set((database.prepare('SELECT version FROM schema_migrations').all() as { version: number }[])
     .map((row) => row.version));
@@ -512,7 +654,7 @@ export function runMigrations(database: AppDatabase) {
   });
 
   for (const migration of migrations) {
-    if (!applied.has(migration.version)) apply(migration);
+    if (migration.version <= maximumVersion && !applied.has(migration.version)) apply(migration);
   }
 }
 

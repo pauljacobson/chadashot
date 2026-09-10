@@ -146,17 +146,22 @@ describe('durable mark-read jobs', () => {
     const cache = new ReaderCache(database);
     publish(cache, snapshot([article('original')]));
     const service = new MarkReadJobService(database, cache);
-    const accepted = service.accept(identity, requestFor(database, { scope: { kind: 'folder', id: 'folder-1' } }));
+    const jobRequest = requestFor(database, { scope: { kind: 'folder', id: 'folder-1' } });
+    const accepted = service.accept(identity, jobRequest);
     publish(cache, snapshot([
       article('original', { folderIds: [], feedId: 'feed-2' }),
       article('late', { publishedAt: '2020-01-01T00:00:00.000Z' }),
     ]));
+    await cache.prune({ maxDeletes: 10 });
     const submitted: string[] = [];
 
     await service.run(identity, accepted.id, async (mutations) => submitted.push(...mutations.map((mutation) => mutation.articleId)));
     const articles = new ReaderApi(database).articles(identity, { scope: 'all', read: 'all', limit: 100 }).articles;
 
     expect(submitted).toEqual(['original']);
+    expect(database.prepare(`SELECT generation_id FROM reader_mark_read_jobs WHERE id = ?`).get(accepted.id))
+      .toEqual({ generation_id: jobRequest.generation });
+    expect(database.prepare(`SELECT id FROM reader_cache_generations WHERE id = ?`).get(jobRequest.generation)).toBeUndefined();
     expect(articles.find((item) => item.id === 'original')?.read).toBe(true);
     expect(articles.find((item) => item.id === 'late')?.read).toBe(false);
   });

@@ -17,6 +17,7 @@ const environmentSchema = z.object({
   READER_SYNC_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(10 * 60 * 1_000).default(120_000),
   READER_CLIENT_PATH: z.enum(['paginated', 'snapshot']).default('paginated'),
   READER_CACHE_ENABLED: z.enum(['true', 'false']).default('true'),
+  READER_CACHE_AUTO_PRUNE: z.enum(['true', 'false']).default('true'),
   READER_SYNC_LEASE_MS: z.coerce.number().int().min(5_000).max(10 * 60 * 1_000).default(45_000),
   READER_ROUTINE_SYNC_INTERVAL_MS: z.coerce.number().int().min(0).max(60 * 60 * 1_000).default(180_000),
   READER_STATE_SYNC_INTERVAL_MS: z.coerce.number().int().min(0).max(24 * 60 * 60 * 1_000).default(15 * 60 * 1_000),
@@ -42,6 +43,7 @@ export type AppConfig = {
   readerSyncTimeoutMs: number;
   readerClientPath: 'paginated' | 'snapshot';
   readerCacheEnabled: boolean;
+  readerCacheAutoPrune: boolean;
   readerSyncLeaseMs: number;
   readerRoutineSyncIntervalMs: number;
   readerStateSyncIntervalMs: number;
@@ -90,6 +92,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     readerSyncTimeoutMs: parsed.READER_SYNC_TIMEOUT_MS,
     readerClientPath: parsed.READER_CLIENT_PATH,
     readerCacheEnabled: parsed.READER_CACHE_ENABLED === 'true',
+    readerCacheAutoPrune: parsed.READER_CACHE_AUTO_PRUNE === 'true',
     readerSyncLeaseMs: parsed.READER_SYNC_LEASE_MS,
     readerRoutineSyncIntervalMs: parsed.READER_ROUTINE_SYNC_INTERVAL_MS,
     readerStateSyncIntervalMs: parsed.READER_STATE_SYNC_INTERVAL_MS,

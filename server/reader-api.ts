@@ -88,6 +88,7 @@ export class ReaderApi {
   constructor(
     private readonly database: AppDatabase,
     private readonly clock: () => Date = () => new Date(),
+    private readonly afterContext?: () => void,
   ) {}
 
   private context(identity: ReaderCacheIdentity): ReaderContext {
@@ -141,7 +142,9 @@ export class ReaderApi {
   }
 
   articles(identity: ReaderCacheIdentity, query: ReaderArticleQuery): ReaderArticlePage & { etag: string } {
+    const read = this.database.transaction(() => {
     const context = this.context(identity);
+    this.afterContext?.();
     const cursor = this.parseArticleCursor(identity, query, context);
     const conditions = ['a.generation_id = @generation'];
     const parameters: Record<string, string | number> = { generation: context.generation };
@@ -259,10 +262,14 @@ export class ReaderApi {
         normalizedSearch,
       ])}"`,
     };
+    });
+    return read.deferred();
   }
 
   body(identity: ReaderCacheIdentity, articleId: string): (ReaderArticleBody & { etag: string }) | null {
+    const read = this.database.transaction(() => {
     const context = this.context(identity);
+    this.afterContext?.();
     const row = this.database.prepare(`
       SELECT content_html FROM reader_article_bodies WHERE generation_id = ? AND article_id = ?
     `).get(context.generation, articleId) as { content_html: string } | undefined;
@@ -274,10 +281,14 @@ export class ReaderApi {
       bodyVersion: context.versions.body,
       etag: `"reader-body-${context.versions.body}-${hash([articleId, row.content_html])}"`,
     };
+    });
+    return read.deferred();
   }
 
   navigation(identity: ReaderCacheIdentity) {
+    const read = this.database.transaction(() => {
     const context = this.context(identity);
+    this.afterContext?.();
     const scopes = new Map((this.database.prepare(`
       SELECT id, total_count, unread_count FROM reader_navigation_activity
       WHERE generation_id = ? AND kind = 'scope'
@@ -344,10 +355,14 @@ export class ReaderApi {
       ...result,
       etag: `"reader-navigation-${hash([context.versions.collection, context.versions.state])}"`,
     };
+    });
+    return read.deferred();
   }
 
   changes(identity: ReaderCacheIdentity, token: string | undefined, limit: number) {
+    const read = this.database.transaction(() => {
     const context = this.context(identity);
+    this.afterContext?.();
     const maximumSequence = (this.database.prepare(`
       SELECT COALESCE(MAX(sequence), 0) AS value FROM reader_change_log WHERE account_key = ?
     `).get(identity.accountKey) as { value: number }).value;
@@ -422,5 +437,7 @@ export class ReaderApi {
       versions: context.versions,
       etag: `"reader-changes-${parsed.afterSequence}-${targetSequence}"`,
     };
+    });
+    return read.deferred();
   }
 }

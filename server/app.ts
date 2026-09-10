@@ -17,6 +17,12 @@ import { deleteIntegration, hasIntegration, loadBirchfeed, loadBirchfeedWithGene
 import { ReaderHighlightDeliveryError, ReadwiseClient, type ReaderToolSessionFactory } from './integrations/readwise.js';
 import { AppLogger, readAppLogs, readLogExport, requestLogger } from './logging.js';
 import { ReaderApi, ReaderCacheUnavailableError, ReaderCursorError } from './reader-api.js';
+import { runBackgroundReaderPrune } from './reader-pruning-runner.js';
+import {
+  readReaderStorageMetrics,
+  READER_STORAGE_POLICY,
+  storageDeferralReason,
+} from './reader-storage.js';
 import { MarkReadJobConflictError, MarkReadJobNotFoundError, MarkReadJobService } from './mark-read-jobs.js';
 import {
   encodedResponseByteCounter,
@@ -155,6 +161,7 @@ export function createApp(config: AppConfig, dependencies: {
   readerToolSessionFactory?: ReaderToolSessionFactory;
   logger?: AppLogger;
   fixtureSnapshot?: ReaderSnapshot;
+  readerStorageAvailableBytes?: number | (() => number);
 } = {}) {
   const app = express();
   const database = dependencies.database ?? openDatabase(config.dataDir);
@@ -176,6 +183,69 @@ export function createApp(config: AppConfig, dependencies: {
     providerIdentity: 'synthetic-provider',
     credentialGeneration: 'performance-fixture-v1',
   } : null;
+  let activePruning: Promise<void> | null = null;
+  const pruneReaderCache = (trigger: 'startup' | 'published' | 'failed' | 'storage-guard'): Promise<void> => {
+    if (!config.readerCacheAutoPrune) return Promise.resolve();
+    if (activePruning) {
+      // A publication that lands during an existing pass creates a new
+      // candidate after that pass took its snapshot, so queue one more bounded
+      // pass instead of treating the in-flight work as sufficient.
+      return activePruning.then(() => pruneReaderCache(trigger));
+    }
+    const pruning = runBackgroundReaderPrune(database, 1).then((result) => {
+      if (result.outcome === 'insufficient-cleanup-headroom') {
+        logger.warn('Reader cache pruning deferred for insufficient filesystem headroom', {
+          trigger,
+          storage: {
+            availableBytes: result.before.filesystemAvailableBytes,
+            requiredBytes: result.before.cleanupRequiredFilesystemBytes,
+            reusableDatabaseBytes: result.before.reusableDatabaseBytes,
+            walBytes: result.before.walBytes,
+          },
+        });
+        return;
+      }
+      if (result.pruning?.errors.length) {
+        logger.warn('Reader cache pruning failed independently', {
+          trigger,
+          errors: result.pruning.errors,
+          durationMs: result.pruning.durationMs,
+        });
+        return;
+      }
+      if (result.pruning?.deletions.length) {
+        logger.info('Reader cache generation pruned', {
+          trigger,
+          generations: result.pruning.deletions.map((deletion) => ({
+            generationId: deletion.generationId,
+            accountKey: deletion.accountKey,
+            status: deletion.status,
+            articleCount: deletion.articleCount,
+            bodyBytes: deletion.bodyBytes,
+            searchRows: deletion.searchRows,
+            durationMs: deletion.durationMs,
+            writerLockMs: deletion.writerLockMs,
+          })),
+          storage: {
+            pageCount: result.after.pageCount,
+            freePageCount: result.after.freePageCount,
+            databaseFileBytes: result.after.databaseFileBytes,
+            walBytes: result.after.walBytes,
+            filesystemAvailableBytes: result.after.filesystemAvailableBytes,
+          },
+        });
+      }
+    }).catch((error) => {
+      logger.warn('Reader cache pruning failed independently', {
+        trigger,
+        reason: error instanceof Error ? error.message : 'Unknown reader cache pruning error',
+      });
+    }).finally(() => {
+      if (activePruning === pruning) activePruning = null;
+    });
+    activePruning = pruning;
+    return pruning;
+  };
   const ensurePerformanceFixture = () => {
     if (!fixtureIdentity || readerCache.status(fixtureIdentity).state !== 'empty') return;
     const lease = readerCache.acquireLease(fixtureIdentity);
@@ -190,6 +260,9 @@ export function createApp(config: AppConfig, dependencies: {
     }
   };
   ensurePerformanceFixture();
+  if (config.nodeEnv !== 'test' && config.readerCacheEnabled) {
+    setImmediate(() => { void pruneReaderCache('startup'); });
+  }
   const activeCacheImports = new Map<string, { work: Promise<void>; controller: AbortController }>();
   const readerSyncCadence = {
     routineMs: config.readerRoutineSyncIntervalMs,
@@ -262,6 +335,7 @@ export function createApp(config: AppConfig, dependencies: {
       const performanceRun = new ReaderPerformanceRun();
       let articleCount = 0;
       let subscriptionCount = 0;
+      let pruneAfterRun: 'published' | 'failed' | null = null;
       const timer = setTimeout(() => controller.abort(new SynchronizationTimeoutError(config.readerSyncTimeoutMs)), config.readerSyncTimeoutMs);
       timer.unref();
       const heartbeat = setInterval(() => {
@@ -274,6 +348,34 @@ export function createApp(config: AppConfig, dependencies: {
       heartbeat.unref();
 
       const runFullImport = async (currentLease: ReaderCacheLease) => {
+        const availableBytes = () => typeof dependencies.readerStorageAvailableBytes === 'function'
+          ? dependencies.readerStorageAvailableBytes()
+          : dependencies.readerStorageAvailableBytes;
+        let storage = readReaderStorageMetrics(database, availableBytes(), currentLease.accountKey);
+        if (!storage.canImport) {
+          await pruneReaderCache('storage-guard');
+          storage = readReaderStorageMetrics(database, availableBytes(), currentLease.accountKey);
+        }
+        if (!storage.canImport) {
+          const reason = storageDeferralReason(storage);
+          const deferredUntil = readerCache.deferForStorage(
+            currentLease,
+            reason,
+            READER_STORAGE_POLICY.storageRetryBackoffMs,
+          );
+          logger.warn('Reader cache full import deferred for insufficient filesystem headroom', {
+            storage: {
+              code: 'reader_storage_deferred',
+              availableBytes: storage.filesystemAvailableBytes,
+              requiredBytes: storage.importRequiredFilesystemBytes,
+              reusableDatabaseBytes: storage.reusableDatabaseBytes,
+              walReserveBytes: storage.walReserveBytes,
+              deferredUntil,
+            },
+          });
+          return;
+        }
+        readerCache.clearStorageDeferral(currentLease.accountKey);
         const importRun = readerCache.beginImport(currentLease);
         activeRun = importRun;
         const client = new GoogleReaderClient(integration.credentials, fetchImplementation, performanceRun, controller.signal);
@@ -297,6 +399,7 @@ export function createApp(config: AppConfig, dependencies: {
         }
         const versions = readerCache.publish(importRun);
         activeRun = null;
+        pruneAfterRun = 'published';
         logger.info('Reader cache full import completed', {
           synchronization: performanceRun.result({
             articles: articleCount,
@@ -310,7 +413,13 @@ export function createApp(config: AppConfig, dependencies: {
       };
 
       try {
-        const plan = readerCache.syncPlan(identity, readerSyncCadence);
+        let plan = readerCache.syncPlan(identity, readerSyncCadence);
+        if (forceRoutine && plan.deferredUntil) {
+          // An explicit refresh is also an operator-requested capacity
+          // reassessment, so it may recover before the scheduled backoff ends.
+          readerCache.clearStorageDeferral(identity.accountKey);
+          plan = readerCache.syncPlan(identity, readerSyncCadence);
+        }
         if (forceRoutine && !plan.full) plan.routine = true;
         if (plan.full) {
           await runFullImport(lease);
@@ -402,7 +511,11 @@ export function createApp(config: AppConfig, dependencies: {
           incremental: { routine: routineResult, body: bodyResult, state: stateResult },
         });
       } catch (error) {
-        if (activeRun) readerCache.fail(activeRun, error);
+        if (activeRun) {
+          readerCache.fail(activeRun, error);
+          activeRun = null;
+          pruneAfterRun = 'failed';
+        }
         logger.warn('Reader cache synchronization failed', {
           reason: error instanceof Error ? error.message : 'Unknown error',
           synchronization: performanceRun.result({
@@ -416,6 +529,7 @@ export function createApp(config: AppConfig, dependencies: {
       } finally {
         clearTimeout(timer);
         clearInterval(heartbeat);
+        if (pruneAfterRun) await pruneReaderCache(pruneAfterRun);
       }
     })();
     activeCacheImports.set(identity.accountKey, { work, controller });
@@ -748,6 +862,7 @@ export function createApp(config: AppConfig, dependencies: {
                   : 'current' as const,
               lastSuccessAt: cacheStatus.lastSuccessAt,
               error: cacheStatus.error,
+              storageDeferral: cacheStatus.storageDeferral,
               versions: cacheStatus.versions,
             },
           };
@@ -765,6 +880,7 @@ export function createApp(config: AppConfig, dependencies: {
           progress: { itemsStaged: cacheStatus.itemsStaged },
           retryAfterSeconds: 2,
           error: cacheStatus.error,
+          storageDeferral: cacheStatus.storageDeferral,
         } satisfies ReaderInitializationState);
       }
       const performanceRun = new ReaderPerformanceRun();
