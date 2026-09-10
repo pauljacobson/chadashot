@@ -11,6 +11,8 @@ describe('loadConfig', () => {
     expect(config.readerClientPath).toBe('paginated');
     expect(config.readerCacheEnabled).toBe(true);
     expect(config.readerCacheAutoPrune).toBe(true);
+    expect(config.readerCachePruneMaxDeletes).toBe(100);
+    expect(config.readerCachePrunePauseMs).toBe(2_000);
     expect(config.readerSyncLeaseMs).toBe(45_000);
     expect(config.readerRoutineSyncIntervalMs).toBe(180_000);
     expect(config.readerStateSyncIntervalMs).toBe(900_000);

@@ -17,9 +17,9 @@ function workerUrl() {
   return new URL(`./reader-prune-worker${extension}`, import.meta.url);
 }
 
-function pruneInWorker(databasePath: string, maxDeletes: number) {
+function pruneInWorker(databasePath: string, maxDeletes: number, betweenDeletesMs: number) {
   return new Promise<ReaderGenerationPruneResult>((resolve, reject) => {
-    const worker = new Worker(workerUrl(), { workerData: { databasePath, maxDeletes } });
+    const worker = new Worker(workerUrl(), { workerData: { databasePath, maxDeletes, betweenDeletesMs } });
     worker.once('message', (message: { ok: true; result: ReaderGenerationPruneResult } | { ok: false; error: string }) => {
       if (message.ok) resolve(message.result);
       else reject(new Error(message.error));
@@ -34,14 +34,15 @@ function pruneInWorker(databasePath: string, maxDeletes: number) {
 export async function runBackgroundReaderPrune(
   database: AppDatabase,
   maxDeletes = 1,
+  betweenDeletesMs = 0,
 ): Promise<BackgroundReaderPruneResult> {
   const before = readReaderStorageMetrics(database);
   if (!before.canPrune) {
     return { outcome: 'insufficient-cleanup-headroom', before, after: before, pruning: null };
   }
   const pruning = before.databasePath
-    ? await pruneInWorker(before.databasePath, maxDeletes)
-    : await new ReaderCache(database).prune({ maxDeletes });
+    ? await pruneInWorker(before.databasePath, maxDeletes, betweenDeletesMs)
+    : await new ReaderCache(database).prune({ maxDeletes, betweenDeletesMs });
   const after = readReaderStorageMetrics(database);
   return { outcome: 'completed', before, after, pruning };
 }

@@ -78,6 +78,29 @@ function publish(cache: ReaderCache, value: ReaderSnapshot, cacheIdentity = iden
 }
 
 describe('transactional reader cache', () => {
+  it('fingerprints subscription structure without volatile provider metadata', () => {
+    const value = snapshot();
+    const initial = readerSubscriptionFingerprint(value.subscriptions, value.folders);
+    const metadataChanged = readerSubscriptionFingerprint(
+      value.subscriptions.map((subscription) => ({
+        ...subscription,
+        title: 'Renamed feed',
+        url: 'https://changed.example.test/feed',
+        siteUrl: 'https://changed.example.test',
+        iconUrl: 'https://changed.example.test/icon.png',
+        unreadCount: 42,
+      })),
+      value.folders.map((folder) => ({ ...folder, title: 'Renamed folder', unreadCount: 42 })),
+    );
+    const membershipChanged = readerSubscriptionFingerprint(
+      value.subscriptions.map((subscription) => ({ ...subscription, folderIds: ['folder-2'] })),
+      value.folders,
+    );
+
+    expect(metadataChanged).toBe(initial);
+    expect(membershipChanged).not.toBe(initial);
+  });
+
   it('publishes normalized metadata, bodies, state, and relationships atomically', () => {
     const database = openMemoryDatabase();
     const cache = new ReaderCache(database, 'worker-1');
@@ -237,6 +260,26 @@ describe('transactional reader cache', () => {
     expect(cache.syncPlan(identity, cadence)).toMatchObject({ full: true, routine: true, state: true, body: true });
   });
 
+  it('prefers the current structural fingerprint over a legacy checkpoint hash', () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database, 'worker-1');
+    const value = snapshot();
+    publish(cache, value);
+    database.prepare(`
+      UPDATE reader_incremental_checkpoints SET subscription_fingerprint = ? WHERE account_key = ?
+    `).run('legacy-metadata-sensitive-hash', identity.accountKey);
+
+    const plan = cache.syncPlan(identity, {
+      routineMs: 180_000,
+      stateMs: 900_000,
+      bodyMs: 21_600_000,
+      fullMs: 86_400_000,
+      overlapSeconds: 21_600,
+    });
+
+    expect(plan.subscriptionFingerprint).toBe(readerSubscriptionFingerprint(value.subscriptions, value.folders));
+  });
+
   it('commits overlapping new-item discovery and its checkpoint atomically', () => {
     const database = openMemoryDatabase();
     const cache = new ReaderCache(database, 'worker-1');
@@ -253,10 +296,10 @@ describe('transactional reader cache', () => {
       article('same-timestamp-a'),
       article('same-timestamp-b'),
       article('same-timestamp-a'),
-    ], 1_788_825_600, fingerprint);
+    ], initial.subscriptions, initial.folders, 1_788_825_600, fingerprint);
     cache.completeIncrementalRun(run);
 
-    expect(result.inserted).toBe(3);
+    expect(result).toEqual({ inserted: 3, metadataChanged: 0 });
     expect(cache.readSnapshot(identity)?.articles.map((item) => item.id).sort()).toEqual([
       'backdated', 'known', 'same-timestamp-a', 'same-timestamp-b',
     ]);
@@ -264,6 +307,45 @@ describe('transactional reader cache', () => {
     expect(database.prepare(`
       SELECT routine_cutoff_seconds, subscription_fingerprint FROM reader_incremental_checkpoints WHERE account_key = ?
     `).get(identity.accountKey)).toEqual({ routine_cutoff_seconds: 1_788_825_600, subscription_fingerprint: fingerprint });
+  });
+
+  it('refreshes subscription metadata without replacing the current generation', () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database, 'worker-1');
+    const initial = snapshot([article('known')]);
+    const published = publish(cache, initial);
+    const lease = cache.acquireLease(identity)!;
+    const run = cache.beginIncrementalRun(lease);
+    const changedSubscriptions = initial.subscriptions.map((subscription) => ({
+      ...subscription,
+      title: 'Renamed feed',
+      siteUrl: 'https://changed.example.test',
+      iconUrl: 'https://changed.example.test/icon.png',
+    }));
+    const changedFolders = initial.folders.map((folder) => ({ ...folder, title: 'Renamed folder' }));
+
+    const result = cache.applyRoutineDiscovery(
+      run,
+      [],
+      changedSubscriptions,
+      changedFolders,
+      1_788_825_600,
+      readerSubscriptionFingerprint(changedSubscriptions, changedFolders),
+    );
+    cache.completeIncrementalRun(run);
+
+    expect(result).toEqual({ inserted: 0, metadataChanged: 2 });
+    expect(cache.readSnapshot(identity)).toMatchObject({
+      folders: [expect.objectContaining({ title: 'Renamed folder' })],
+      subscriptions: [expect.objectContaining({
+        title: 'Renamed feed',
+        siteUrl: 'https://changed.example.test',
+        iconUrl: 'https://changed.example.test/icon.png',
+      })],
+    });
+    expect(cache.status(identity).versions).toEqual({ collection: 2, state: 1, body: 1 });
+    expect(database.prepare('SELECT current_generation_id FROM reader_accounts WHERE account_key = ?')
+      .get(identity.accountKey)).toEqual({ current_generation_id: published.generationId });
   });
 
   it('does not advance an incremental checkpoint after an interrupted transaction', () => {
@@ -279,6 +361,8 @@ describe('transactional reader cache', () => {
     expect(() => cache.applyRoutineDiscovery(
       run,
       [article('not-committed')],
+      initial.subscriptions,
+      initial.folders,
       1_788_825_600,
       readerSubscriptionFingerprint(initial.subscriptions, initial.folders),
     )).toThrow(ReaderCacheFencedError);
@@ -401,6 +485,25 @@ describe('transactional reader cache', () => {
       expect.objectContaining({ account_key: secondIdentity.accountKey }),
     ]));
     expect(() => first.stageArticles(active, [article('stale')])).toThrow(ReaderCacheFencedError);
+  });
+
+  it('prunes the complete obsolete backlog one generation per transaction', async () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database, 'worker-1');
+    for (let generation = 1; generation <= 6; generation += 1) {
+      publish(cache, snapshot([article(`generation-${generation}`)]));
+    }
+
+    const result = await cache.prune({ maxDeletes: 100, betweenDeletesMs: 0 });
+
+    expect(result.deletions).toHaveLength(5);
+    expect(result.deletions.every((deletion) => (
+      deletion.writerWaitMs >= 0
+      && deletion.writerLockMs >= 0
+      && deletion.phases.commitMs >= 0
+      && deletion.phases.generationCascadeMs >= 0
+    ))).toBe(true);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_cache_generations').get()).toEqual({ count: 1 });
   });
 
   it('makes dry-run idempotent and uses the generation index for FTS pruning', async () => {

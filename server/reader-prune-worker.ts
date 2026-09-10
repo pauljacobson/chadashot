@@ -5,6 +5,7 @@ import { ReaderCache } from './reader-cache.js';
 type PruneWorkerInput = {
   databasePath: string;
   maxDeletes: number;
+  betweenDeletesMs: number;
 };
 
 if (!isMainThread) {
@@ -14,7 +15,10 @@ if (!isMainThread) {
   database.pragma('foreign_keys = ON');
   database.pragma('busy_timeout = 5000');
   try {
-    const result = await new ReaderCache(database).prune({ maxDeletes: input.maxDeletes });
+    const result = await new ReaderCache(database).prune({
+      maxDeletes: input.maxDeletes,
+      betweenDeletesMs: input.betweenDeletesMs,
+    });
     parentPort?.postMessage({ ok: true, result });
   } catch (error) {
     parentPort?.postMessage({
