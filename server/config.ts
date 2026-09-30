@@ -16,6 +16,8 @@ const environmentSchema = z.object({
   LOG_MAX_BYTES: z.coerce.number().int().min(64 * 1024).default(5 * 1024 * 1024),
   READER_SYNC_TIMEOUT_MS: z.coerce.number().int().min(5_000).max(10 * 60 * 1_000).default(120_000),
   READER_CLIENT_PATH: z.enum(['paginated', 'snapshot']).default('paginated'),
+  READER_BACKGROUND_SYNC_ENABLED: z.enum(['true', 'false']).optional(),
+  READER_BACKGROUND_SYNC_INTERVAL_MS: z.coerce.number().int().min(60_000).max(3_600_000).default(300_000),
   READER_CACHE_ENABLED: z.enum(['true', 'false']).default('true'),
   READER_CACHE_AUTO_PRUNE: z.enum(['true', 'false']).default('true'),
   READER_CACHE_PRUNE_MAX_DELETES: z.coerce.number().int().min(1).max(1_000).default(100),
@@ -45,6 +47,8 @@ export type AppConfig = {
   logMaxBytes: number;
   readerSyncTimeoutMs: number;
   readerClientPath: 'paginated' | 'snapshot';
+  readerBackgroundSyncEnabled: boolean;
+  readerBackgroundSyncIntervalMs: number;
   readerCacheEnabled: boolean;
   readerCacheAutoPrune: boolean;
   readerCachePruneMaxDeletes: number;
@@ -97,6 +101,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     logMaxBytes: parsed.LOG_MAX_BYTES,
     readerSyncTimeoutMs: parsed.READER_SYNC_TIMEOUT_MS,
     readerClientPath: parsed.READER_CLIENT_PATH,
+    readerBackgroundSyncEnabled: parsed.READER_BACKGROUND_SYNC_ENABLED
+      ? parsed.READER_BACKGROUND_SYNC_ENABLED === 'true' : parsed.NODE_ENV === 'production',
+    readerBackgroundSyncIntervalMs: parsed.READER_BACKGROUND_SYNC_INTERVAL_MS,
     readerCacheEnabled: parsed.READER_CACHE_ENABLED === 'true',
     readerCacheAutoPrune: parsed.READER_CACHE_AUTO_PRUNE === 'true',
     readerCachePruneMaxDeletes: parsed.READER_CACHE_PRUNE_MAX_DELETES,
