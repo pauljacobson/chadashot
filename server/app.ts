@@ -1204,5 +1204,35 @@ export function createApp(config: AppConfig, dependencies: {
   };
   app.use(errorHandler);
 
-  return app;
+  return Object.assign(app, {
+    // Use the same authenticated identity keys as device requests. Passkey users
+    // are persisted independently of sessions, so no browser needs to be open.
+    async synchronizeReader(signal: AbortSignal) {
+      if (!config.readerCacheEnabled || fixtureIdentity || signal.aborted) return;
+      const integration = loadBirchfeedWithGeneration(database, config);
+      if (!integration) return;
+      const users = config.authMode === 'development'
+        ? [{ id: 'development-user' }]
+        : database.prepare('SELECT id FROM users ORDER BY created_at, id').all() as { id: string }[];
+      for (const user of users) {
+        if (signal.aborted) return;
+        const identity = startReaderCacheImport(user.id, integration);
+        const active = activeCacheImports.get(identity.accountKey);
+        if (!active) continue;
+        const abort = () => active.controller.abort(signal.reason);
+        signal.addEventListener('abort', abort, { once: true });
+        try {
+          if (signal.aborted) abort();
+          await active.work;
+        } finally {
+          signal.removeEventListener('abort', abort);
+        }
+      }
+    },
+    async stopReaderSynchronization() {
+      const imports = [...activeCacheImports.values()];
+      for (const active of imports) active.controller.abort();
+      await Promise.allSettled(imports.map((active) => active.work));
+    },
+  });
 }

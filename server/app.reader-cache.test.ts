@@ -23,6 +23,54 @@ function config() {
 describe('reader cache API', () => {
   beforeEach(() => clearGoogleReaderSessionCache());
 
+  it('prepares fresh articles without device requests or active passkey sessions', async () => {
+    const database = openMemoryDatabase();
+    const appConfig = loadConfig({
+      NODE_ENV: 'test', AUTH_MODE: 'passkey', APP_ORIGIN: 'https://reader.example.test',
+      ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64'),
+      READER_CACHE_AUTO_PRUNE: 'false', READER_ROUTINE_SYNC_INTERVAL_MS: '0',
+      READER_FULL_SYNC_INTERVAL_MS: '2592000000',
+    });
+    saveIntegration(database, appConfig, 'birchfeed', {
+      serverUrl: 'https://reader.example.test', email: 'reader@example.test', apiKey: 'secret',
+    });
+    let fresh = false;
+    const article = (id: string) => ({ id, title: id, content: { content: '<p>Body</p>' },
+      categories: [], origin: { streamId: 'feed/1', title: 'Feed' } });
+    const fetchImplementation = vi.fn<typeof fetch>(async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.pathname.includes('/subscription/list')) return jsonResponse({ subscriptions: [
+        { id: 'feed/1', title: 'Feed', url: 'https://example.test/feed', categories: [] },
+      ] });
+      if (url.pathname.includes('/unread-count')) return jsonResponse({ unreadcounts: [] });
+      if (url.pathname.endsWith('/stream/items/contents')) return jsonResponse({
+        items: new URLSearchParams(String(init?.body)).getAll('i').map(article),
+      });
+      if (url.pathname.includes('/stream/items/ids')) return jsonResponse({
+        itemRefs: fresh && url.searchParams.has('ot') ? [{ id: 'new' }] : [],
+      });
+      if (url.pathname.includes('/stream/contents/')) return jsonResponse({ items: [article('old')] });
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const app = createApp(appConfig, { database, fetchImplementation });
+    const signal = new AbortController().signal;
+    await app.synchronizeReader(signal);
+    expect(fetchImplementation).not.toHaveBeenCalled(); // No owner exists yet.
+    database.prepare('INSERT INTO users (id, display_name, created_at) VALUES (?, ?, ?)')
+      .run('owner', 'Paul', new Date().toISOString());
+    await app.synchronizeReader(signal);
+    fresh = true;
+    await app.synchronizeReader(signal);
+    expect(database.prepare('SELECT id FROM reader_articles ORDER BY id').all())
+      .toEqual([{ id: 'new' }, { id: 'old' }]);
+    expect(database.prepare('SELECT kind, status FROM reader_sync_runs ORDER BY rowid').all())
+      .toEqual([{ kind: 'full', status: 'succeeded' }, { kind: 'routine', status: 'succeeded' }]);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM sessions').get()).toEqual({ count: 0 });
+    expect((await request(app).get('/api/reader/status')).status).toBe(401);
+    await app.stopReaderSynchronization();
+  });
+
   it('keeps routine synchronization incremental when provider metadata changes', async () => {
     const database = openMemoryDatabase();
     const appConfig = loadConfig({

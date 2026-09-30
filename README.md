@@ -43,6 +43,14 @@ Stable files (`/sw.js`, `/index.html`, the manifest, icons, and navigation respo
 
 After deploying this cache-policy change, purge previously cached stable URLs in Cloudflare, including the service worker, app shell, manifest, and cached navigation URLs. New origin headers cannot invalidate an already stored immutable CDN response. Verify the public headers and update discovery on an installed mobile app. Article/API synchronization remains separate from software-update discovery.
 
+## Background reader updates
+
+Production checks the connected RSS provider at startup and every five minutes after the previous check completes, using the same persisted owner identity, import leases, storage guard, and incremental checkpoints as device requests. No active browser session is required. Initial onboarding and a saved RSS connection are required. Fixture mode and disabled reader caching skip background imports.
+
+Set `READER_BACKGROUND_SYNC_ENABLED=false` to disable polling, or tune `READER_BACKGROUND_SYNC_INTERVAL_MS` (default `300000`, minimum one minute). Development and tests leave polling off unless explicitly enabled. Failed full maintenance imports wait six hours before retrying while incremental checks continue; an unsuccessful first import retries sooner. Shutdown aborts running imports and releases their leases.
+
+Five-minute polling adds up to 288 checks a day, plus checks triggered by device use. Based on recent logs, routine checks without body reconciliation downloaded roughly 0.34–0.52 MB, suggesting about 98–150 MB/day for those checks alone. State scans, new articles, body reconciliation, and daily full maintenance add traffic; roughly 0.3–0.5 GB/day is an initial estimate rather than measured hosted usage. Failed maintenance attempts can add more. The loop uses the existing process and bounded cache retention; it creates no extra service or copy of the database. Periodic outbound requests may prevent Railway sleeping, so compute costs could increase materially if the service previously slept. Freshness also depends on the RSS provider discovering new content. Review synchronization logs and Railway usage after rollout; a ten-minute interval halves routine polling traffic.
+
 ## Current decisions
 
 - Birchfeed is the production RSS aggregation service.
