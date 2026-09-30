@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import compression from 'compression';
 import express, { type ErrorRequestHandler, type RequestHandler } from 'express';
 import helmet from 'helmet';
+import { serveProductionAssets } from './production-assets.js';
 import { z } from 'zod';
 import type { Article, ArticleMutation, ReaderInitializationState, ReaderMarkReadJobRequest, ReaderSnapshot, SavedHighlight } from '../shared/reader.js';
 import type { AppConfig } from './config.js';
@@ -1185,15 +1186,7 @@ export function createApp(config: AppConfig, dependencies: {
   if (config.nodeEnv === 'production') {
     const currentDir = path.dirname(fileURLToPath(import.meta.url));
     const distDir = path.resolve(currentDir, '../../dist');
-    app.use(express.static(distDir, {
-      etag: true,
-      index: false,
-      maxAge: '1y',
-      immutable: true,
-    }));
-    app.get('/{*splat}', (_req, res) => {
-      res.sendFile(path.join(distDir, 'index.html'));
-    });
+    serveProductionAssets(app, distDir);
   }
 
   app.use('/api/{*splat}', (_req, res) => {

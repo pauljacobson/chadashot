@@ -1,11 +1,20 @@
+import { useEffect, useState } from 'react';
+import { startPwaUpdateChecks } from './pwaUpdateChecks';
 import { useRegisterSW } from 'virtual:pwa-register/react';
 
 export function PwaUpdatePrompt() {
+  const [registration, setRegistration] = useState<ServiceWorkerRegistration | null>(null);
   const {
     needRefresh: [needRefresh, setNeedRefresh],
     offlineReady: [offlineReady, setOfflineReady],
     updateServiceWorker,
-  } = useRegisterSW();
+  } = useRegisterSW({
+    onRegisteredSW(swUrl, registered) {
+      void swUrl;
+      if (registered) setRegistration(registered);
+    },
+  });
+  useEffect(() => registration ? startPwaUpdateChecks(registration) : undefined, [registration]);
 
   if (!needRefresh && !offlineReady) return null;
 

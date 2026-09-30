@@ -1,0 +1,1 @@
+/* Stable asset cache fixture */

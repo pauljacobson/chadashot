@@ -37,6 +37,12 @@ The integrated measurements, rollout gates, and compatibility-switch procedure a
 
 Railway builds the root [`Dockerfile`](Dockerfile), checks `/api/health`, and stores the SQLite database and bounded application log in a volume mounted at `/data`. Production requires `APP_ORIGIN`, `ENCRYPTION_KEY`, and an initial `BOOTSTRAP_TOKEN`. GitHub is the source backup; the application does not replicate its feed-bearing SQLite database offsite. Follow the staged [Railway deployment guide](docs/20260907%20Railway%20deployment%20guide.md) before replacing the current FreshRSS service.
 
+## PWA update delivery
+
+Stable files (`/sw.js`, `/index.html`, the manifest, icons, and navigation responses) revalidate with ETags. Only content-hashed bundles and Workbox runtimes retain one-year immutable caching. Installed clients check for software updates when registered, resumed, restored with `pageshow`, brought online while visible, and hourly while visible; activation still uses the existing Update prompt.
+
+After deploying this cache-policy change, purge previously cached stable URLs in Cloudflare, including the service worker, app shell, manifest, and cached navigation URLs. New origin headers cannot invalidate an already stored immutable CDN response. Verify the public headers and update discovery on an installed mobile app. Article/API synchronization remains separate from software-update discovery.
+
 ## Background reader updates
 
 Production checks the connected RSS provider at startup and every five minutes after the previous check completes, using the same persisted owner identity, import leases, storage guard, and incremental checkpoints as device requests. No active browser session is required. Initial onboarding and a saved RSS connection are required. Fixture mode and disabled reader caching skip background imports.
