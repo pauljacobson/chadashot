@@ -5,6 +5,8 @@ describe('loadConfig', () => {
   it('uses the local development identity outside production', () => {
     const config = loadConfig({ NODE_ENV: 'development' });
     expect(config.authMode).toBe('development');
+    expect(config.readerBackgroundSyncEnabled).toBe(false);
+    expect(config.readerBackgroundSyncIntervalMs).toBe(300_000);
     expect(config.logOutput).toBe('both');
     expect(config.logFilePath).toBe(`${config.dataDir}/logs/app.ndjson`);
     expect(config.readerSyncTimeoutMs).toBe(120_000);
@@ -38,7 +40,15 @@ describe('loadConfig', () => {
       ENCRYPTION_KEY: Buffer.alloc(32, 1).toString('base64'),
     });
     expect(config.authMode).toBe('passkey');
+    expect(config.readerBackgroundSyncEnabled).toBe(true);
     expect(config.relyingPartyId).toBe('chadashot.app');
+  });
+
+  it('allows background polling to be disabled or tuned explicitly', () => {
+    const config = loadConfig({ NODE_ENV: 'test', READER_BACKGROUND_SYNC_ENABLED: 'false', READER_BACKGROUND_SYNC_INTERVAL_MS: '600000' });
+    expect(config.readerBackgroundSyncEnabled).toBe(false);
+    expect(config.readerBackgroundSyncIntervalMs).toBe(600_000);
+    expect(() => loadConfig({ READER_BACKGROUND_SYNC_INTERVAL_MS: '0' })).toThrow();
   });
 
   it('refuses the development identity in production', () => {
