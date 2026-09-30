@@ -275,6 +275,7 @@ export function createApp(config: AppConfig, dependencies: {
     stateMs: config.readerStateSyncIntervalMs,
     bodyMs: config.readerBodySyncIntervalMs,
     fullMs: config.readerFullSyncIntervalMs,
+    fullRetryMs: config.readerFullSyncRetryIntervalMs,
     overlapSeconds: config.readerSyncOverlapSeconds,
   };
   app.disable('x-powered-by');
@@ -335,6 +336,15 @@ export function createApp(config: AppConfig, dependencies: {
 
     const controller = new AbortController();
     const work = (async () => {
+      let plan = readerCache.syncPlan(identity, readerSyncCadence);
+      if (forceRoutine && plan.deferredUntil) {
+        readerCache.clearStorageDeferral(identity.accountKey);
+        plan = readerCache.syncPlan(identity, readerSyncCadence);
+      }
+      // Refresh requests should not bypass a failed-full cooldown, or attempt
+      // incremental work before the first committed collection exists.
+      if (forceRoutine && !plan.full && readerCache.status(identity).lastSuccessAt) plan.routine = true;
+      if (!plan.full && !plan.routine && !plan.body && !plan.state) return;
       const lease = readerCache.acquireLease(identity);
       if (!lease) return;
       let activeRun: ReaderCacheImport | ReaderCacheIncrementalRun | null = null;
@@ -419,14 +429,6 @@ export function createApp(config: AppConfig, dependencies: {
       };
 
       try {
-        let plan = readerCache.syncPlan(identity, readerSyncCadence);
-        if (forceRoutine && plan.deferredUntil) {
-          // An explicit refresh is also an operator-requested capacity
-          // reassessment, so it may recover before the scheduled backoff ends.
-          readerCache.clearStorageDeferral(identity.accountKey);
-          plan = readerCache.syncPlan(identity, readerSyncCadence);
-        }
-        if (forceRoutine && !plan.full) plan.routine = true;
         if (plan.full) {
           await runFullImport(lease);
           return;

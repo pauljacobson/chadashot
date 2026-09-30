@@ -25,6 +25,7 @@ const environmentSchema = z.object({
   READER_STATE_SYNC_INTERVAL_MS: z.coerce.number().int().min(0).max(24 * 60 * 60 * 1_000).default(15 * 60 * 1_000),
   READER_BODY_SYNC_INTERVAL_MS: z.coerce.number().int().min(0).max(7 * 24 * 60 * 60 * 1_000).default(6 * 60 * 60 * 1_000),
   READER_FULL_SYNC_INTERVAL_MS: z.coerce.number().int().min(0).max(30 * 24 * 60 * 60 * 1_000).default(24 * 60 * 60 * 1_000),
+  READER_FULL_SYNC_RETRY_INTERVAL_MS: z.coerce.number().int().min(60_000).max(24 * 60 * 60 * 1_000).default(6 * 60 * 60 * 1_000),
   READER_SYNC_OVERLAP_SECONDS: z.coerce.number().int().min(0).max(7 * 24 * 60 * 60).default(6 * 60 * 60),
 });
 
@@ -53,6 +54,7 @@ export type AppConfig = {
   readerStateSyncIntervalMs: number;
   readerBodySyncIntervalMs: number;
   readerFullSyncIntervalMs: number;
+  readerFullSyncRetryIntervalMs: number;
   readerSyncOverlapSeconds: number;
 };
 
@@ -104,6 +106,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): AppCon
     readerStateSyncIntervalMs: parsed.READER_STATE_SYNC_INTERVAL_MS,
     readerBodySyncIntervalMs: parsed.READER_BODY_SYNC_INTERVAL_MS,
     readerFullSyncIntervalMs: parsed.READER_FULL_SYNC_INTERVAL_MS,
+    readerFullSyncRetryIntervalMs: parsed.READER_FULL_SYNC_RETRY_INTERVAL_MS,
     readerSyncOverlapSeconds: parsed.READER_SYNC_OVERLAP_SECONDS,
   };
 }

@@ -280,6 +280,52 @@ describe('transactional reader cache', () => {
     expect(plan.subscriptionFingerprint).toBe(readerSubscriptionFingerprint(value.subscriptions, value.folders));
   });
 
+  it('allows routine discovery after a failed overdue full import, including after restart', () => {
+    const database = openMemoryDatabase();
+    let now = new Date('2026-09-22T00:00:00.000Z');
+    const cache = new ReaderCache(database, 'worker-1', 45_000, () => now);
+    publish(cache, snapshot());
+    now = new Date('2026-09-24T00:00:00.000Z');
+    const run = begin(cache);
+    cache.stageArticles(run, [article('unpublished')]);
+    cache.fail(run, new Error('provider deadline'));
+    const restarted = new ReaderCache(database, 'worker-2', 45_000, () => now);
+    const cadence = { routineMs: 180_000, stateMs: 900_000, bodyMs: 21_600_000, fullMs: 86_400_000, fullRetryMs: 21_600_000, overlapSeconds: 21_600 };
+
+    expect(restarted.syncPlan(identity, cadence)).toMatchObject({ full: false, routine: true });
+    const incremental = restarted.beginIncrementalRun(restarted.acquireLease(identity)!, 'routine');
+    const value = snapshot();
+    restarted.applyRoutineDiscovery(incremental, [article('fresh')], value.subscriptions, value.folders, Math.floor(now.getTime() / 1_000), readerSubscriptionFingerprint(value.subscriptions, value.folders));
+    restarted.completeIncrementalRun(incremental);
+    expect(restarted.readSnapshot(identity)!.articles.map((item) => item.id).sort()).toEqual(['article-1', 'fresh']);
+    expect(restarted.syncPlan(identity, cadence).full).toBe(false);
+    now = new Date(now.getTime() + 21_600_000);
+    expect(restarted.syncPlan(identity, cadence).full).toBe(true);
+  });
+
+  it('backs off failed first imports without attempting incremental work on an empty cache', () => {
+    const database = openMemoryDatabase();
+    let now = new Date('2026-09-24T00:00:00.000Z');
+    const cache = new ReaderCache(database, 'worker-1', 45_000, () => now);
+    cache.fail(begin(cache), new Error('provider deadline'));
+    const cadence = { routineMs: 180_000, stateMs: 900_000, bodyMs: 21_600_000, fullMs: 86_400_000, fullRetryMs: 21_600_000, overlapSeconds: 21_600 };
+    expect(cache.syncPlan(identity, cadence)).toMatchObject({ full: false, routine: false, state: false, body: false });
+    // A first import has nothing usable to serve and needs a shorter retry.
+    now = new Date(now.getTime() + 180_000);
+    expect(cache.syncPlan(identity, cadence).full).toBe(true);
+  });
+
+  it('reports a live retry as refreshing even if the preceding attempt failed', () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database, 'worker-1');
+    publish(cache, snapshot());
+    cache.fail(begin(cache), new Error('provider deadline'));
+    const run = cache.beginIncrementalRun(cache.acquireLease(identity)!, 'routine');
+    expect(cache.status(identity)).toMatchObject({ state: 'refreshing', error: 'provider deadline' });
+    cache.completeIncrementalRun(run);
+    expect(cache.status(identity)).toMatchObject({ state: 'current', error: null });
+  });
+
   it('commits overlapping new-item discovery and its checkpoint atomically', () => {
     const database = openMemoryDatabase();
     const cache = new ReaderCache(database, 'worker-1');

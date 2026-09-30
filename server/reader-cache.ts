@@ -317,6 +317,7 @@ export class ReaderCache {
     stateMs: number;
     bodyMs: number;
     fullMs: number;
+    fullRetryMs?: number;
     overlapSeconds: number;
   }): ReaderSyncPlan {
     const checkpoint = this.database.prepare(`
@@ -340,12 +341,23 @@ export class ReaderCache {
     const now = this.clock().getTime();
     const due = (value: string | null | undefined, interval: number) => !value || now - Date.parse(value) >= interval;
     const deferred = Boolean(checkpoint?.storage_deferred_until && Date.parse(checkpoint.storage_deferred_until) > now);
-    const full = !deferred && (!this.currentGenerationId(identity.accountKey) || due(checkpoint?.last_full_at, cadence.fullMs));
+    const hasGeneration = Boolean(this.currentGenerationId(identity.accountKey));
+    // Runs survive pruning (their generation reference becomes NULL), so this
+    // cooldown also survives process restarts and failed-staging cleanup.
+    const lastFull = this.database.prepare(`
+      SELECT status, finished_at FROM reader_sync_runs
+      WHERE account_key = ? AND kind = 'full'
+      ORDER BY started_at DESC, rowid DESC LIMIT 1
+    `).get(identity.accountKey) as { status: string; finished_at: string | null } | undefined;
+    const maintenanceRetryMs = cadence.fullRetryMs ?? 6 * 60 * 60 * 1_000;
+    const retryMs = hasGeneration ? maintenanceRetryMs : Math.min(maintenanceRetryMs, 180_000);
+    const retryDue = lastFull?.status !== 'failed' || due(lastFull.finished_at, retryMs);
+    const full = !deferred && retryDue && (!hasGeneration || due(checkpoint?.last_full_at, cadence.fullMs));
     return {
       full,
-      routine: !deferred && (full || due(checkpoint?.last_routine_at, cadence.routineMs)),
-      state: !deferred && (full || due(checkpoint?.last_state_at, cadence.stateMs)),
-      body: !deferred && (full || due(checkpoint?.last_body_at, cadence.bodyMs)),
+      routine: !deferred && (full || (hasGeneration && due(checkpoint?.last_routine_at, cadence.routineMs))),
+      state: !deferred && (full || (hasGeneration && due(checkpoint?.last_state_at, cadence.stateMs))),
+      body: !deferred && (full || (hasGeneration && due(checkpoint?.last_body_at, cadence.bodyMs))),
       deferredUntil: deferred ? checkpoint?.storage_deferred_until ?? null : null,
       deferralReason: deferred ? checkpoint?.storage_deferral_reason ?? null : null,
       routineSinceSeconds: Math.max(0, (checkpoint?.routine_cutoff_seconds ?? 0) - cadence.overlapSeconds),
@@ -1680,10 +1692,10 @@ export class ReaderCache {
       ORDER BY r.started_at DESC LIMIT 1
     `).get(identity.accountKey, this.timestamp()) as { items_staged: number } | undefined;
     const hasSnapshot = Boolean(account?.current_generation_id);
-    const state = account?.last_error && hasSnapshot
-      ? 'stale'
-      : running
-        ? (hasSnapshot ? 'refreshing' : 'initializing')
+    const state = running
+      ? (hasSnapshot ? 'refreshing' : 'initializing')
+      : account?.last_error && hasSnapshot
+        ? 'stale'
         : account?.last_error ? 'empty'
           : hasSnapshot ? 'current' : 'empty';
     let storageDeferral: ReaderCacheStatus['storageDeferral'] = null;
