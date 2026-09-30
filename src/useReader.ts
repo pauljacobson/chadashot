@@ -1,3 +1,4 @@
+import { waitForReaderCache } from './readerSync';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Article, ArticleMutation, ReaderArticleBody, ReaderArticleMetadata, ReaderMarkReadJobStatus, ReaderSnapshot, ReaderVersions } from '../shared/reader';
 import {
@@ -127,8 +128,11 @@ export function useReader(userId?: string) {
   const [remoteUnreadCount, setRemoteUnreadCount] = useState<number | null>(null);
   const [markReadJobs, setMarkReadJobs] = useState<ReaderMarkReadJobStatus[]>([]);
   const [readerPath, setReaderPath] = useState<'paginated' | 'snapshot' | null>(null);
-  const lastSync = useRef(0);
   const activeRequest = useRef<AbortController | null>(null);
+  const completionRequest = useRef<AbortController | null>(null);
+  const completionTimer = useRef<number | undefined>(undefined);
+  const pendingManualRefresh = useRef(false);
+  const serverUpdatePending = useRef(false);
   const currentSnapshot = useRef<ReaderSnapshot | null>(null);
   const currentCache = useRef<CachedReaderState | null>(null);
   const bodyRequests = useRef(new Map<string, Promise<ReaderArticleBody>>());
@@ -177,17 +181,16 @@ export function useReader(userId?: string) {
     if (message) {
       setError(message);
       setStatus(navigator.onLine ? 'error' : 'offline');
-    } else if (!result.skippedBecauseLocked) {
-      setError(null);
-      setStatus(navigator.onLine ? 'current' : 'offline');
     }
   }, []);
 
-  const publishCachedReader = useCallback(async (milestone?: 'cached' | 'server') => {
+  const publishCachedReader = useCallback(async (milestone?: 'cached' | 'server', signal?: AbortSignal) => {
     if (!userId) return null;
     const cached = await loadCachedReader(userId);
+    signal?.throwIfAborted();
     if (!cached) return null;
     const reconciled = await reconcileSnapshotWithLocalMutations(cached.snapshot, cached.accountKey);
+    signal?.throwIfAborted();
     currentCache.current = { ...cached, snapshot: reconciled.snapshot };
     setActiveAccountKey(cached.accountKey);
     setCoverage(cached.coverage);
@@ -207,25 +210,12 @@ export function useReader(userId?: string) {
   }, [userId]);
 
   const waitForServerCache = useCallback(async (controller: AbortController, forceRefresh: boolean) => {
-    let serverStatus = await getReaderSynchronizationStatus(controller.signal);
-    if (forceRefresh || serverStatus.state === 'empty') {
-      await requestReaderRefresh(controller.signal);
-      serverStatus = await getReaderSynchronizationStatus(controller.signal);
-    }
-    const isWaiting = () => serverStatus.state === 'empty'
-      || serverStatus.state === 'initializing'
-      || (forceRefresh && serverStatus.state === 'refreshing');
-    for (let attempt = 0; attempt < 120 && isWaiting(); attempt += 1) {
-      await new Promise<void>((resolve, reject) => {
-        const timeout = window.setTimeout(resolve, 500);
-        controller.signal.addEventListener('abort', () => {
-          window.clearTimeout(timeout);
-          reject(controller.signal.reason);
-        }, { once: true });
-      });
-      serverStatus = await getReaderSynchronizationStatus(controller.signal);
-    }
-    return serverStatus;
+    return waitForReaderCache({
+      signal: controller.signal,
+      forceRefresh,
+      loadStatus: getReaderSynchronizationStatus,
+      refresh: requestReaderRefresh,
+    });
   }, []);
 
   const applyAvailableChanges = useCallback(async (accountKey: string, token: string, signal: AbortSignal) => {
@@ -244,6 +234,7 @@ export function useReader(userId?: string) {
     cursor: string | null,
     baselineToken: string,
     controller: AbortController,
+    serverError: string | null,
   ) => {
     let nextCursor = cursor;
     let deltaBaseline = baselineToken;
@@ -267,23 +258,31 @@ export function useReader(userId?: string) {
     await saveReaderChangeToken(accountKey, deltaBaseline);
     await applyAvailableChanges(accountKey, deltaBaseline, controller.signal);
     await saveReaderNavigation(userId!, await getReaderNavigation(controller.signal));
-    const cached = await publishCachedReader();
-    lastSync.current = Date.now();
-    setError(null);
-    setStatus('current');
-    window.requestAnimationFrame(() => markMilestone('synchronization-complete', {
-      articles: cached?.snapshot.articles.length ?? 0,
-    }));
+    const cached = await publishCachedReader(undefined, controller.signal);
+    setError(serverError);
+    setStatus(serverUpdatePending.current ? 'syncing' : serverError ? 'error' : 'current');
+    if (!serverUpdatePending.current && !serverError) {
+      window.requestAnimationFrame(() => markMilestone('synchronization-complete', {
+        articles: cached?.snapshot.articles.length ?? 0,
+      }));
+    }
   }, [applyAvailableChanges, publishCachedReader, userId]);
 
-  const synchronize = useCallback(async (trigger: 'startup' | 'manual' | 'interval' | 'visibility' | 'online' = 'manual') => {
+  const synchronize: (trigger?: 'startup' | 'manual' | 'interval' | 'visibility' | 'online') => Promise<void> = useCallback(async (trigger = 'manual') => {
     if (!enabled) return;
     if (!navigator.onLine) {
       setStatus('offline');
       return;
     }
+    // Automatic triggers share the current run; manual intent is retained and
+    // replayed after it finishes, rather than repeatedly cancelling backfill.
+    if (activeRequest.current && !activeRequest.current.signal.aborted) {
+      if (trigger === 'manual') pendingManualRefresh.current = true;
+      return;
+    }
+    if (completionTimer.current !== undefined) window.clearTimeout(completionTimer.current);
+    completionRequest.current?.abort();
     recordSynchronizationTrigger(trigger);
-    activeRequest.current?.abort();
     const controller = new AbortController();
     activeRequest.current = controller;
     setStatus('syncing');
@@ -291,6 +290,7 @@ export function useReader(userId?: string) {
       const runtime = await getReaderRuntimeConfig(controller.signal);
       setReaderPath(runtime.path);
       if (runtime.path === 'snapshot') {
+        serverUpdatePending.current = false;
         const loaded = await loadReaderSnapshotWithoutWaitingForReplay(
           () => getReaderSnapshot(controller.signal),
           (serverSnapshot) => reconcileSnapshotWithLocalMutations(serverSnapshot),
@@ -327,10 +327,11 @@ export function useReader(userId?: string) {
           markMilestone('first-server-backed-list', { articles: loaded.snapshot.articles.length });
           markMilestone('synchronization-complete', { articles: loaded.snapshot.articles.length });
         });
-        lastSync.current = Date.now();
         setError(loaded.snapshot.cacheStatus?.error ?? null);
         setStatus(loaded.snapshot.cacheStatus?.error ? 'error' : 'current');
-        void loaded.replayResult.then(reportOutboxResult).catch(() => {
+        void loaded.replayResult.then((result) => {
+          if (!controller.signal.aborted) reportOutboxResult(result);
+        }).catch(() => {
           setError('Queued changes remain on this device and will retry automatically');
           setStatus(navigator.onLine ? 'error' : 'offline');
         });
@@ -338,6 +339,7 @@ export function useReader(userId?: string) {
         return;
       }
       const serverStatus = await waitForServerCache(controller, trigger === 'manual');
+      serverUpdatePending.current = ['refreshing', 'initializing', 'empty'].includes(serverStatus.state);
       if (serverStatus.state === 'empty' || serverStatus.state === 'initializing') {
         throw new Error(serverStatus.error ?? 'Reader cache is still initializing');
       }
@@ -373,10 +375,9 @@ export function useReader(userId?: string) {
         try {
           await applyAvailableChanges(navigation.accountKey, cached.coverage.changeToken, controller.signal);
           await saveReaderNavigation(userId!, await getReaderNavigation(controller.signal));
-          await publishCachedReader('server');
-          lastSync.current = Date.now();
+          await publishCachedReader('server', controller.signal);
           setError(serverStatus.error);
-          setStatus(serverStatus.error ? 'error' : 'current');
+          setStatus(serverUpdatePending.current ? 'syncing' : serverStatus.error ? 'error' : 'current');
           return;
         } catch (changeError) {
           if (!(changeError instanceof ApiError) || changeError.status !== 409) throw changeError;
@@ -391,11 +392,11 @@ export function useReader(userId?: string) {
         await saveReaderArticlePage(userId!, firstPage, true);
         await saveReaderChangeToken(firstPage.accountKey, baseline.token);
         cursor = firstPage.nextCursor;
-        await publishCachedReader('server');
+        await publishCachedReader('server', controller.signal);
       }
       setError(null);
-      setStatus('current');
-      void continueBackfill(navigation.accountKey, cursor, baseline.token, controller).catch((backfillError: unknown) => {
+      setStatus(serverUpdatePending.current ? 'syncing' : 'current');
+      await continueBackfill(navigation.accountKey, cursor, baseline.token, controller, serverStatus.error).catch((backfillError: unknown) => {
         if (controller.signal.aborted) return;
         setError(backfillError instanceof Error ? `Metadata backfill paused: ${backfillError.message}` : 'Metadata backfill paused');
         setStatus(navigator.onLine ? 'error' : 'offline');
@@ -405,6 +406,39 @@ export function useReader(userId?: string) {
       setError(syncError instanceof Error ? syncError.message : 'Synchronization failed');
       setStatus(navigator.onLine ? 'error' : 'offline');
       await refreshPendingCount().catch(() => undefined);
+    } finally {
+      if (activeRequest.current === controller) {
+        activeRequest.current = null;
+        if (!controller.signal.aborted && navigator.onLine && document.visibilityState === 'visible') {
+          if (pendingManualRefresh.current) {
+            pendingManualRefresh.current = false;
+            completionTimer.current = window.setTimeout(() => void synchronize('manual'), 0);
+          } else if (serverUpdatePending.current) {
+            // Poll only status while work is pending; re-reading the full local
+            // cache every few seconds would slow mobile devices unnecessarily.
+            const completion = new AbortController();
+            completionRequest.current = completion;
+            const followCompletion = async () => {
+              if (completion.signal.aborted || !navigator.onLine || document.visibilityState !== 'visible') return;
+              try {
+                const next = await getReaderSynchronizationStatus(completion.signal);
+                if (completion.signal.aborted) return;
+                if (['refreshing', 'initializing', 'empty'].includes(next.state)) {
+                  completionTimer.current = window.setTimeout(() => void followCompletion(), 5_000);
+                } else {
+                  serverUpdatePending.current = false;
+                  void synchronize('interval');
+                }
+              } catch {
+                if (!completion.signal.aborted) {
+                  completionTimer.current = window.setTimeout(() => void followCompletion(), 10_000);
+                }
+              }
+            };
+            completionTimer.current = window.setTimeout(() => void followCompletion(), 2_000);
+          }
+        }
+      }
     }
   }, [applyAvailableChanges, continueBackfill, enabled, publishCachedReader, refreshPendingCount, replayPendingMarkReadJobs, replayPendingMutations, reportOutboxResult, userId, waitForServerCache]);
 
@@ -423,11 +457,23 @@ export function useReader(userId?: string) {
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible') void synchronize('interval');
     }, 3 * 60 * 1000);
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible' && Date.now() - lastSync.current > 60_000) void synchronize('visibility');
+    const stopForegroundWork = () => {
+      activeRequest.current?.abort();
+      completionRequest.current?.abort();
+      if (completionTimer.current !== undefined) window.clearTimeout(completionTimer.current);
     };
-    const handleOnline = () => void synchronize('online');
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') void synchronize('visibility');
+      else stopForegroundWork();
+    };
+    const handlePageShow = () => {
+      if (document.visibilityState === 'visible') void synchronize('visibility');
+    };
+    const handleOnline = () => {
+      if (document.visibilityState === 'visible') void synchronize('online');
+    };
     const handleOffline = () => {
+      stopForegroundWork();
       remotePageRef.current = null;
       setRemotePage(null);
       setStatus('offline');
@@ -437,15 +483,18 @@ export function useReader(userId?: string) {
     });
     document.addEventListener('visibilitychange', handleVisibility);
     window.addEventListener('online', handleOnline);
+    window.addEventListener('pageshow', handlePageShow);
     window.addEventListener('offline', handleOffline);
 
     return () => {
       active = false;
-      activeRequest.current?.abort();
+      stopForegroundWork();
+      pendingManualRefresh.current = false;
       if (initialSync !== undefined) window.clearTimeout(initialSync);
       window.clearInterval(interval);
       document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('online', handleOnline);
+      window.removeEventListener('pageshow', handlePageShow);
       window.removeEventListener('offline', handleOffline);
       unsubscribe();
     };
@@ -783,7 +832,7 @@ export function useReader(userId?: string) {
       setMarkReadJobs((current) => [accepted, ...current.filter((candidate) => candidate.id !== accepted.id)]);
       await refreshPendingCount();
       setError(null);
-      setStatus('current');
+      setStatus(serverUpdatePending.current ? 'syncing' : 'current');
       return accepted.targetCount;
     } catch {
       await refreshPendingCount().catch(() => undefined);
@@ -795,6 +844,11 @@ export function useReader(userId?: string) {
 
   const clear = useCallback(() => {
     activeRequest.current?.abort();
+    completionRequest.current?.abort();
+    if (completionTimer.current !== undefined) window.clearTimeout(completionTimer.current);
+    pendingManualRefresh.current = false;
+    serverUpdatePending.current = false;
+    currentCache.current = null;
     currentSnapshot.current = null;
     setSnapshot(null);
     setSelectedId(null);
