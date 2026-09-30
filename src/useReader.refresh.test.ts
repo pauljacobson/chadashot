@@ -60,11 +60,18 @@ describe('foreground reader refresh', () => {
     expect(api.getReaderChanges).toHaveBeenCalledOnce();
     vi.mocked(api.getReaderSynchronizationStatus).mockResolvedValue(status('current'));
     const fresh = { ...page.articles[0], id: 'new', title: 'new' };
+    const freshVersions = { ...versions, collection: 2 };
+    vi.mocked(api.getReaderNavigation).mockResolvedValue({ ...navigation, versions: freshVersions,
+      counts: { ...navigation.counts, all: 2, inbox: 2, uncategorized: 2 } });
+    vi.mocked(api.getReaderArticles).mockResolvedValue({ ...page, total: 2, versions: freshVersions,
+      articles: [fresh, ...page.articles] });
     vi.mocked(api.getReaderChanges).mockResolvedValue({ accountKey: 'account', hasMore: false, token: 'fresh',
-      versions, changes: [{ sequence: 1, kind: 'upsert', articleId: 'new', metadataChanged: true,
-        stateChanged: false, bodyChanged: false, deleted: false, versions, payload: fresh }] });
+      versions: freshVersions, changes: [{ sequence: 1, kind: 'upsert', articleId: 'new', metadataChanged: true,
+        stateChanged: false, bodyChanged: false, deleted: false, versions: freshVersions, payload: fresh }] });
     await waitFor(() => expect(result.current.snapshot?.articles.some((article) => article.id === 'new')).toBe(true), { timeout: 6000 });
     await waitFor(() => expect(result.current.status).toBe('current'));
+    await waitFor(() => expect(result.current.filteredArticles.some((article) => article.id === 'new')).toBe(true));
+    expect(result.current.totalArticles).toBe(2);
   }, 10_000);
 
   it('coalesces overlapping automatic triggers instead of aborting a useful request', async () => {
