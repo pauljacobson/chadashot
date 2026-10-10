@@ -1681,9 +1681,11 @@ export function App() {
   const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [subscribeOpen, setSubscribeOpen] = useState(false);
   const [feedsOpen, setFeedsOpen] = useState(false);
-  const [unreadFeedsOnly, setUnreadFeedsOnly] = useState(false);
+  const [unreadFeedsOverride, setUnreadFeedsOverride] = useState<boolean | null>(null);
   const [feedSortOrder, setFeedSortOrder] = useState<FeedSortOrder>(savedFeedSortOrder);
   const [defaultArticleView, setDefaultArticleView] = useState<DefaultArticleView>(savedDefaultArticleView);
+  // Feed-list switches inherit the account default until deliberately overridden in this session.
+  const unreadFeedsOnly = unreadFeedsOverride ?? (defaultArticleView === 'unread');
   const [accentColor, setAccentColor] = useState<AccentColor>(savedAccentColor);
   const [readingFont, setReadingFont] = useState<ReadingFont>(savedReadingFont);
   const [articleTextSize, setArticleTextSize] = useState<ArticleTextSize>(savedArticleTextSize);
@@ -1704,6 +1706,7 @@ export function App() {
       if (patch.feedSortOrder) setFeedSortOrder(patch.feedSortOrder);
       if (patch.defaultArticleView) {
         setDefaultArticleView(patch.defaultArticleView);
+        setUnreadFeedsOverride(null);
         reader.setReadFilter(reader.filter.kind === 'inbox' ? 'all' : patch.defaultArticleView);
       }
       if (patch.accentColor) setAccentColor(patch.accentColor);
@@ -1977,7 +1980,7 @@ export function App() {
         </div>
       </header>
       <div className="workspace" ref={workspaceRef} style={workspaceStyle}>
-        <Navigation snapshot={reader.snapshot} coverage={reader.coverage} filter={reader.filter} unreadOnly={unreadFeedsOnly} sortOrder={feedSortOrder} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} onSubscribe={() => setSubscribeOpen(true)} onUnreadOnlyChange={setUnreadFeedsOnly} status={reader.status} />
+        <Navigation snapshot={reader.snapshot} coverage={reader.coverage} filter={reader.filter} unreadOnly={unreadFeedsOnly} sortOrder={feedSortOrder} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} onSubscribe={() => setSubscribeOpen(true)} onUnreadOnlyChange={setUnreadFeedsOverride} status={reader.status} />
         <PanelResizer
           className="sidebar-resizer"
           label="Resize feed sidebar"
@@ -2068,7 +2071,7 @@ export function App() {
         sortOrder={feedSortOrder}
         onFilter={chooseFilter}
         onSubscribe={() => { setFeedsOpen(false); setSubscribeOpen(true); }}
-        onUnreadOnlyChange={setUnreadFeedsOnly}
+        onUnreadOnlyChange={setUnreadFeedsOverride}
         onClose={closeFeeds}
       />}
       {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} defaultArticleView={defaultArticleView} accentColor={accentColor} readingFont={readingFont} articleTextSize={articleTextSize} syncStatus={preferencesSyncStatus} onSortOrderChange={(feedSortOrder) => updatePreferences({ feedSortOrder })} onDefaultArticleViewChange={(defaultArticleView) => updatePreferences({ defaultArticleView })} onAccentColorChange={(accentColor) => updatePreferences({ accentColor })} onReadingFontChange={(readingFont) => updatePreferences({ readingFont })} onArticleTextSizeChange={(articleTextSize) => updatePreferences({ articleTextSize })} onClose={() => setPreferencesOpen(false)} />}
