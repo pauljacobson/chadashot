@@ -34,12 +34,14 @@ vi.mock('./performance', () => ({
 const reader = vi.hoisted(() => ({
   articles: [],
   bulkUnreadCount: 0,
+  loadedUnreadCount: 0,
   clear: vi.fn(),
   coverage: null,
   error: null,
   filter: { kind: 'inbox' as const },
   loadMoreArticles: vi.fn(),
   markAllRead: vi.fn(),
+  markLoadedRead: vi.fn(),
   markReadJobs: [],
   navigateSelection: vi.fn(),
   pendingMutations: 0,
@@ -126,6 +128,10 @@ describe('responsive feeds navigation', () => {
     reader.setReadFilter.mockClear();
     reader.selectArticle.mockClear();
     reader.toggleRead.mockClear();
+    reader.markAllRead.mockReset();
+    reader.markLoadedRead.mockReset();
+    Reflect.set(reader, 'bulkUnreadCount', 0);
+    Reflect.set(reader, 'loadedUnreadCount', 0);
     Reflect.set(reader, 'articles', []);
     Reflect.set(reader, 'filter', { kind: 'inbox' });
     Reflect.set(reader, 'coverage', null);
@@ -196,6 +202,52 @@ describe('responsive feeds navigation', () => {
 
     expect(await screen.findAllByText('18916')).toHaveLength(2);
     expect(screen.queryByText('1192')).not.toBeInTheDocument();
+  });
+
+  it.each([true, false])('offers loaded-item marking during synchronization (compact: %s)', async (compact) => {
+    createResponsiveNavigation(compact);
+    Reflect.set(reader, 'bulkUnreadCount', 525);
+    Reflect.set(reader, 'loadedUnreadCount', 100);
+    Reflect.set(reader, 'coverage', {
+      loaded: 23_700,
+      total: 42_728,
+      complete: false,
+      nextCursor: 'next',
+      changeToken: null,
+      backfillInterrupted: false,
+    });
+    const view = render(<App />);
+
+    const button = await screen.findByRole('button', { name: /Mark loaded read/ });
+    expect(button).toBeEnabled();
+    expect(button).toHaveAccessibleDescription(/loaded.*device/i);
+    fireEvent.click(button);
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('100 loaded unread items');
+    expect(reader.markAllRead).not.toHaveBeenCalled();
+
+    Reflect.set(reader, 'coverage', {
+      loaded: 42_728,
+      total: 42_728,
+      complete: true,
+      nextCursor: null,
+      changeToken: 'token',
+      backfillInterrupted: false,
+    });
+    view.rerender(<App />);
+    // Completing sync must not widen a confirmation that is already open.
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('100 loaded unread items');
+    reader.markLoadedRead.mockResolvedValue(100);
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Mark loaded read' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(reader.markLoadedRead).toHaveBeenCalledOnce();
+    expect(reader.markAllRead).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: /Mark all read/ }));
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('525 unread items');
+    reader.markAllRead.mockResolvedValue(525);
+    fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Mark all read' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
+    expect(reader.markAllRead).toHaveBeenCalledOnce();
   });
 
   it('marks a partial offline fallback as a lower bound', async () => {

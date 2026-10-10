@@ -21,6 +21,7 @@ import {
   acknowledgeMarkReadJob,
   applyReaderChanges,
   enqueueArticleMutation,
+  enqueueArticleMutations,
   enqueueMarkReadJob,
   loadCachedReader,
   loadReaderBody,
@@ -684,6 +685,8 @@ export function useReader(userId?: string) {
       ? { ...article, contentHtml: loadedBodies.get(article.id)! }
       : article), [cachedBodyById, loadedBodies, localArticles, remoteIsCurrent, remotePage]);
   const articleIndexById = useMemo(() => new Map(articles.map((article, index) => [article.id, index])), [articles]);
+  const loadedUnreadArticles = useMemo(() => [...new Map([...localArticles, ...articles]
+    .map((article) => [article.id, article])).values()].filter((article) => !article.read), [articles, localArticles]);
 
   const selectedArticle = useMemo(
     () => articles[articleIndexById.get(selectedId ?? '') ?? -1] ?? articles[0] ?? null,
@@ -788,6 +791,39 @@ export function useReader(userId?: string) {
     }
   }, [articleIndexById, articles, filter, readFilter, refreshPendingCount, remoteQueryKey, replayPendingMutations, reportOutboxResult]);
 
+  const markLoadedRead = useCallback(async () => {
+    const cache = currentCache.current;
+    if (!cache || cache.accountKey !== activeAccountKey) throw new Error('Reader account changed; reopen the confirmation');
+    // This closure freezes explicit IDs when the confirmation opens. Never enqueue a scope-wide job here.
+    const unread = loadedUnreadArticles;
+    if (unread.length === 0) return 0;
+    const accountKey = cache.accountKey.startsWith('legacy:') ? undefined : cache.accountKey;
+    await enqueueArticleMutations(unread.map((article) => ({ articleId: article.id, operation: 'read', value: true })), accountKey);
+    try {
+      await applyLocalReadStateToReaderCache(cache.accountKey, unread.map((article) => article.id), true, unread);
+      await publishCachedReader();
+      setRemoteUnreadCount((current) => current === null ? null : Math.max(0, current - unread.length));
+      setRemotePage((current) => {
+        if (!current || current.queryKey !== remoteQueryKey) return current;
+        const changedIds = new Set(unread.map((article) => article.id));
+        const updated = current.articles
+          .map((article) => changedIds.has(article.id) ? { ...article, read: true } : article)
+          .filter((article) => retainsArticleInStateFilter(article, filter, readFilter));
+        const next = { ...current, articles: updated, total: Math.max(0, current.total - (current.articles.length - updated.length)) };
+        remotePageRef.current = next;
+        return next;
+      });
+      await refreshPendingCount();
+      if (navigator.onLine) reportOutboxResult(await replayPendingMutations(accountKey));
+      else { setStatus('offline'); setError(null); }
+    } catch {
+      await refreshPendingCount().catch(() => undefined);
+      setError('Loaded-item changes saved on this device and waiting to retry');
+      setStatus(navigator.onLine ? 'error' : 'offline');
+    }
+    return unread.length;
+  }, [activeAccountKey, filter, loadedUnreadArticles, publishCachedReader, readFilter, refreshPendingCount, remoteQueryKey, replayPendingMutations, reportOutboxResult]);
+
   const markAllRead = useCallback(async () => {
     const cache = currentCache.current;
     const coverageError = markReadCoverageError(cache?.coverage ?? null);
@@ -882,6 +918,7 @@ export function useReader(userId?: string) {
     totalArticles,
     totalCountStatus,
     bulkUnreadCount: remoteUnreadCount ?? localUnreadCount,
+    loadedUnreadCount: loadedUnreadArticles.length,
     markReadJobs,
     searchCoverage: query.trim() && (!remoteIsCurrent || !navigator.onLine) ? 'cached-partial' as const : 'complete' as const,
     setFilter,
@@ -895,6 +932,7 @@ export function useReader(userId?: string) {
     toggleRead: (article: Article) => mutate(article, 'read', !article.read),
     toggleStarred: (article: Article) => mutate(article, 'starred', !article.starred),
     markAllRead,
+    markLoadedRead,
     retryMarkReadJob: async (jobId: string) => {
       await retryMarkReadJob(jobId);
       await refreshMarkReadJobs();
