@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
-import { DEFAULT_USER_PREFERENCES } from '../shared/preferences';
+import { DEFAULT_USER_PREFERENCES, type UserPreferences } from '../shared/preferences';
 import type { ArticleReadFilter, ReaderFilter } from './useReader';
-import { getUserPreferences } from './api';
+import { getUserPreferences, saveUserPreferences } from './api';
 
 vi.mock('./api', async (importOriginal) => ({
   ...await importOriginal<typeof import('./api')>(),
@@ -124,6 +124,84 @@ describe('reading preferences', () => {
     vi.unstubAllGlobals();
   });
 
+  it('saves a start-page choice without leaving the current page and uses it on home and restart', async () => {
+    const view = render(<App />);
+    await openPreferences();
+    const options = screen.getByRole('group', { name: 'Default start page' });
+    expect(within(options).getByRole('radio', { name: /^All articles/ })).toBeChecked();
+    fireEvent.click(within(options).getByRole('radio', { name: /^Latest Edition/ }));
+    expect(localStorage.getItem('chadashot.defaultStartPage')).toBe('latest-edition');
+    await waitFor(() => expect(saveUserPreferences).toHaveBeenCalledWith(expect.objectContaining({ defaultStartPage: 'latest-edition' }), expect.any(AbortSignal)));
+    fireEvent.click(screen.getByRole('button', { name: 'Close preferences' }));
+    expect(screen.queryByRole('heading', { name: 'Latest Edition', level: 1 })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Go to Latest Edition' }));
+    expect(screen.getByRole('heading', { name: 'Latest Edition', level: 1 })).toBeInTheDocument();
+    view.unmount();
+    render(<App />);
+    expect(await screen.findByRole('heading', { name: 'Latest Edition', level: 1 })).toBeInTheDocument();
+  });
+
+  it('uses the All articles read-status default after changing the start page from Latest Edition', async () => {
+    localStorage.setItem('chadashot.defaultStartPage', 'latest-edition');
+    localStorage.setItem('chadashot.defaultArticleView', 'unread');
+    render(<App />);
+    expect(await screen.findByRole('heading', { name: 'Latest Edition', level: 1 })).toBeInTheDocument();
+    await openPreferences();
+    fireEvent.click(within(screen.getByRole('group', { name: 'Default start page' })).getByRole('radio', { name: /^All articles/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close preferences' }));
+    expect(screen.getByRole('heading', { name: 'Latest Edition', level: 1 })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Go to All articles' }));
+    expect(screen.queryByRole('heading', { name: 'Latest Edition', level: 1 })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
+    expect(localStorage.getItem('chadashot.defaultStartPage')).toBe('all');
+  });
+
+  it('opens the account start page on another device but keeps the current page on later refreshes', async () => {
+    vi.mocked(getUserPreferences).mockResolvedValueOnce({ preferences: { ...DEFAULT_USER_PREFERENCES, defaultStartPage: 'latest-edition', defaultArticleView: 'unread' } });
+    render(<App />);
+    expect(await screen.findByRole('heading', { name: 'Latest Edition', level: 1 })).toBeInTheDocument();
+    vi.mocked(getUserPreferences).mockResolvedValueOnce({ preferences: { ...DEFAULT_USER_PREFERENCES, defaultStartPage: 'all' } });
+    fireEvent(window, new Event('focus'));
+    await screen.findByRole('button', { name: 'Go to All articles' });
+    expect(screen.getByRole('heading', { name: 'Latest Edition', level: 1 })).toBeInTheDocument();
+  });
+
+  it('uses the account All articles choice over a cached edition choice at startup', async () => {
+    localStorage.setItem('chadashot.defaultStartPage', 'latest-edition');
+    vi.mocked(getUserPreferences).mockResolvedValueOnce({ preferences: { ...DEFAULT_USER_PREFERENCES, defaultStartPage: 'all', defaultArticleView: 'unread' } });
+    render(<App />);
+    await screen.findByRole('button', { name: 'Unread' });
+    expect(screen.queryByRole('heading', { name: 'Latest Edition', level: 1 })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
+    expect(localStorage.getItem('chadashot.defaultStartPage')).toBe('all');
+  });
+
+  it('does not redirect after navigation when account preferences arrive late', async () => {
+    let finish: ((value: { preferences: UserPreferences }) => void) | undefined;
+    vi.mocked(getUserPreferences).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    render(<App />);
+    const navigation = await screen.findByRole('navigation', { name: 'Reader navigation' });
+    fireEvent.click(within(navigation).getByRole('button', { name: /Starred/ }));
+    await waitFor(() => expect(finish).toBeDefined());
+    await act(async () => { finish!({ preferences: { ...DEFAULT_USER_PREFERENCES, defaultStartPage: 'latest-edition' } }); });
+    expect(screen.getByRole('button', { name: 'Go to Latest Edition' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'Latest Edition', level: 1 })).not.toBeInTheDocument();
+    expect(within(navigation).getByRole('button', { name: /Starred/ })).toHaveClass('active');
+  });
+
+  it('opens the cached start page offline and ignores unsupported saved values', async () => {
+    vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
+    localStorage.setItem('chadashot.defaultStartPage', 'latest-edition');
+    const view = render(<App />);
+    expect(await screen.findByRole('heading', { name: 'Latest Edition', level: 1 })).toBeInTheDocument();
+    view.unmount();
+    localStorage.setItem('chadashot.defaultStartPage', 'inbox');
+    render(<App />);
+    await screen.findByRole('button', { name: 'Open preferences' });
+    expect(screen.queryByRole('heading', { name: 'Latest Edition', level: 1 })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Go to All articles' })).toBeInTheDocument();
+  });
+
   it('defaults Latest Edition to 24 hours and persists each supported publication window', async () => {
     const view = render(<App />);
     await openPreferences();
@@ -152,6 +230,9 @@ describe('reading preferences', () => {
     await openPreferences();
     fireEvent.click(screen.getByRole('radio', { name: '12 hours' }));
     expect(screen.getByRole('radio', { name: '12 hours' })).toBeChecked();
+    const startPage = within(screen.getByRole('group', { name: 'Default start page' })).getByRole('radio', { name: /^Latest Edition/ });
+    fireEvent.click(startPage);
+    expect(startPage).toBeChecked();
   });
 
   it('applies and persists a keyboard-accessible font choice immediately', async () => {

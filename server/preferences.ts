@@ -3,6 +3,7 @@ import { DEFAULT_USER_PREFERENCES, type UserPreferences } from '../shared/prefer
 import type { AppDatabase } from './database.js';
 
 export const preferencesPatchSchema = z.object({
+  defaultStartPage: z.enum(['all', 'latest-edition']).optional(),
   feedSortOrder: z.enum(['alphabetical', 'recent']).optional(),
   defaultArticleView: z.enum(['all', 'unread']).optional(),
   latestEditionHours: z.union([z.literal(12), z.literal(24), z.literal(48)]).optional(),

@@ -3,6 +3,7 @@ import { startAuthentication, startRegistration } from '@simplewebauthn/browser'
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { type CSSProperties, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { AccountSecurityState, AppLogLevel, AppLogResult, Article, IntegrationStatus, SavedHighlight, SessionState, Subscription } from '../shared/reader';
+import type { DefaultStartPage } from '../shared/preferences';
 import {
   appLogExportUrl,
   connectBirchfeed,
@@ -46,6 +47,7 @@ import { finishArticleOpen, finishSelectionUpdate, markMilestone, recordMountedR
 type ContentView = 'list' | 'reader';
 const FEED_SORT_ORDER_KEY = 'chadashot.feedSortOrder';
 const DEFAULT_ARTICLE_VIEW_KEY = 'chadashot.defaultArticleView';
+const DEFAULT_START_PAGE_KEY = 'chadashot.defaultStartPage';
 type DefaultArticleView = Extract<ArticleReadFilter, 'all' | 'unread'>;
 const ACCENT_COLOR_KEY = 'chadashot.accentColor';
 const READING_FONT_KEY = 'chadashot.readingFont';
@@ -177,6 +179,14 @@ function savedFeedSortOrder(): FeedSortOrder {
 function savedDefaultArticleView(): DefaultArticleView {
   try {
     return localStorage.getItem(DEFAULT_ARTICLE_VIEW_KEY) === 'unread' ? 'unread' : 'all';
+  } catch {
+    return 'all';
+  }
+}
+
+function savedDefaultStartPage(): DefaultStartPage {
+  try {
+    return localStorage.getItem(DEFAULT_START_PAGE_KEY) === 'latest-edition' ? 'latest-edition' : 'all';
   } catch {
     return 'all';
   }
@@ -1078,9 +1088,11 @@ export function ReaderPane({
   );
 }
 
-function PreferencesPanel({ sortOrder, defaultArticleView, accentColor, readingFont, articleTextSize, editionHours, onEditionHoursChange, syncStatus, onSortOrderChange, onDefaultArticleViewChange, onAccentColorChange, onReadingFontChange, onArticleTextSizeChange, onClose }: {
+function PreferencesPanel({ sortOrder, defaultArticleView, defaultStartPage, onDefaultStartPageChange, accentColor, readingFont, articleTextSize, editionHours, onEditionHoursChange, syncStatus, onSortOrderChange, onDefaultArticleViewChange, onAccentColorChange, onReadingFontChange, onArticleTextSizeChange, onClose }: {
   sortOrder: FeedSortOrder;
   defaultArticleView: DefaultArticleView;
+  defaultStartPage: DefaultStartPage;
+  onDefaultStartPageChange: (page: DefaultStartPage) => void;
   accentColor: AccentColor;
   readingFont: ReadingFont;
   articleTextSize: ArticleTextSize;
@@ -1098,6 +1110,21 @@ function PreferencesPanel({ sortOrder, defaultArticleView, accentColor, readingF
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <section className="preferences-panel" role="dialog" aria-modal="true" aria-labelledby="preferences-title">
         <header><div><div className="eyebrow">Chadashot</div><h1 id="preferences-title">Preferences</h1></div><button aria-label="Close preferences" onClick={onClose}>×</button></header>
+        <div className="setting-section">
+          <h2>Start page</h2>
+          <fieldset className="preference-options">
+            <legend>Default start page</legend>
+            <label className="preference-option">
+              <input type="radio" name="default-start-page" value="all" checked={defaultStartPage === 'all'} onChange={() => onDefaultStartPageChange('all')} />
+              <span><strong>All articles</strong><small>Open your article list using your saved read-status preference.</small></span>
+            </label>
+            <label className="preference-option">
+              <input type="radio" name="default-start-page" value="latest-edition" checked={defaultStartPage === 'latest-edition'} onChange={() => onDefaultStartPageChange('latest-edition')} />
+              <span><strong>Latest Edition</strong><small>Open recent articles grouped by feed category.</small></span>
+            </label>
+          </fieldset>
+          <p className="preferences-note">Used when the app starts and when you select the Chadashot home button.</p>
+        </div>
         <div className="setting-section">
           <h2>Latest Edition</h2>
           <fieldset className="preference-options">
@@ -1712,13 +1739,14 @@ export function App() {
   const [unreadFeedsOverride, setUnreadFeedsOverride] = useState<boolean | null>(null);
   const [feedSortOrder, setFeedSortOrder] = useState<FeedSortOrder>(savedFeedSortOrder);
   const [defaultArticleView, setDefaultArticleView] = useState<DefaultArticleView>(savedDefaultArticleView);
+  const [defaultStartPage, setDefaultStartPage] = useState<DefaultStartPage>(savedDefaultStartPage);
   // Feed-list switches inherit the account default until deliberately overridden in this session.
   const unreadFeedsOnly = unreadFeedsOverride ?? (defaultArticleView === 'unread');
   const [accentColor, setAccentColor] = useState<AccentColor>(savedAccentColor);
   const [readingFont, setReadingFont] = useState<ReadingFont>(savedReadingFont);
   const [articleTextSize, setArticleTextSize] = useState<ArticleTextSize>(savedArticleTextSize);
   const [editionHours, setEditionHours] = useState<EditionHours>(savedEditionHours);
-  const [editionActive, setEditionActive] = useState(false);
+  const [editionActive, setEditionActive] = useState(() => defaultStartPage === 'latest-edition');
   const [editionNow, setEditionNow] = useState(Date.now);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [floatingFeeds, setFloatingFeeds] = useState(() => typeof window.matchMedia === 'function' && window.matchMedia(FLOATING_FEEDS_QUERY).matches);
@@ -1729,13 +1757,16 @@ export function App() {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const headerFeedsTriggerRef = useRef<HTMLButtonElement>(null);
   const activeFeedsTriggerRef = useRef<HTMLButtonElement>(null);
+  const hasNavigated = useRef(false);
+  useEffect(() => { hasNavigated.current = false; }, [session?.user?.id]);
   const publishedSince = useMemo(() => editionActive ? new Date(editionNow - editionHours * 3_600_000).toISOString() : undefined, [editionActive, editionHours, editionNow]);
-  const reader = useReader(session?.authenticated ? session.user?.id : undefined, defaultArticleView, publishedSince);
+  const reader = useReader(session?.authenticated ? session.user?.id : undefined, editionActive ? 'all' : defaultArticleView, publishedSince);
   const { updatePreferences, syncStatus: preferencesSyncStatus } = usePreferences(
     session?.authenticated ? session.user?.id : undefined,
-    { feedSortOrder, defaultArticleView, accentColor, readingFont, articleTextSize, latestEditionHours: editionHours },
+    { feedSortOrder, defaultArticleView, defaultStartPage, accentColor, readingFont, articleTextSize, latestEditionHours: editionHours },
     (patch) => {
       if (patch.feedSortOrder) setFeedSortOrder(patch.feedSortOrder);
+      if (patch.defaultStartPage) setDefaultStartPage(patch.defaultStartPage);
       if (patch.defaultArticleView) {
         setDefaultArticleView(patch.defaultArticleView);
         setUnreadFeedsOverride(null);
@@ -1745,6 +1776,16 @@ export function App() {
       if (patch.accentColor) setAccentColor(patch.accentColor);
       if (patch.readingFont) setReadingFont(patch.readingFont);
       if (patch.articleTextSize) setArticleTextSize(patch.articleTextSize);
+    },
+    (preferences) => {
+      // A slow startup request must not replace a page the user already opened.
+      if (hasNavigated.current) return;
+      const openEdition = preferences.defaultStartPage === 'latest-edition';
+      setEditionActive(openEdition);
+      setEditionNow(Date.now());
+      reader.setFilter({ kind: 'all' });
+      reader.setReadFilter(openEdition ? 'all' : preferences.defaultArticleView);
+      setContentView('list');
     },
   );
 
@@ -1818,6 +1859,12 @@ export function App() {
       // The preference remains available for this session if storage is unavailable.
     }
   }, [defaultArticleView]);
+
+  useEffect(() => {
+    try { localStorage.setItem(DEFAULT_START_PAGE_KEY, defaultStartPage); } catch {
+      // The preference remains available for this session if storage is unavailable.
+    }
+  }, [defaultStartPage]);
 
   useEffect(() => {
     try {
@@ -1927,6 +1974,7 @@ export function App() {
         : null;
 
   function chooseFilter(filter: ReaderFilter) {
+    hasNavigated.current = true;
     setEditionActive(false);
     // View-level overrides last until navigation; every scope uses the global default.
     reader.setReadFilter(defaultArticleView);
@@ -1935,6 +1983,7 @@ export function App() {
   }
 
   function chooseEdition() {
+    hasNavigated.current = true;
     reader.setFilter({ kind: 'all' });
     reader.setReadFilter('all');
     reader.setQuery('');
@@ -1945,6 +1994,10 @@ export function App() {
   }
 
   function goHome() {
+    if (defaultStartPage === 'latest-edition') {
+      chooseEdition();
+      return;
+    }
     reader.setQuery('');
     chooseFilter({ kind: 'all' });
     setFeedsOpen(false);
@@ -1961,6 +2014,7 @@ export function App() {
   }
 
   function chooseArticle(article: Article) {
+    hasNavigated.current = true;
     if (article.id !== reader.selectedArticle?.id) {
       startArticleOpen('cache');
       startSelectionUpdate();
@@ -2016,12 +2070,12 @@ export function App() {
               }
             }}
           >☰</button>
-          <button className="brand-home" aria-label="Go to All articles" onClick={goHome}>
+          <button className="brand-home" aria-label={`Go to ${defaultStartPage === 'latest-edition' ? 'Latest Edition' : 'All articles'}`} onClick={goHome}>
             <span className="app-mark" aria-hidden="true">ח</span>
             <span>Chadashot</span>
           </button>
         </div>
-        <label className="search-box" htmlFor="article-search"><span aria-hidden="true">⌕</span><input id="article-search" type="search" value={reader.query} onChange={(event) => { reader.setQuery(event.target.value); setContentView('list'); }} placeholder="Search your reading" /></label>
+        <label className="search-box" htmlFor="article-search"><span aria-hidden="true">⌕</span><input id="article-search" type="search" value={reader.query} onChange={(event) => { hasNavigated.current = true; reader.setQuery(event.target.value); setContentView('list'); }} placeholder="Search your reading" /></label>
         <div className="topbar-actions">
           <span className="topbar-status">
             <span className={`status-dot ${reader.status}`}></span>
@@ -2160,7 +2214,7 @@ export function App() {
         onUnreadOnlyChange={setUnreadFeedsOverride}
         onClose={closeFeeds}
       />}
-      {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} defaultArticleView={defaultArticleView} accentColor={accentColor} readingFont={readingFont} articleTextSize={articleTextSize} editionHours={editionHours} onEditionHoursChange={(latestEditionHours) => updatePreferences({ latestEditionHours })} syncStatus={preferencesSyncStatus} onSortOrderChange={(feedSortOrder) => updatePreferences({ feedSortOrder })} onDefaultArticleViewChange={(defaultArticleView) => updatePreferences({ defaultArticleView })} onAccentColorChange={(accentColor) => updatePreferences({ accentColor })} onReadingFontChange={(readingFont) => updatePreferences({ readingFont })} onArticleTextSizeChange={(articleTextSize) => updatePreferences({ articleTextSize })} onClose={() => setPreferencesOpen(false)} />}
+      {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} defaultArticleView={defaultArticleView} defaultStartPage={defaultStartPage} onDefaultStartPageChange={(defaultStartPage) => { hasNavigated.current = true; updatePreferences({ defaultStartPage }); }} accentColor={accentColor} readingFont={readingFont} articleTextSize={articleTextSize} editionHours={editionHours} onEditionHoursChange={(latestEditionHours) => updatePreferences({ latestEditionHours })} syncStatus={preferencesSyncStatus} onSortOrderChange={(feedSortOrder) => updatePreferences({ feedSortOrder })} onDefaultArticleViewChange={(defaultArticleView) => updatePreferences({ defaultArticleView })} onAccentColorChange={(accentColor) => updatePreferences({ accentColor })} onReadingFontChange={(readingFont) => updatePreferences({ readingFont })} onArticleTextSizeChange={(articleTextSize) => updatePreferences({ articleTextSize })} onClose={() => setPreferencesOpen(false)} />}
       {subscribeOpen && <SubscribePanel
         onClose={() => setSubscribeOpen(false)}
         onSubscribed={async (feedUrl) => {

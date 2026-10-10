@@ -1,4 +1,7 @@
+export type DefaultStartPage = 'all' | 'latest-edition';
+
 export type UserPreferences = {
+  defaultStartPage: DefaultStartPage;
   feedSortOrder: 'alphabetical' | 'recent';
   defaultArticleView: 'all' | 'unread';
   latestEditionHours: 12 | 24 | 48;
@@ -8,6 +11,7 @@ export type UserPreferences = {
 };
 
 export const DEFAULT_USER_PREFERENCES: UserPreferences = {
+  defaultStartPage: 'all',
   feedSortOrder: 'alphabetical',
   defaultArticleView: 'all',
   latestEditionHours: 24,
