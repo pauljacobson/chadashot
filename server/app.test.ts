@@ -193,6 +193,39 @@ describe('application API', () => {
       .toThrow('Server URL cannot contain credentials');
   });
 
+  it('requires a connection and a valid feed stream ID before removal', async () => {
+    const removeApp = createApp(config, { database: openMemoryDatabase() });
+    expect((await request(removeApp).delete('/api/subscriptions').send({ subscriptionId: 'feed/42' })).status).toBe(409);
+    for (const subscriptionId of ['', 'user/-/state/com.google/read', 'feed/']) {
+      expect((await request(removeApp).delete('/api/subscriptions').send({ subscriptionId })).status).toBe(400);
+    }
+  });
+
+  it('requires authentication before removing a feed', async () => {
+    const removeApp = createApp({ ...config, nodeEnv: 'development', readerCacheEnabled: false }, { database: openMemoryDatabase() });
+    const response = await request(removeApp).delete('/api/subscriptions').set('Host', 'remote.example.test').send({ subscriptionId: 'feed/42' });
+    expect(response.status).toBe(401);
+  });
+
+  it.each(['OK', 'Error'])('only confirms feed removal when the provider confirms it (%s)', async (providerResponse) => {
+    const database = openMemoryDatabase();
+    const encryptedConfig = loadConfig({ NODE_ENV: 'test', AUTH_MODE: 'development', ENCRYPTION_KEY: Buffer.alloc(32, 4).toString('base64') });
+    const fetchImplementation = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.endsWith('/token')) return new Response('write-token');
+      if (url.endsWith('/subscription/edit')) return new Response(providerResponse);
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const removeApp = createApp(encryptedConfig, { database, fetchImplementation });
+    await request(removeApp).put('/api/settings/rss').send({ serverUrl: 'https://reader.example.test/api/greader.php', email: 'reader@example.test', apiKey: 'reader-secret' });
+    const response = await request(removeApp).delete('/api/subscriptions').send({ subscriptionId: 'feed/42' });
+    expect(response.status).toBe(providerResponse === 'OK' ? 200 : 502);
+    if (providerResponse === 'OK') expect(response.body).toEqual({ removed: true });
+    else expect(response.body).toEqual({ error: 'The RSS service did not confirm the feed removal' });
+    expect(new URLSearchParams(String(fetchImplementation.mock.calls.at(-1)?.[1]?.body)).get('s')).toBe('feed/42');
+  });
+
   it('adds a subscription to the configured Reader service', async () => {
     const database = openMemoryDatabase();
     const encryptedConfig = loadConfig({

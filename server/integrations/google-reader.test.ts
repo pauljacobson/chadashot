@@ -362,6 +362,37 @@ describe('Google Reader compatible Birchfeed client', () => {
     expect(body.get('a')).toBe('user/-/state/com.google/read');
   });
 
+  it('unsubscribes using the exact provider stream ID and write token', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.endsWith('/token')) return new Response('write-token');
+      if (url.endsWith('/subscription/edit')) return new Response('OK\n');
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const client = new GoogleReaderClient({
+      serverUrl: 'https://reader.example.test/api/greader.php', email: 'reader@example.test', apiKey: 'secret',
+    }, fetchMock);
+    await client.unsubscribe('feed/42');
+    const request = fetchMock.mock.calls.at(-1)!;
+    expect(request[1]?.headers).toMatchObject({ Authorization: 'GoogleLogin auth=reader-key' });
+    expect(new URLSearchParams(String(request[1]?.body)).get('s')).toBe('feed/42');
+    expect(new URLSearchParams(String(request[1]?.body)).get('ac')).toBe('unsubscribe');
+    expect(new URLSearchParams(String(request[1]?.body)).get('T')).toBe('write-token');
+  });
+
+  it.each([{ body: 'Error', status: 200 }, { body: 'Forbidden', status: 403 }])('rejects unconfirmed removal: %j', async ({ body, status }) => {
+    const client = new GoogleReaderClient({
+      serverUrl: 'https://reader.example.test/api/greader.php', email: 'reader@example.test', apiKey: 'secret',
+    }, async (input) => {
+      const url = String(input);
+      if (url.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.endsWith('/token')) return new Response('write-token');
+      return new Response(body, { status });
+    });
+    await expect(client.unsubscribe('feed/42')).rejects.toThrow();
+  });
+
   it('subscribes through quickadd with the service write token', async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);

@@ -558,6 +558,18 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   border-left: 1px solid var(--border);
 }
 .nested-feed { min-height: 34px; padding: 5px 8px; font-size: 13px; }
+.feed-edit-footer { display: flex; justify-content: flex-end; margin-top: 14px; padding-top: 6px; border-top: 1px solid var(--border); }
+.feed-edit-action { min-height: 44px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--accent); font-size: 13px; cursor: pointer; }
+.nav-heading-row > .feed-edit-action { width: auto; height: auto; border-radius: 8px; color: var(--accent); font-size: 13px; }
+.feed-edit-action:hover { background: var(--surface-active); }
+.feed-editor-note { margin: 10px 9px; color: var(--muted); font-size: 12px; }
+.feed-editor-folder { margin: 15px 9px 4px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.feed-editing .nested-feeds { margin-left: 0; padding-left: 0; border-left: 0; }
+.feed-editor-row { display: flex; align-items: center; gap: 8px; min-height: 48px; padding-left: 8px; }
+.feed-editor-row > .feed-icon { flex: 0 0 18px; width: 18px; height: 18px; border-radius: 4px; object-fit: contain; }
+.feed-editor-title { min-width: 0; flex: 1; overflow-wrap: anywhere; font-size: 13px; }
+.feed-remove-action { flex: 0 0 auto; min-height: 44px; padding: 8px; border: 0; border-radius: 8px; background: transparent; color: var(--danger); font-size: 13px; cursor: pointer; }
+.feed-remove-action:hover { background: color-mix(in srgb, var(--danger) 10%, transparent); }
 .nav-item > .feed-icon {
   flex: 0 0 18px;
   width: 18px;
@@ -1066,6 +1078,7 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   cursor: pointer;
 }
 .mobile-feeds-panel > header > button:last-child { width: 38px; padding: 0; border: 0; border-radius: 50%; font-size: 22px; }
+.mobile-feeds-panel > header > [data-feed-edit-done] { min-height: 44px; }
 .mobile-feeds-panel .feeds-group { margin: 0; padding: 14px 12px 18px; }
 .subscribe-panel > header { display: flex; align-items: center; padding: 24px; border-bottom: 1px solid var(--border); }
 .subscribe-panel h1 { margin: 3px 0 0; font-size: 25px; }
@@ -1077,6 +1090,12 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .dialog-actions button { min-height: 40px; padding: 0 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); cursor: pointer; }
 .dialog-actions .primary-action { background: var(--accent); }
+.remove-feed-panel { width: min(420px, 100%); max-height: calc(100dvh - 40px); overflow: auto; padding: 24px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); box-shadow: 0 22px 70px rgba(0,0,0,.28); }
+.remove-feed-panel h1 { margin: 0 0 12px; font-size: 21px; overflow-wrap: anywhere; }
+.remove-feed-panel p { margin: 0 0 20px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.remove-feed-actions { display: grid; gap: 8px; margin-top: 16px; }
+.remove-feed-actions button { min-height: 48px; padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); cursor: pointer; }
+.remove-feed-actions .danger-action { background: var(--danger); border-color: var(--danger); color: var(--surface); }
 .settings-panel > header,
 .preferences-panel > header,
 .logs-panel > header,
@@ -1468,7 +1487,7 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   .mobile-navigation .mobile-unread-count { font-size: 9px; font-variant-numeric: tabular-nums; }
   .mobile-navigation button.active { color: var(--accent); font-weight: 600; }
   .dialog-backdrop { padding: 0; place-items: end stretch; }
-  .settings-panel, .preferences-panel, .subscribe-panel, .mobile-feeds-panel, .logs-panel, .security-panel { width: 100%; max-height: calc(100dvh - 28px); border-radius: 18px 18px 0 0; }
+  .settings-panel, .preferences-panel, .subscribe-panel, .mobile-feeds-panel, .logs-panel, .security-panel, .remove-feed-panel { width: 100%; max-height: calc(100dvh - 28px); border-radius: 18px 18px 0 0; }
   .add-passkey-form { grid-template-columns: 1fr; }
   .recovery-codes-view ol { grid-template-columns: 1fr; }
   .logs-panel { height: calc(100dvh - 28px); }

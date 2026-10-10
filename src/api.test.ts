@@ -1,9 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, getReaderArticles, getReaderRuntimeConfig, getReaderSnapshot, sendArticleMutations } from './api';
+import { ApiError, getReaderArticles, getReaderRuntimeConfig, getReaderSnapshot, sendArticleMutations, unsubscribeFromFeed } from './api';
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe('reader snapshot API', () => {
+  it('sends feed IDs containing slashes and URLs intact in the removal body', async () => {
+    const fetchMock = vi.fn(async () => Response.json({ removed: true }));
+    vi.stubGlobal('fetch', fetchMock);
+    const subscriptionId = 'feed/https://example.test/rss?format=xml';
+    await unsubscribeFromFeed(subscriptionId);
+    expect(fetchMock).toHaveBeenCalledWith('/api/subscriptions', expect.objectContaining({
+      method: 'DELETE', credentials: 'same-origin', body: JSON.stringify({ subscriptionId }),
+    }));
+  });
   it('forwards the publication window with pagination and the all-items scope', async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => Response.json({ articles: [], total: 0, nextCursor: null }));
     vi.stubGlobal('fetch', fetchMock);

@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Article } from '../shared/reader';
 import { App } from './App';
+import { unsubscribeFromFeed } from './api';
 
 vi.mock('./api', async (importOriginal) => ({
   ...await importOriginal<typeof import('./api')>(),
@@ -13,6 +14,7 @@ vi.mock('./api', async (importOriginal) => ({
     setupRequired: false,
     user: { id: 'user-1', username: 'Paul' },
   })),
+  unsubscribeFromFeed: vi.fn(async () => ({ removed: true as const })),
 }));
 
 vi.mock('./offlineStore', () => ({
@@ -155,6 +157,9 @@ describe('responsive feeds navigation', () => {
   });
 
   beforeEach(() => {
+    localStorage.clear();
+    vi.mocked(unsubscribeFromFeed).mockReset().mockResolvedValue({ removed: true });
+    reader.synchronize.mockReset().mockResolvedValue(undefined);
     reader.setFilter.mockClear();
     reader.setQuery.mockClear();
     reader.setReadFilter.mockClear();
@@ -188,6 +193,95 @@ describe('responsive feeds navigation', () => {
     cleanup();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it.each([true, false])('keeps removal controls in edit mode and includes read feeds (compact: %s)', async (compact) => {
+    createResponsiveNavigation(compact);
+    localStorage.setItem('chadashot.defaultArticleView', 'unread');
+    Reflect.set(reader, 'snapshot', {
+      generatedAt: '2026-10-10T10:00:00.000Z', source: 'google-reader', articles: [],
+      folders: [{ id: 'tech', title: 'Technology', unreadCount: 2 }],
+      subscriptions: [
+        { id: 'feed/42', title: 'Example feed', folderIds: ['tech'], unreadCount: 2 },
+        { id: 'feed/43', title: 'Read feed', folderIds: ['tech'], unreadCount: 0 },
+      ],
+    });
+    render(<App />);
+    await screen.findByRole('button', { name: compact ? 'Open feeds panel' : 'Collapse navigation sidebar' });
+    if (compact) fireEvent.click(screen.getByRole('button', { name: 'Open feeds panel' }));
+    const scope = compact ? screen.getByRole('dialog', { name: 'Feeds' }) : screen.getByRole('navigation', { name: 'Reader navigation' });
+    expect(within(scope).queryByRole('button', { name: /^Remove/ })).not.toBeInTheDocument();
+    expect(within(scope).getByRole('switch', { name: 'Unread feeds only' })).toBeChecked();
+    fireEvent.click(within(scope).getByRole('button', { name: 'Edit feeds' }));
+    expect(within(scope).getByRole('button', { name: 'Remove Read feed' })).toBeInTheDocument();
+    expect(within(scope).queryByRole('switch')).not.toBeInTheDocument();
+    expect(within(scope).queryByRole('button', { name: 'Add feed' })).not.toBeInTheDocument();
+    const remove = within(scope).getByRole('button', { name: 'Remove Read feed' });
+    fireEvent.click(remove);
+    const confirmation = screen.getByRole('dialog', { name: 'Remove Read feed?' });
+    expect(screen.getByRole('button', { name: 'Keep feed' })).toHaveFocus();
+    fireEvent.keyDown(confirmation, { key: 'Tab' });
+    expect(screen.getByRole('button', { name: 'Remove feed' })).toHaveFocus();
+    fireEvent.keyDown(confirmation, { key: 'Escape' });
+    expect(unsubscribeFromFeed).not.toHaveBeenCalled();
+    expect(remove).toHaveFocus();
+    fireEvent.click(within(scope).getByRole('button', { name: 'Done' }));
+    expect(within(scope).getByRole('switch', { name: 'Unread feeds only' })).toBeChecked();
+    expect(within(scope).queryByRole('button', { name: /^Remove/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps a failed removal visible, then hides it after confirmation and resets the selected feed', async () => {
+    createResponsiveNavigation(true);
+    Reflect.set(reader, 'filter', { kind: 'feed', id: 'feed/42' });
+    Reflect.set(reader, 'snapshot', {
+      generatedAt: '2026-10-10T10:00:00.000Z', source: 'google-reader', articles: [], folders: [],
+      subscriptions: [{ id: 'feed/42', title: 'Example feed', folderIds: [], unreadCount: 2 }],
+    });
+    vi.mocked(unsubscribeFromFeed).mockRejectedValueOnce(new Error('The RSS service did not confirm the feed removal'));
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open feeds panel' }));
+    const scope = screen.getByRole('dialog', { name: 'Feeds' });
+    fireEvent.click(within(scope).getByRole('button', { name: 'Edit feeds' }));
+    fireEvent.click(within(scope).getByRole('button', { name: 'Remove Example feed' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove feed' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('did not confirm');
+    expect(reader.synchronize).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'Keep feed' }));
+    expect(within(scope).getByRole('button', { name: 'Remove Example feed' })).toBeInTheDocument();
+    fireEvent.click(within(scope).getByRole('button', { name: 'Remove Example feed' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove feed' }));
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Remove Example feed?' })).not.toBeInTheDocument());
+    expect(unsubscribeFromFeed).toHaveBeenLastCalledWith('feed/42');
+    expect(reader.setFilter).toHaveBeenLastCalledWith({ kind: 'all' });
+    expect(reader.synchronize).toHaveBeenCalledTimes(1);
+    expect(within(scope).queryByRole('button', { name: 'Remove Example feed' })).not.toBeInTheDocument();
+    expect(within(scope).getByRole('button', { name: 'Done' })).toHaveFocus();
+  });
+
+  it('prevents duplicate removal and dismissal while the provider request is pending', async () => {
+    createResponsiveNavigation(true);
+    Reflect.set(reader, 'snapshot', {
+      generatedAt: '2026-10-10T10:00:00.000Z', source: 'google-reader', articles: [], folders: [],
+      subscriptions: [{ id: 'feed/42', title: 'Example feed', folderIds: [], unreadCount: 2 }],
+    });
+    let finish!: (value: { removed: true }) => void;
+    vi.mocked(unsubscribeFromFeed).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open feeds panel' }));
+    const scope = screen.getByRole('dialog', { name: 'Feeds' });
+    fireEvent.click(within(scope).getByRole('button', { name: 'Edit feeds' }));
+    fireEvent.click(within(scope).getByRole('button', { name: 'Remove Example feed' }));
+    const dialog = screen.getByRole('dialog', { name: 'Remove Example feed?' });
+    const confirm = within(dialog).getByRole('button', { name: 'Remove feed' });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    expect(within(dialog).getByRole('button', { name: 'Removing…' })).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: 'Keep feed' })).toBeDisabled();
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(dialog).toBeInTheDocument();
+    expect(unsubscribeFromFeed).toHaveBeenCalledTimes(1);
+    finish({ removed: true });
+    await waitFor(() => expect(dialog).not.toBeInTheDocument());
   });
 
   it('uses the header hamburger to open a labelled modal feeds panel in compact mode', async () => {

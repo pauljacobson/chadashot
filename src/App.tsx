@@ -27,6 +27,7 @@ import {
   retryReadwiseHighlight,
   saveReadwiseDocument,
   subscribeToFeed,
+  unsubscribeFromFeed,
   verifyBootstrap,
   verifyAdditionalPasskey,
   verifyLogin,
@@ -268,7 +269,7 @@ function FeedIcon({ subscription }: { subscription: Subscription }) {
   return <img className="feed-icon" src={source} alt="" aria-hidden="true" loading="lazy" onError={() => setFailedSource(source)} />;
 }
 
-function FeedTree({ snapshot, filter, unreadOnly, sortOrder, onFilter, onSubscribe, onFeedSelection, onUnreadOnlyChange, showHeading = true }: {
+function FeedTree({ snapshot, filter, unreadOnly, sortOrder, onFilter, onSubscribe, onFeedSelection, onUnreadOnlyChange, editing, onEditingChange, onRemove, showHeading = true }: {
   snapshot: ReturnType<typeof useReader>['snapshot'];
   filter: ReaderFilter;
   unreadOnly: boolean;
@@ -277,10 +278,15 @@ function FeedTree({ snapshot, filter, unreadOnly, sortOrder, onFilter, onSubscri
   onSubscribe: () => void;
   onFeedSelection?: () => void;
   onUnreadOnlyChange: (unreadOnly: boolean) => void;
+  editing: boolean;
+  onEditingChange: (editing: boolean) => void;
+  onRemove: (subscription: Subscription, trigger: HTMLButtonElement) => void;
   showHeading?: boolean;
 }) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set());
-  const feedGroups = buildFeedGroups(snapshot, { unreadOnly, sortOrder });
+  // Editing includes read feeds and opens every folder without changing reading preferences.
+  const feedGroups = buildFeedGroups(snapshot, { unreadOnly: editing ? false : unreadOnly, sortOrder })
+    .filter((group) => !editing || group.subscriptions.length > 0);
 
   function toggleFolder(folderId: string) {
     setExpandedFolders((current) => {
@@ -292,13 +298,13 @@ function FeedTree({ snapshot, filter, unreadOnly, sortOrder, onFilter, onSubscri
   }
 
   function folderGroup(folder: (typeof feedGroups)[number]) {
-    const expanded = expandedFolders.has(folder.id);
+    const expanded = editing || expandedFolders.has(folder.id);
     const active = folder.uncategorized
       ? filter.kind === 'uncategorized'
       : filter.kind === 'folder' && filter.id === folder.id;
     return (
       <div className="feed-tree-folder" key={folder.id}>
-        <div className="folder-row">
+        {editing ? <div className="feed-editor-folder">{folder.title}</div> : <div className="folder-row">
           <button className="folder-toggle" aria-label={`${expanded ? 'Collapse' : 'Expand'} ${folder.title} feeds`} aria-expanded={expanded} onClick={() => toggleFolder(folder.id)}>
             <span className="folder-chevron" aria-hidden="true">{expanded ? '⌄' : '›'}</span>
           </button>
@@ -312,11 +318,14 @@ function FeedTree({ snapshot, filter, unreadOnly, sortOrder, onFilter, onSubscri
           >
             <span>{folder.title}</span><span className="nav-count">{folder.unreadCount}</span>
           </button>
-        </div>
+        </div>}
         {expanded && (
           <div className="nested-feeds">
             {folder.subscriptions.length === 0 ? <div className="empty-folder">No feeds</div> : folder.subscriptions.map((subscription) => (
-              <button key={subscription.id} className={`nav-item nested-feed ${filter.kind === 'feed' && filter.id === subscription.id ? 'active' : ''}`} onClick={() => { onFilter({ kind: 'feed', id: subscription.id }); onFeedSelection?.(); }}>
+              editing ? <div key={subscription.id} className="feed-editor-row">
+                <FeedIcon subscription={subscription} /><span className="feed-editor-title">{subscription.title}</span>
+                <button className="feed-remove-action" aria-label={`Remove ${subscription.title}`} onClick={(event) => onRemove(subscription, event.currentTarget)}>Remove</button>
+              </div> : <button key={subscription.id} className={`nav-item nested-feed ${filter.kind === 'feed' && filter.id === subscription.id ? 'active' : ''}`} onClick={() => { onFilter({ kind: 'feed', id: subscription.id }); onFeedSelection?.(); }}>
                 <FeedIcon subscription={subscription} /><span>{subscription.title}</span>{subscription.unreadCount > 0 && <span className="nav-count">{subscription.unreadCount}</span>}
               </button>
             ))}
@@ -327,16 +336,17 @@ function FeedTree({ snapshot, filter, unreadOnly, sortOrder, onFilter, onSubscri
   }
 
   return (
-    <div className="nav-group feeds-group">
-      {showHeading && <div className="nav-heading-row"><div className="nav-heading">Feeds</div><button aria-label="Add feed" onClick={onSubscribe}>＋</button></div>}
-      <label className="feed-filter-toggle">
+    <div className={`nav-group feeds-group${editing ? ' feed-editing' : ''}`}>
+      {showHeading && <div className="nav-heading-row"><div className="nav-heading">{editing ? 'Edit feeds' : 'Feeds'}</div>{editing ? <button className="feed-edit-action" data-feed-edit-done onClick={() => onEditingChange(false)}>Done</button> : <button aria-label="Add feed" onClick={onSubscribe}>＋</button>}</div>}
+      {editing ? <p className="feed-editor-note">All subscriptions</p> : <label className="feed-filter-toggle">
         <span>Unread feeds only</span>
         <span className="toggle-control">
           <input type="checkbox" role="switch" checked={unreadOnly} onChange={(event) => onUnreadOnlyChange(event.target.checked)} />
           <span className="toggle-track" aria-hidden="true"><span /></span>
         </span>
-      </label>
-      {feedGroups.length > 0 ? feedGroups.map(folderGroup) : <div className="empty-feed-tree">No feeds with unread items.</div>}
+      </label>}
+      {snapshot?.subscriptions.length ? feedGroups.length > 0 ? feedGroups.map(folderGroup) : <div className="empty-feed-tree">No feeds with unread items.</div> : <div className="empty-feed-tree">No feeds.</div>}
+      {!editing && Boolean(snapshot?.subscriptions.length) && <div className="feed-edit-footer"><button className="feed-edit-action" onClick={() => onEditingChange(true)}>Edit feeds</button></div>}
     </div>
   );
 }
@@ -355,6 +365,9 @@ function Navigation({
   status,
   editionActive,
   onEdition,
+  editing,
+  onEditingChange,
+  onRemove,
 }: {
   snapshot: ReturnType<typeof useReader>['snapshot'];
   unreadCount: number;
@@ -369,11 +382,14 @@ function Navigation({
   status: SyncStatus;
   editionActive: boolean;
   onEdition: () => void;
+  editing: boolean;
+  onEditingChange: (editing: boolean) => void;
+  onRemove: (subscription: Subscription, trigger: HTMLButtonElement) => void;
 }) {
   return (
     <aside className="sidebar" id="reader-sidebar">
       <nav aria-label="Reader navigation">
-        <div className="nav-group">
+        <div className="nav-group" hidden={editing}>
           <button className={`nav-item ${!editionActive && filter.kind === 'all' ? 'active' : ''}`} onClick={() => onFilter({ kind: 'all' })}>
             <span aria-hidden="true">○</span><span>All articles</span><ReaderCount value={unreadCount} status={unreadCountStatus} unit="unread articles" className="nav-count" />
           </button>
@@ -384,7 +400,7 @@ function Navigation({
             <span aria-hidden="true">☆</span><span>Starred</span>
           </button>
         </div>
-        <FeedTree snapshot={snapshot} filter={filter} unreadOnly={unreadOnly} sortOrder={sortOrder} onFilter={onFilter} onSubscribe={onSubscribe} onUnreadOnlyChange={onUnreadOnlyChange} />
+        <FeedTree snapshot={snapshot} filter={filter} unreadOnly={unreadOnly} sortOrder={sortOrder} onFilter={onFilter} onSubscribe={onSubscribe} onUnreadOnlyChange={onUnreadOnlyChange} editing={editing} onEditingChange={onEditingChange} onRemove={onRemove} />
       </nav>
       <div className="connection-status">
         <span className={`status-dot ${status}`}></span>{syncLabel(status)}
@@ -412,7 +428,7 @@ function ReaderCount({ value, status, className, unit }: { value: number; status
   );
 }
 
-function MobileFeedsPanel({ snapshot, unreadCount, unreadCountStatus, filter, unreadOnly, sortOrder, onFilter, onSubscribe, onUnreadOnlyChange, onClose, editionActive, onEdition }: {
+function MobileFeedsPanel({ snapshot, unreadCount, unreadCountStatus, filter, unreadOnly, sortOrder, onFilter, onSubscribe, onUnreadOnlyChange, onClose, editionActive, onEdition, editing, onEditingChange, onRemove }: {
   snapshot: ReturnType<typeof useReader>['snapshot'];
   unreadCount: number;
   unreadCountStatus: ReaderCountStatus;
@@ -425,6 +441,9 @@ function MobileFeedsPanel({ snapshot, unreadCount, unreadCountStatus, filter, un
   onClose: () => void;
   editionActive: boolean;
   onEdition: () => void;
+  editing: boolean;
+  onEditingChange: (editing: boolean) => void;
+  onRemove: (subscription: Subscription, trigger: HTMLButtonElement) => void;
 }) {
   const panelRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -459,13 +478,99 @@ function MobileFeedsPanel({ snapshot, unreadCount, unreadCountStatus, filter, un
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <section ref={panelRef} id="mobile-feeds-panel" className="mobile-feeds-panel" role="dialog" aria-modal="true" aria-labelledby="mobile-feeds-title" onKeyDown={handleKeyDown}>
-        <header><h1 id="mobile-feeds-title">Feeds</h1><button onClick={onSubscribe}>＋ Add feed</button><button ref={closeButtonRef} aria-label="Close feeds" onClick={onClose}>×</button></header>
-        <nav className="nav-group" aria-label="Reading views">
+        <header><h1 id="mobile-feeds-title">{editing ? 'Edit feeds' : 'Feeds'}</h1>{editing ? <button data-feed-edit-done onClick={() => onEditingChange(false)}>Done</button> : <button aria-label="Add feed" onClick={onSubscribe}>＋ Add feed</button>}<button ref={closeButtonRef} aria-label="Close feeds" onClick={onClose}>×</button></header>
+        <nav className="nav-group" aria-label="Reading views" hidden={editing}>
           <button className={`nav-item ${!editionActive && filter.kind === 'all' ? 'active' : ''}`} onClick={() => { onFilter({ kind: 'all' }); onClose(); }}><span aria-hidden="true">○</span><span>All articles</span><ReaderCount value={unreadCount} status={unreadCountStatus} unit="unread articles" className="nav-count" /></button>
           <button className={`nav-item ${editionActive ? 'active' : ''}`} onClick={onEdition}><span aria-hidden="true">▤</span><span>Latest Edition</span></button>
           <button className={`nav-item ${!editionActive && filter.kind === 'starred' ? 'active' : ''}`} onClick={() => { onFilter({ kind: 'starred' }); onClose(); }}><span aria-hidden="true">☆</span><span>Starred</span></button>
         </nav>
-        <FeedTree snapshot={snapshot} filter={filter} unreadOnly={unreadOnly} sortOrder={sortOrder} onFilter={onFilter} onFeedSelection={onClose} onSubscribe={onSubscribe} onUnreadOnlyChange={onUnreadOnlyChange} showHeading={false} />
+        <FeedTree snapshot={snapshot} filter={filter} unreadOnly={unreadOnly} sortOrder={sortOrder} onFilter={onFilter} onFeedSelection={onClose} onSubscribe={onSubscribe} onUnreadOnlyChange={onUnreadOnlyChange} showHeading={false} editing={editing} onEditingChange={onEditingChange} onRemove={onRemove} />
+      </section>
+    </div>
+  );
+}
+
+function RemoveFeedPanel({ subscription, trigger, onClose, onRemoved }: {
+  subscription: Subscription;
+  trigger: HTMLButtonElement | null;
+  onClose: () => void;
+  onRemoved: (subscription: Subscription) => Promise<void>;
+}) {
+  const [removing, setRemoving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const working = useRef(false);
+  const panelRef = useRef<HTMLElement>(null);
+  const keepButtonRef = useRef<HTMLButtonElement>(null);
+
+  useLayoutEffect(() => {
+    const backdrop = panelRef.current?.parentElement;
+    if (!backdrop?.parentElement) return;
+    // The mobile feeds panel stays mounted beneath this dialog so edit mode survives.
+    const siblings = [...backdrop.parentElement.children]
+      .filter((element): element is HTMLElement => element instanceof HTMLElement && element !== backdrop)
+      .map((element) => ({ element, inert: element.inert, hidden: element.getAttribute('aria-hidden') }));
+    for (const { element } of siblings) {
+      element.inert = true;
+      element.setAttribute('aria-hidden', 'true');
+    }
+    keepButtonRef.current?.focus();
+    return () => {
+      for (const { element, inert, hidden } of siblings) {
+        element.inert = inert;
+        if (hidden === null) element.removeAttribute('aria-hidden');
+        else element.setAttribute('aria-hidden', hidden);
+      }
+    };
+  }, []);
+
+  useEffect(() => () => {
+    // Passive cleanup runs after the removed row leaves the DOM.
+    const fallback = document.querySelector<HTMLButtonElement>('#mobile-feeds-panel [data-feed-edit-done]')
+      ?? document.querySelector<HTMLButtonElement>('#reader-sidebar [data-feed-edit-done]');
+    (trigger?.isConnected ? trigger : fallback)?.focus();
+  }, [trigger]);
+
+  async function remove() {
+    if (working.current) return;
+    working.current = true;
+    setRemoving(true);
+    setError(null);
+    try {
+      await onRemoved(subscription);
+      onClose();
+    } catch (removalError) {
+      setError(removalError instanceof Error ? removalError.message : 'Could not remove feed');
+    } finally {
+      working.current = false;
+      setRemoving(false);
+    }
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLElement>) {
+    event.stopPropagation();
+    if (event.key === 'Escape' && !working.current) {
+      event.preventDefault();
+      onClose();
+    }
+    if (event.key !== 'Tab') return;
+    const buttons = [...(panelRef.current?.querySelectorAll<HTMLButtonElement>('button:not([disabled])') ?? [])];
+    const first = buttons[0];
+    const last = buttons.at(-1);
+    if (!first || !last) { event.preventDefault(); return; }
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  }
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target && !working.current) onClose(); }}>
+      <section ref={panelRef} className="remove-feed-panel" role="dialog" aria-modal="true" aria-labelledby="remove-feed-title" aria-describedby="remove-feed-description" aria-busy={removing} onKeyDown={handleKeyDown}>
+        <h1 id="remove-feed-title">Remove {subscription.title}?</h1>
+        <p id="remove-feed-description">This will unsubscribe you in your connected RSS service, including on your other devices.</p>
+        {error && <div className="auth-error" role="alert">{error}</div>}
+        <div className="remove-feed-actions">
+          <button className="danger-action" disabled={removing} onClick={() => void remove()}>{removing ? 'Removing…' : 'Remove feed'}</button>
+          <button ref={keepButtonRef} disabled={removing} onClick={onClose}>Keep feed</button>
+        </div>
       </section>
     </div>
   );
@@ -1753,6 +1858,9 @@ export function App() {
   const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [subscribeOpen, setSubscribeOpen] = useState(false);
   const [feedsOpen, setFeedsOpen] = useState(false);
+  const [feedEditing, setFeedEditing] = useState(false);
+  const [feedToRemove, setFeedToRemove] = useState<{ subscription: Subscription; trigger: HTMLButtonElement } | null>(null);
+  const [removedFeedIds, setRemovedFeedIds] = useState<Set<string>>(new Set());
   const [unreadFeedsOverride, setUnreadFeedsOverride] = useState<boolean | null>(null);
   const [feedSortOrder, setFeedSortOrder] = useState<FeedSortOrder>(savedFeedSortOrder);
   const [defaultArticleView, setDefaultArticleView] = useState<DefaultArticleView>(savedDefaultArticleView);
@@ -1778,6 +1886,21 @@ export function App() {
   useEffect(() => { hasNavigated.current = false; }, [session?.user?.id]);
   const publishedSince = useMemo(() => editionActive ? new Date(editionNow - editionHours * 3_600_000).toISOString() : undefined, [editionActive, editionHours, editionNow]);
   const reader = useReader(session?.authenticated ? session.user?.id : undefined, editionActive ? 'all' : defaultArticleView, publishedSince);
+  const subscriptionIds = useMemo(() => JSON.stringify(reader.snapshot?.subscriptions.map((subscription) => subscription.id) ?? []), [reader.snapshot]);
+  const [removalCollection, setRemovalCollection] = useState(subscriptionIds);
+  if (removalCollection !== subscriptionIds) {
+    setRemovalCollection(subscriptionIds);
+    // Retain the mask only until synchronization stops returning this subscription.
+    const subscriptions = reader.snapshot?.subscriptions ?? [];
+    setRemovedFeedIds((current) => {
+      const remaining = new Set([...current].filter((id) => subscriptions.some((subscription) => subscription.id === id)));
+      return remaining.size === current.size ? current : remaining;
+    });
+  }
+  const navigationSnapshot = useMemo(() => reader.snapshot && removedFeedIds.size
+    ? { ...reader.snapshot, subscriptions: reader.snapshot.subscriptions.filter((subscription) => !removedFeedIds.has(subscription.id)) }
+    : reader.snapshot, [reader.snapshot, removedFeedIds]);
+
   const { updatePreferences, syncStatus: preferencesSyncStatus } = usePreferences(
     session?.authenticated ? session.user?.id : undefined,
     { feedSortOrder, defaultArticleView, defaultStartPage, accentColor, readingFont, articleTextSize, latestEditionHours: editionHours },
@@ -1946,6 +2069,7 @@ export function App() {
 
   useEffect(() => {
     function handleKeydown(event: KeyboardEvent) {
+      if (feedToRemove || feedEditing) return;
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.key === 'j') { startSelectionUpdate(); void reader.navigateSelection(1); }
       if (event.key === 'k') { startSelectionUpdate(); void reader.navigateSelection(-1); }
@@ -1958,7 +2082,7 @@ export function App() {
     }
     window.addEventListener('keydown', handleKeydown);
     return () => window.removeEventListener('keydown', handleKeydown);
-  }, [reader]);
+  }, [reader, feedToRemove, feedEditing]);
 
   if (sessionError) return <div className="centered-state"><strong>Chadashot could not start</strong><span>{sessionError}</span></div>;
   if (!session) return <div className="centered-state"><span className="app-mark">ח</span><span>Opening Chadashot…</span></div>;
@@ -2027,7 +2151,33 @@ export function App() {
 
   function closeFeeds() {
     setFeedsOpen(false);
+    setFeedEditing(false);
     window.requestAnimationFrame(() => activeFeedsTriggerRef.current?.focus());
+  }
+
+  function changeFeedEditing(editing: boolean) {
+    setFeedEditing(editing);
+    window.requestAnimationFrame(() => {
+      const scope = document.getElementById(feedsOpen ? 'mobile-feeds-panel' : 'reader-sidebar');
+      const target = scope?.querySelector<HTMLButtonElement>(editing ? '[data-feed-edit-done]' : '.feed-edit-footer button')
+        ?? scope?.querySelector<HTMLButtonElement>('button[aria-label="Add feed"]');
+      target?.focus();
+    });
+  }
+
+  function confirmFeedRemoval(subscription: Subscription, trigger: HTMLButtonElement) {
+    setFeedToRemove({ subscription, trigger });
+  }
+
+  async function removeFeed(subscription: Subscription) {
+    await unsubscribeFromFeed(subscription.id);
+    // Hide only after provider confirmation, while the normal cache refresh finishes.
+    setRemovedFeedIds((current) => new Set(current).add(subscription.id));
+    if (reader.filter.kind === 'feed' && reader.filter.id === subscription.id) {
+      chooseFilter({ kind: 'all' });
+    }
+    setNotice(`${subscription.title} removed`);
+    void reader.synchronize().catch(() => setNotice(`${subscription.title} removed. Refresh to update your articles.`));
   }
 
   function chooseArticle(article: Article) {
@@ -2112,7 +2262,7 @@ export function App() {
         </div>
       </header>
       <div className="workspace" ref={workspaceRef} style={workspaceStyle}>
-        <Navigation snapshot={reader.snapshot} unreadCount={unreadCount} unreadCountStatus={unreadCountStatus} filter={reader.filter} unreadOnly={unreadFeedsOnly} sortOrder={feedSortOrder} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} onSubscribe={() => setSubscribeOpen(true)} onUnreadOnlyChange={setUnreadFeedsOverride} status={reader.status} editionActive={editionActive} onEdition={chooseEdition} />
+        <Navigation snapshot={navigationSnapshot} unreadCount={unreadCount} unreadCountStatus={unreadCountStatus} filter={reader.filter} unreadOnly={unreadFeedsOnly} sortOrder={feedSortOrder} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} onSubscribe={() => setSubscribeOpen(true)} onUnreadOnlyChange={setUnreadFeedsOverride} status={reader.status} editionActive={editionActive} onEdition={chooseEdition} editing={feedEditing} onEditingChange={changeFeedEditing} onRemove={confirmFeedRemoval} />
         <PanelResizer
           className="sidebar-resizer"
           label="Resize feed sidebar"
@@ -2220,7 +2370,7 @@ export function App() {
       {feedsOpen && <MobileFeedsPanel
         editionActive={editionActive}
         onEdition={chooseEdition}
-        snapshot={reader.snapshot}
+        snapshot={navigationSnapshot}
         unreadCount={unreadCount}
         unreadCountStatus={unreadCountStatus}
         filter={reader.filter}
@@ -2230,12 +2380,17 @@ export function App() {
         onSubscribe={() => { setFeedsOpen(false); setSubscribeOpen(true); }}
         onUnreadOnlyChange={setUnreadFeedsOverride}
         onClose={closeFeeds}
+        editing={feedEditing}
+        onEditingChange={changeFeedEditing}
+        onRemove={confirmFeedRemoval}
       />}
+      {feedToRemove && <RemoveFeedPanel subscription={feedToRemove.subscription} trigger={feedToRemove.trigger} onClose={() => setFeedToRemove(null)} onRemoved={removeFeed} />}
       {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} defaultArticleView={defaultArticleView} defaultStartPage={defaultStartPage} onDefaultStartPageChange={(defaultStartPage) => { hasNavigated.current = true; updatePreferences({ defaultStartPage }); }} accentColor={accentColor} readingFont={readingFont} articleTextSize={articleTextSize} editionHours={editionHours} onEditionHoursChange={(latestEditionHours) => updatePreferences({ latestEditionHours })} syncStatus={preferencesSyncStatus} onSortOrderChange={(feedSortOrder) => updatePreferences({ feedSortOrder })} onDefaultArticleViewChange={(defaultArticleView) => updatePreferences({ defaultArticleView })} onAccentColorChange={(accentColor) => updatePreferences({ accentColor })} onReadingFontChange={(readingFont) => updatePreferences({ readingFont })} onArticleTextSizeChange={(articleTextSize) => updatePreferences({ articleTextSize })} onClose={() => setPreferencesOpen(false)} />}
       {subscribeOpen && <SubscribePanel
         onClose={() => setSubscribeOpen(false)}
         onSubscribed={async (feedUrl) => {
           const result = await subscribeToFeed(feedUrl);
+          setRemovedFeedIds((current) => { const next = new Set(current); next.delete(result.subscription.id); return next; });
           setNotice(`Subscribed to ${result.subscription.title}`);
           await reader.synchronize();
         }}
@@ -2243,14 +2398,23 @@ export function App() {
       {settingsOpen && <SettingsPanel
         session={session}
         onClose={() => setSettingsOpen(false)}
-        onConnected={reader.synchronize}
+        onConnected={async () => {
+          setRemovedFeedIds(new Set());
+          setFeedEditing(false);
+          await reader.synchronize();
+        }}
         onRssDisconnected={async () => {
+          setRemovedFeedIds(new Set());
+          setFeedEditing(false);
           reader.clear();
           if (session.mode === 'development') await reader.synchronize();
         }}
         onClearOfflineData={clearOfflineData}
         onLogout={async () => {
           await logout();
+          setRemovedFeedIds(new Set());
+          setFeedEditing(false);
+          setFeedToRemove(null);
           await clearOfflineData();
           reader.clear();
           setSettingsOpen(false);
