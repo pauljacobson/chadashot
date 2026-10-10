@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
 import { DEFAULT_USER_PREFERENCES } from '../shared/preferences';
 import type { ArticleReadFilter, ReaderFilter } from './useReader';
+import { getUserPreferences } from './api';
 
 vi.mock('./api', async (importOriginal) => ({
   ...await importOriginal<typeof import('./api')>(),
@@ -166,6 +167,101 @@ describe('reading preferences', () => {
     expect(screen.getAllByText('אבג · Reading should feel calm and clear.')[1]).toHaveAttribute('data-font', 'sans-serif');
   });
 
+  it('applies the unread preference to the desktop feed switch and feed visibility', async () => {
+    render(<App />);
+    await openPreferences();
+    fireEvent.click(screen.getByRole('radio', { name: /^Unread items only/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close preferences' }));
+
+    expect(screen.getByRole('switch', { name: 'Unread feeds only' })).toBeChecked();
+    fireEvent.click(screen.getByRole('button', { name: 'Expand News feeds' }));
+    expect(screen.getByRole('button', { name: /First feed/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Second feed/ })).not.toBeInTheDocument();
+  });
+
+  it('loads the account unread preference into the mobile feed switch', async () => {
+    vi.mocked(getUserPreferences).mockResolvedValueOnce({ preferences: { ...DEFAULT_USER_PREFERENCES, defaultArticleView: 'unread' } });
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open feeds panel' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Feeds' });
+
+    await waitFor(() => expect(within(dialog).getByRole('switch', { name: 'Unread feeds only' })).toBeChecked());
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Expand News feeds' }));
+    expect(within(dialog).queryByRole('button', { name: /Second feed/ })).not.toBeInTheDocument();
+  });
+
+  it('keeps the desktop feed switch override temporary and reapplies a changed default', async () => {
+    render(<App />);
+    await openPreferences();
+    fireEvent.click(screen.getByRole('radio', { name: /^Unread items only/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close preferences' }));
+    const toggle = screen.getByRole('switch', { name: 'Unread feeds only' });
+    expect(toggle).toBeChecked();
+    fireEvent.click(toggle);
+    expect(toggle).not.toBeChecked();
+    expect(localStorage.getItem('chadashot.defaultArticleView')).toBe('unread');
+    await openPreferences();
+    expect(screen.getByRole('radio', { name: /^Unread items only/ })).toBeChecked();
+    fireEvent.click(screen.getByRole('radio', { name: /^All items/ }));
+    fireEvent.click(screen.getByRole('radio', { name: /^Unread items only/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close preferences' }));
+    expect(toggle).toBeChecked();
+  });
+
+  it('keeps article toolbar overrides temporary and uses the default on navigation', async () => {
+    localStorage.setItem('chadashot.defaultArticleView', 'unread');
+    render(<App />);
+    const navigation = await screen.findByRole('navigation', { name: 'Reader navigation' });
+    fireEvent.click(within(navigation).getByRole('button', { name: /^All articles/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'All' }));
+    expect(screen.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'true');
+    expect(localStorage.getItem('chadashot.defaultArticleView')).toBe('unread');
+    fireEvent.click(screen.getByRole('button', { name: /View News folder/ }));
+    expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'Read' }));
+    expect(screen.getByRole('button', { name: 'Read' })).toHaveAttribute('aria-pressed', 'true');
+    expect(localStorage.getItem('chadashot.defaultArticleView')).toBe('unread');
+    fireEvent.click(screen.getAllByRole('button', { name: /Latest Edition/ })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: /^All articles/ })[0]);
+    expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('keeps mobile feed switch overrides temporary and shared with the desktop feed tree', async () => {
+    localStorage.setItem('chadashot.defaultArticleView', 'unread');
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open feeds panel' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Feeds' });
+    const toggle = within(dialog).getByRole('switch', { name: 'Unread feeds only' });
+    expect(toggle).toBeChecked();
+    fireEvent.click(toggle);
+    expect(toggle).not.toBeChecked();
+    expect(within(screen.getByRole('navigation', { name: 'Reader navigation' })).getByRole('switch', { name: 'Unread feeds only' })).not.toBeChecked();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close feeds' }));
+    expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
+    await openPreferences();
+    expect(screen.getByRole('radio', { name: /^Unread items only/ })).toBeChecked();
+    expect(localStorage.getItem('chadashot.defaultArticleView')).toBe('unread');
+  });
+
+  it('reapplies defaults received from another device to an overridden feed switch and article toolbar', async () => {
+    vi.mocked(getUserPreferences).mockResolvedValueOnce({ preferences: { ...DEFAULT_USER_PREFERENCES, defaultArticleView: 'unread' } });
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Unread feeds only' })).toBeChecked());
+    fireEvent.click(screen.getAllByRole('button', { name: /^All articles/ })[0]);
+    fireEvent.click(screen.getByRole('switch', { name: 'Unread feeds only' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Read' }));
+    vi.mocked(getUserPreferences).mockResolvedValueOnce({ preferences: { ...DEFAULT_USER_PREFERENCES, defaultArticleView: 'all' } });
+    fireEvent(window, new Event('focus'));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'true'));
+    expect(screen.getByRole('switch', { name: 'Unread feeds only' })).not.toBeChecked();
+    vi.mocked(getUserPreferences).mockResolvedValueOnce({ preferences: { ...DEFAULT_USER_PREFERENCES, defaultArticleView: 'unread' } });
+    fireEvent(window, new Event('focus'));
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Unread feeds only' })).toBeChecked());
+    expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
   it('uses the global default across feeds, folders, collections, and returning from Latest Edition', async () => {
     render(<App />);
     await openPreferences();
@@ -177,6 +273,7 @@ describe('reading preferences', () => {
     fireEvent.click(screen.getByRole('button', { name: /First feed/ }));
     expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
     fireEvent.click(screen.getByRole('button', { name: 'All' }));
+    fireEvent.click(screen.getByRole('switch', { name: 'Unread feeds only' }));
     fireEvent.click(screen.getByRole('button', { name: /Second feed/ }));
     expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
     fireEvent.click(screen.getByRole('button', { name: /View News folder/ }));
