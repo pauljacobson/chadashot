@@ -4,6 +4,7 @@ import { getUserPreferences, saveUserPreferences } from './api';
 
 type PreferencePatch = Partial<UserPreferences>;
 const allowedValues: { [K in keyof UserPreferences]: readonly UserPreferences[K][] } = {
+  defaultStartPage: ['all', 'latest-edition'],
   feedSortOrder: ['alphabetical', 'recent'],
   defaultArticleView: ['all', 'unread'],
   latestEditionHours: [12, 24, 48],
@@ -24,14 +25,16 @@ function loadPending(key: string): PreferencePatch {
   }
 }
 
-export function usePreferences(userId: string | undefined, preferences: UserPreferences, onApply: (patch: PreferencePatch) => void) {
+export function usePreferences(userId: string | undefined, preferences: UserPreferences, onApply: (patch: PreferencePatch) => void, onInitialLoad?: (preferences: UserPreferences) => void) {
   const [syncStatus, setSyncStatus] = useState<'loading' | 'synced' | 'pending'>('loading');
   const current = useRef(preferences);
   const apply = useRef(onApply);
+  const initialize = useRef(onInitialLoad);
   const pending = useRef<PreferencePatch>({});
   const synchronize = useRef<(() => void) | null>(null);
   current.current = preferences;
   apply.current = onApply;
+  initialize.current = onInitialLoad;
 
   function persistPending() {
     if (!userId) return;
@@ -57,6 +60,7 @@ export function usePreferences(userId: string | undefined, preferences: UserPref
     const controller = new AbortController();
     let running = false;
     let rerun = false;
+    let initialLoad = true;
     pending.current = { ...loadPending(key), ...pending.current };
 
     function persist() {
@@ -84,6 +88,11 @@ export function usePreferences(userId: string | undefined, preferences: UserPref
         // Import this browser's existing choices only when the account has no preferences yet.
         if (remote.preferences) accept(remote.preferences);
         else pending.current = { ...current.current, ...pending.current };
+        // Startup navigation runs once per account, never on background refreshes.
+        if (initialLoad) {
+          initialLoad = false;
+          initialize.current?.({ ...current.current, ...pending.current });
+        }
         persist();
         while (Object.keys(pending.current).length > 0 && !controller.signal.aborted) {
           const submitted = { ...pending.current };

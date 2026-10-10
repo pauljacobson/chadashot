@@ -8,9 +8,9 @@ import { usePreferences } from './usePreferences';
 
 vi.mock('./api', () => ({ getUserPreferences: vi.fn(), saveUserPreferences: vi.fn() }));
 
-function useTestPreferences(initial = DEFAULT_USER_PREFERENCES) {
+function useTestPreferences(initial = DEFAULT_USER_PREFERENCES, onInitialLoad?: (preferences: UserPreferences) => void) {
   const [preferences, setPreferences] = useState(initial);
-  const sync = usePreferences('user-1', preferences, (patch) => setPreferences((current) => ({ ...current, ...patch })));
+  const sync = usePreferences('user-1', preferences, (patch) => setPreferences((current) => ({ ...current, ...patch })), onInitialLoad);
   return { preferences, ...sync };
 }
 
@@ -27,6 +27,19 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.clearAllMocks(); localStorage.clear(); });
 
 describe('preference synchronization', () => {
+  it('initializes the start page once with pending edits and never repeats on background refresh', async () => {
+    server = { ...DEFAULT_USER_PREFERENCES, accentColor: 'blue' };
+    localStorage.setItem('chadashot.pendingPreferences.user-1', JSON.stringify({ defaultStartPage: 'latest-edition' }));
+    const initialize = vi.fn();
+    const device = renderHook(() => useTestPreferences(DEFAULT_USER_PREFERENCES, initialize));
+    await waitFor(() => expect(device.result.current.syncStatus).toBe('synced'));
+    expect(initialize).toHaveBeenCalledExactlyOnceWith({ ...DEFAULT_USER_PREFERENCES, accentColor: 'blue', defaultStartPage: 'latest-edition' });
+    server = { ...server!, defaultStartPage: 'all' };
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    await waitFor(() => expect(device.result.current.preferences.defaultStartPage).toBe('all'));
+    expect(initialize).toHaveBeenCalledOnce();
+  });
+
   it('loads account choices on another device and refreshes when the app regains focus', async () => {
     server = { ...DEFAULT_USER_PREFERENCES, defaultArticleView: 'unread', accentColor: 'blue', articleTextSize: 130, latestEditionHours: 48 };
     const device = renderHook(() => useTestPreferences());
@@ -50,7 +63,7 @@ describe('preference synchronization', () => {
   it('retains offline edits across remounts and merges them with other device changes', async () => {
     const online = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
     const device = renderHook(() => useTestPreferences());
-    act(() => device.result.current.updatePreferences({ defaultArticleView: 'unread', latestEditionHours: 12 }));
+    act(() => device.result.current.updatePreferences({ defaultArticleView: 'unread', latestEditionHours: 12, defaultStartPage: 'latest-edition' }));
     expect(device.result.current.preferences.defaultArticleView).toBe('unread');
     expect(device.result.current.syncStatus).toBe('pending');
     device.unmount();
@@ -58,8 +71,8 @@ describe('preference synchronization', () => {
     online.mockReturnValue(true);
     const reopened = renderHook(() => useTestPreferences());
     await waitFor(() => expect(reopened.result.current.syncStatus).toBe('synced'));
-    expect(reopened.result.current.preferences).toMatchObject({ defaultArticleView: 'unread', accentColor: 'rose', latestEditionHours: 12 });
-    expect(saveUserPreferences).toHaveBeenCalledWith({ defaultArticleView: 'unread', latestEditionHours: 12 }, expect.any(AbortSignal));
+    expect(reopened.result.current.preferences).toMatchObject({ defaultArticleView: 'unread', accentColor: 'rose', latestEditionHours: 12, defaultStartPage: 'latest-edition' });
+    expect(saveUserPreferences).toHaveBeenCalledWith({ defaultArticleView: 'unread', latestEditionHours: 12, defaultStartPage: 'latest-edition' }, expect.any(AbortSignal));
     expect(localStorage.getItem('chadashot.pendingPreferences.user-1')).toBe('{}');
   });
 
