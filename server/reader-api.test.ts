@@ -77,6 +77,30 @@ function query(overrides: Partial<Parameters<ReaderApi['articles']>[1]> = {}) {
 }
 
 describe('paginated reader API', () => {
+  it('pages a publication window with image previews and binds cursors to that window', () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database, 'edition-worker');
+    publish(cache, snapshot([
+      article('recent', { publishedAt: '2026-10-10T07:00:00.000Z', contentHtml: '<p>Private body</p><img src="/photo.jpg">', read: true }),
+      article('boundary', { publishedAt: '2026-10-09T08:00:00.000Z' }),
+      article('old', { publishedAt: '2026-10-09T07:59:59.000Z' }),
+      article('future', { publishedAt: '2026-10-10T09:00:00.000Z' }),
+    ]));
+    const api = new ReaderApi(database, () => new Date('2026-10-10T08:00:00.000Z'));
+    const options = query({ publishedSince: '2026-10-09T08:00:00.000Z', limit: 1 });
+    const first = api.articles(identity, options);
+    expect(first.total).toBe(2);
+    expect(first.articles[0]).toMatchObject({ id: 'recent', read: true, previewImageUrl: 'https://example.test/photo.jpg' });
+    expect(JSON.stringify(first)).not.toContain('Private body');
+    const second = api.articles(identity, { ...options, cursor: first.nextCursor! });
+    expect(second.articles.map((item) => item.id)).toEqual(['boundary']);
+    expect(second.nextCursor).toBeNull();
+    expect(second.etag).not.toBe(first.etag);
+    expect(() => api.articles(identity, { ...options, publishedSince: '2026-10-08T08:00:00.000Z', cursor: first.nextCursor! })).toThrow(ReaderCursorError);
+    expect(api.articles(identity, query()).articles.every((item) => !('previewImageUrl' in item))).toBe(true);
+    database.close();
+  });
+
   it('traverses more than 20,000 articles without duplicates, omissions, or body transfer', () => {
     const database = openMemoryDatabase();
     const cache = new ReaderCache(database, 'worker');

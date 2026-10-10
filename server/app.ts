@@ -114,6 +114,7 @@ const readerArticleQuerySchema = z.object({
   scopeId: z.string().min(1).max(1_000).optional(),
   read: z.enum(['all', 'unread', 'read']).default('all'),
   search: z.string().trim().max(200).optional(),
+  publishedSince: z.iso.datetime().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(100),
   cursor: z.string().max(8_192).optional(),
 }).superRefine((value, context) => {

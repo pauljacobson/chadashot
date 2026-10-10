@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { articlePreviewImage } from '../shared/articlePreview.js';
 import { z } from 'zod';
 import type { ReaderArticleBody, ReaderArticleMetadata, ReaderArticlePage, ReaderVersions } from '../shared/reader.js';
 import type { AppDatabase } from './database.js';
@@ -12,6 +13,7 @@ export type ReaderArticleQuery = {
   scopeId?: string;
   read: z.infer<typeof readFilterSchema>;
   search?: string;
+  publishedSince?: string;
   limit: number;
   cursor?: string;
 };
@@ -26,6 +28,7 @@ const articleCursorSchema = z.object({
   scopeId: z.string().nullable(),
   read: readFilterSchema,
   search: z.string(),
+  publishedSince: z.string().nullable().optional(),
   publishedAt: z.string(),
   articleId: z.string(),
 });
@@ -128,6 +131,7 @@ export class ReaderApi {
       || cursor.scopeId !== (query.scopeId ?? null)
       || cursor.read !== query.read
       || cursor.search !== normalizedSearch
+      || (cursor.publishedSince ?? null) !== (query.publishedSince ?? null)
     ) {
       throw new ReaderCursorError('The cursor does not match this scope, filter, or search', 'incompatible');
     }
@@ -148,6 +152,11 @@ export class ReaderApi {
     const cursor = this.parseArticleCursor(identity, query, context);
     const conditions = ['a.generation_id = @generation'];
     const parameters: Record<string, string | number> = { generation: context.generation };
+    if (query.publishedSince) {
+      conditions.push('a.published_at >= @publishedSince AND a.published_at <= @publishedUntil');
+      parameters.publishedSince = query.publishedSince;
+      parameters.publishedUntil = this.clock().toISOString();
+    }
     if (query.scope === 'inbox') conditions.push('state.is_read = 0');
     if (query.scope === 'starred') conditions.push('state.is_starred = 1');
     if (query.scope === 'uncategorized') {
@@ -217,6 +226,11 @@ export class ReaderApi {
     }>;
     const hasMore = rows.length > query.limit;
     const pageRows = hasMore ? rows.slice(0, query.limit) : rows;
+    // Read at most one metadata page of bodies locally; only image URLs cross the wire.
+    const previewBody = query.publishedSince ? this.database.prepare(`
+      SELECT substr(content_html, 1, 128000) AS content_html FROM reader_article_bodies
+      WHERE generation_id = ? AND article_id = ?
+    `) : null;
     const articles: ReaderArticleMetadata[] = pageRows.map((row) => ({
       id: row.id,
       feedId: row.feed_id,
@@ -228,6 +242,10 @@ export class ReaderApi {
       publishedAt: row.published_at,
       readingMinutes: row.reading_minutes,
       summary: row.summary,
+      ...(previewBody ? { previewImageUrl: articlePreviewImage(
+        (previewBody.get(context.generation, row.id) as { content_html: string } | undefined)?.content_html ?? '',
+        row.canonical_url,
+      ) } : {}),
       read: Boolean(row.is_read),
       starred: Boolean(row.is_starred),
     }));
@@ -242,6 +260,7 @@ export class ReaderApi {
       scopeId: query.scopeId ?? null,
       read: query.read,
       search: normalizedSearch,
+      publishedSince: query.publishedSince ?? null,
       publishedAt: last.published_at,
       articleId: last.id,
     }) : null;
@@ -260,6 +279,10 @@ export class ReaderApi {
         query.scopeId,
         query.read,
         normalizedSearch,
+        query.publishedSince,
+        query.publishedSince ? context.versions.body : null,
+        query.cursor,
+        query.limit,
       ])}"`,
     };
     });

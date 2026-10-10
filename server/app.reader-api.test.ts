@@ -68,6 +68,17 @@ function seed() {
 }
 
 describe('paginated reader HTTP contract', () => {
+  it('accepts publication-window queries and rejects malformed dates', async () => {
+    const { database, config } = seed();
+    const app = createApp(config, { database });
+    const page = await request(app).get('/api/reader/articles').query({ scope: 'all', publishedSince: '2026-09-08T00:00:00.000Z' });
+    expect(page.status).toBe(200);
+    expect(page.body.total).toBe(125);
+    expect(page.body.articles[0]).toHaveProperty('previewImageUrl', null);
+    expect(JSON.stringify(page.body)).not.toContain('Private body');
+    expect((await request(app).get('/api/reader/articles').query({ publishedSince: 'not-a-date' })).status).toBe(400);
+  });
+
   it('serves conditional metadata, navigation, and separately authorized bodies', async () => {
     const { database, config } = seed();
     const app = createApp(config, { database });

@@ -19,10 +19,10 @@ describe('account preferences', () => {
     expect((await secondDevice.get('/api/settings/preferences')).body.preferences).toEqual({
       ...DEFAULT_USER_PREFERENCES, defaultArticleView: 'unread', readingFont: 'sans-serif',
     });
-    await secondDevice.put('/api/settings/preferences').send({ accentColor: 'blue' });
+    await secondDevice.put('/api/settings/preferences').send({ accentColor: 'blue', latestEditionHours: 48 });
     await firstDevice.put('/api/settings/preferences').send({ articleTextSize: 130 });
     expect((await secondDevice.get('/api/settings/preferences')).body.preferences).toMatchObject({
-      defaultArticleView: 'unread', readingFont: 'sans-serif', accentColor: 'blue', articleTextSize: 130,
+      defaultArticleView: 'unread', readingFont: 'sans-serif', accentColor: 'blue', articleTextSize: 130, latestEditionHours: 48,
     });
     savePreferences(database, 'another-user', { defaultArticleView: 'all' });
     expect(loadPreferences(database, 'another-user')?.defaultArticleView).toBe('all');
@@ -33,10 +33,23 @@ describe('account preferences', () => {
   it('rejects invalid values and unknown fields without changing saved preferences', async () => {
     const database = openMemoryDatabase();
     const app = createApp(loadConfig({ NODE_ENV: 'test', AUTH_MODE: 'development' }), { database });
-    for (const patch of [{ defaultArticleView: 'read' }, { articleTextSize: 155 }, { userId: 'other' }, { accentColor: 'invalid' }]) {
+    for (const patch of [{ defaultArticleView: 'read' }, { articleTextSize: 155 }, { userId: 'other' }, { accentColor: 'invalid' }, { latestEditionHours: 72 }, { latestEditionHours: '24' }]) {
       expect((await request(app).put('/api/settings/preferences').send(patch)).status).toBe(400);
     }
     expect(loadPreferences(database, 'development-user')).toBeNull();
+    database.close();
+  });
+
+  it('adds the default edition window to previously saved account preferences', () => {
+    const database = openMemoryDatabase();
+    database.prepare('INSERT INTO user_preferences (user_id, preferences_json) VALUES (?, ?)')
+      .run('existing-user', JSON.stringify({ readingFont: 'sans-serif', defaultArticleView: 'unread' }));
+    expect(loadPreferences(database, 'existing-user')).toEqual({
+      ...DEFAULT_USER_PREFERENCES, readingFont: 'sans-serif', defaultArticleView: 'unread', latestEditionHours: 24,
+    });
+    expect(savePreferences(database, 'existing-user', { latestEditionHours: 12 })).toMatchObject({
+      readingFont: 'sans-serif', defaultArticleView: 'unread', latestEditionHours: 12,
+    });
     database.close();
   });
 

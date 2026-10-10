@@ -14,6 +14,8 @@ export type Article = ArticleState & {
   publishedAt: string;
   readingMinutes: number;
   summary: string;
+  /** Optional lightweight preview supplied for publication-window queries. */
+  previewImageUrl?: string | null;
   contentHtml: string;
 };
 

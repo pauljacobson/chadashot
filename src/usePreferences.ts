@@ -6,6 +6,7 @@ type PreferencePatch = Partial<UserPreferences>;
 const allowedValues: { [K in keyof UserPreferences]: readonly UserPreferences[K][] } = {
   feedSortOrder: ['alphabetical', 'recent'],
   defaultArticleView: ['all', 'unread'],
+  latestEditionHours: [12, 24, 48],
   accentColor: ['green', 'blue', 'violet', 'amber', 'rose'],
   readingFont: ['serif', 'sans-serif'],
   articleTextSize: [80, 90, 100, 110, 120, 130, 140, 150],

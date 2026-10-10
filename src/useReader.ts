@@ -68,12 +68,13 @@ type RemoteArticlePage = {
   total: number;
 };
 
-function readerArticleQuery(filter: ReaderFilter, read: ArticleReadFilter, search: string) {
+function readerArticleQuery(filter: ReaderFilter, read: ArticleReadFilter, search: string, publishedSince?: string) {
   return {
     scope: filter.kind,
     ...(filter.kind === 'folder' || filter.kind === 'feed' ? { scopeId: filter.id } : {}),
     read,
     ...(search ? { search } : {}),
+    ...(publishedSince ? { publishedSince } : {}),
   };
 }
 
@@ -110,10 +111,10 @@ export async function loadReaderSnapshotWithoutWaitingForReplay(
   return { ...reconciliation, replayResult };
 }
 
-export function useReader(userId?: string, defaultReadFilter: ArticleReadFilter = 'all') {
+export function useReader(userId?: string, defaultReadFilter: ArticleReadFilter = 'all', publishedSince?: string) {
   const enabled = Boolean(userId);
   const [snapshot, setSnapshot] = useState<ReaderSnapshot | null>(null);
-  const [filter, setFilter] = useState<ReaderFilter>({ kind: 'inbox' });
+  const [filter, setFilter] = useState<ReaderFilter>({ kind: 'all' });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [readFilter, setReadFilter] = useState<ArticleReadFilter>(defaultReadFilter);
@@ -524,9 +525,10 @@ export function useReader(userId?: string, defaultReadFilter: ArticleReadFilter 
     readFilter,
     debouncedQuery,
     remoteRevision,
+    publishedSince,
     snapshot?.cacheStatus?.versions.collection ?? null,
     snapshot?.cacheStatus?.versions.state ?? null,
-  ]), [activeAccountKey, debouncedQuery, filter, readFilter, remoteRevision, snapshot?.cacheStatus?.versions.collection, snapshot?.cacheStatus?.versions.state]);
+  ]), [activeAccountKey, debouncedQuery, filter, publishedSince, readFilter, remoteRevision, snapshot?.cacheStatus?.versions.collection, snapshot?.cacheStatus?.versions.state]);
 
   useEffect(() => {
     if (readerPath !== 'paginated' || !enabled || !activeAccountKey || activeAccountKey.startsWith('legacy:') || !navigator.onLine) {
@@ -541,7 +543,7 @@ export function useReader(userId?: string, defaultReadFilter: ArticleReadFilter 
     const expectedGeneration = currentCache.current?.generation;
     const expectedVersions = snapshot?.cacheStatus?.versions;
     void getReaderArticles({
-      ...readerArticleQuery(filter, readFilter, debouncedQuery),
+      ...readerArticleQuery(filter, readFilter, debouncedQuery, publishedSince),
       signal: controller.signal,
     }).then(async (page) => {
       if (controller.signal.aborted || page.accountKey !== activeAccountKey) return;
@@ -577,7 +579,7 @@ export function useReader(userId?: string, defaultReadFilter: ArticleReadFilter 
       }
     });
     return () => controller.abort();
-  }, [activeAccountKey, debouncedQuery, enabled, filter, publishCachedReader, readFilter, readerPath, remoteQueryKey, snapshot?.cacheStatus?.versions, synchronize, userId]);
+  }, [activeAccountKey, debouncedQuery, enabled, filter, publishCachedReader, publishedSince, readFilter, readerPath, remoteQueryKey, snapshot?.cacheStatus?.versions, synchronize, userId]);
 
   useEffect(() => {
     if (readerPath !== 'paginated' || !enabled || !activeAccountKey || activeAccountKey.startsWith('legacy:') || !navigator.onLine || debouncedQuery !== query.trim()) {
@@ -586,7 +588,7 @@ export function useReader(userId?: string, defaultReadFilter: ArticleReadFilter 
     }
     const controller = new AbortController();
     void getReaderArticles({
-      ...readerArticleQuery(filter, 'unread', debouncedQuery),
+      ...readerArticleQuery(filter, 'unread', debouncedQuery, publishedSince),
       limit: 1,
       signal: controller.signal,
     }).then((page) => {
@@ -595,7 +597,7 @@ export function useReader(userId?: string, defaultReadFilter: ArticleReadFilter 
       if (!controller.signal.aborted) setRemoteUnreadCount(null);
     });
     return () => controller.abort();
-  }, [activeAccountKey, debouncedQuery, enabled, filter, query, readerPath]);
+  }, [activeAccountKey, debouncedQuery, enabled, filter, publishedSince, query, readerPath]);
 
   const loadMoreArticles = useCallback(async () => {
     if (readerPath !== 'paginated') return;
@@ -604,7 +606,7 @@ export function useReader(userId?: string, defaultReadFilter: ArticleReadFilter 
     loadingNextPage.current = true;
     try {
       const page = await getReaderArticles({
-        ...readerArticleQuery(filter, readFilter, debouncedQuery),
+        ...readerArticleQuery(filter, readFilter, debouncedQuery, publishedSince),
         cursor: current.nextCursor,
       });
       if (page.accountKey !== current.accountKey || remotePageRef.current?.queryKey !== remoteQueryKey) return;
@@ -626,15 +628,21 @@ export function useReader(userId?: string, defaultReadFilter: ArticleReadFilter 
     } finally {
       loadingNextPage.current = false;
     }
-  }, [debouncedQuery, filter, readFilter, readerPath, remoteQueryKey]);
+  }, [debouncedQuery, filter, publishedSince, readFilter, readerPath, remoteQueryKey]);
 
   const filteredArticles = useMemo(() => {
     if (!snapshot) return [];
+    const publishedCutoff = publishedSince ? Date.parse(publishedSince) : null;
+    const now = Date.now();
     const knownFolderIds = new Set(snapshot.folders.map((folder) => folder.id));
     const uncategorizedFeedIds = new Set(snapshot.subscriptions
       .filter((subscription) => subscription.folderIds.length === 0 || !subscription.folderIds.some((folderId) => knownFolderIds.has(folderId)))
       .map((subscription) => subscription.id));
     return snapshot.articles.filter((article) => {
+      if (publishedCutoff !== null) {
+        const published = Date.parse(article.publishedAt);
+        if (!Number.isFinite(published) || published < publishedCutoff || published > now) return false;
+      }
       const inFilter =
         filter.kind === 'all'
         || (filter.kind === 'inbox' && !article.read)
@@ -644,7 +652,7 @@ export function useReader(userId?: string, defaultReadFilter: ArticleReadFilter 
         || (filter.kind === 'feed' && article.feedId === filter.id);
       return inFilter;
     });
-  }, [filter, snapshot]);
+  }, [filter, publishedSince, snapshot]);
 
   const searchedArticles = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -669,7 +677,7 @@ export function useReader(userId?: string, defaultReadFilter: ArticleReadFilter 
     .filter((article) => article.contentHtml)
     .map((article) => [article.id, article.contentHtml])), [snapshot]);
   const remoteIsCurrent = remotePage?.queryKey === remoteQueryKey && debouncedQuery === query.trim();
-  const navigationTotal = readerScopeTotal(snapshot, filter, readFilter, query);
+  const navigationTotal = publishedSince ? null : readerScopeTotal(snapshot, filter, readFilter, query);
   const totalArticles = navigationTotal ?? (remoteIsCurrent && remotePage ? remotePage.total : localArticles.length);
   const totalCountStatus = readerCountStatus(
     navigationTotal !== null || Boolean(remoteIsCurrent && remotePage),
@@ -888,7 +896,7 @@ export function useReader(userId?: string, defaultReadFilter: ArticleReadFilter 
     currentSnapshot.current = null;
     setSnapshot(null);
     setSelectedId(null);
-    setFilter({ kind: 'inbox' });
+    setFilter({ kind: 'all' });
     setReadFilter('all');
     setError(null);
     setPendingMutations(0);
@@ -917,6 +925,7 @@ export function useReader(userId?: string, defaultReadFilter: ArticleReadFilter 
     coverage,
     totalArticles,
     totalCountStatus,
+    hasMoreArticles: Boolean(remoteIsCurrent && remotePage?.nextCursor),
     bulkUnreadCount: remoteUnreadCount ?? localUnreadCount,
     loadedUnreadCount: loadedUnreadArticles.length,
     markReadJobs,

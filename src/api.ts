@@ -80,6 +80,7 @@ export function getReaderArticles(options: {
   scopeId?: string;
   read?: 'all' | 'unread' | 'read';
   search?: string;
+  publishedSince?: string;
   signal?: AbortSignal;
 } = {}) {
   const query = new URLSearchParams({
@@ -90,6 +91,7 @@ export function getReaderArticles(options: {
   if (options.cursor) query.set('cursor', options.cursor);
   if (options.scopeId) query.set('scopeId', options.scopeId);
   if (options.search) query.set('search', options.search);
+  if (options.publishedSince) query.set('publishedSince', options.publishedSince);
   return request<ReaderArticlePage>(`/api/reader/articles?${query.toString()}`, { signal: options.signal }, true);
 }
 
