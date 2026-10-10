@@ -594,6 +594,7 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 .connection-status button { margin-left: auto; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
 
 .article-list {
+  container-type: inline-size;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -698,14 +699,30 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 .article-main-action {
   width: 100%;
   display: block;
-  padding: 16px 36px 16px 16px;
+  padding: 16px 42px 16px 16px;
   border: 0;
   background: transparent;
   text-align: left;
   cursor: pointer;
 }
+.article-preview { display: flex; align-items: center; gap: 12px; }
+.article-preview-text { flex: 1; min-width: 0; }
+.article-thumbnail {
+  flex: none;
+  width: 100px;
+  height: 76px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--surface-muted);
+}
+/* Match the available list width, including narrow desktop split panes. */
+@container (max-width: 400px) {
+  .article-thumbnail { width: 80px; height: 64px; }
+  .article-preview { gap: 10px; }
+}
 .article-meta { display: flex; gap: 6px; color: var(--muted); font-size: 11px; }
-.article-meta strong { color: color-mix(in srgb, var(--text) 82%, var(--muted)); }
+.article-meta strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: color-mix(in srgb, var(--text) 82%, var(--muted)); }
+.article-meta span, .article-meta time { flex: none; white-space: nowrap; }
 .article-meta time { margin-left: auto; }
 .article-row h2 { margin: 7px 0 5px; color: var(--text); font-size: 15px; line-height: 1.35; }
 .article-row.read h2 { color: var(--muted); font-weight: 500; }

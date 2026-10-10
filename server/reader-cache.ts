@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { articleThumbnail, extractArticleThumbnail } from './article-thumbnail.js';
 import type {
   Article,
   ArticleMutation,
@@ -152,6 +153,7 @@ function articleCoreLogicalBytes(article: Omit<Article, 'folderIds' | 'read' | '
     article.canonicalUrl,
     article.publishedAt,
     article.summary,
+    article.thumbnailUrl,
     article.contentHtml,
   ) + 112;
 }
@@ -440,18 +442,19 @@ export class ReaderCache {
     if (articles.length > READER_IMPORT_BATCH_SIZE) {
       throw new Error(`Reader import batch exceeds ${READER_IMPORT_BATCH_SIZE} articles`);
     }
+    articles = articles.map((article) => ({ ...article, thumbnailUrl: articleThumbnail(article) }));
     const logicalBytes = articles.reduce((total, article) => total + articleLogicalBytes(article), 0);
     const stage = this.database.transaction(() => {
       this.assertLease(importRun);
       const insertArticle = this.database.prepare(`
         INSERT INTO reader_articles
-          (generation_id, id, feed_id, title, author, source, canonical_url, published_at, reading_minutes, summary)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (generation_id, id, feed_id, title, author, source, canonical_url, published_at, reading_minutes, summary, thumbnail_url)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(generation_id, id) DO UPDATE SET
           feed_id = excluded.feed_id, title = excluded.title, author = excluded.author,
           source = excluded.source, canonical_url = excluded.canonical_url,
           published_at = excluded.published_at, reading_minutes = excluded.reading_minutes,
-          summary = excluded.summary
+          summary = excluded.summary, thumbnail_url = excluded.thumbnail_url
       `);
       const insertBody = this.database.prepare(`
         INSERT INTO reader_article_bodies (generation_id, article_id, content_html) VALUES (?, ?, ?)
@@ -480,6 +483,7 @@ export class ReaderCache {
           article.publishedAt,
           article.readingMinutes,
           article.summary,
+          article.thumbnailUrl ?? '',
         );
         insertBody.run(importRun.generationId, article.id, article.contentHtml);
         insertState.run(importRun.generationId, article.id, Number(article.read), Number(article.starred));
@@ -635,15 +639,18 @@ export class ReaderCache {
   private articleDeltaPayload(generationId: string, articleId: string) {
     const row = this.database.prepare(`
       SELECT a.id, a.feed_id, a.title, a.author, a.source, a.canonical_url, a.published_at,
-        a.reading_minutes, a.summary, s.is_read, s.is_starred
+        a.reading_minutes, a.summary, a.thumbnail_url, s.is_read, s.is_starred
       FROM reader_articles a
       JOIN reader_article_state s ON s.generation_id = a.generation_id AND s.article_id = a.id
       WHERE a.generation_id = ? AND a.id = ?
     `).get(generationId, articleId) as {
       id: string; feed_id: string; title: string; author: string | null; source: string; canonical_url: string;
-      published_at: string; reading_minutes: number; summary: string; is_read: number; is_starred: number;
+      published_at: string; reading_minutes: number; summary: string; thumbnail_url: string | null; is_read: number; is_starred: number;
     } | undefined;
     if (!row) return null;
+    const thumbnailUrl = row.thumbnail_url ?? extractArticleThumbnail(
+      (this.database.prepare('SELECT content_html FROM reader_article_bodies WHERE generation_id = ? AND article_id = ?')
+        .get(generationId, articleId) as { content_html: string } | undefined)?.content_html ?? '', row.canonical_url);
     const folderIds = (this.database.prepare(`
       SELECT folder_id FROM reader_article_folders WHERE generation_id = ? AND article_id = ? ORDER BY folder_id
     `).all(generationId, articleId) as Array<{ folder_id: string }>).map(({ folder_id }) => folder_id);
@@ -658,6 +665,7 @@ export class ReaderCache {
       publishedAt: row.published_at,
       readingMinutes: row.reading_minutes,
       summary: row.summary,
+      ...(thumbnailUrl ? { thumbnailUrl } : {}),
       read: Boolean(row.is_read),
       starred: Boolean(row.is_starred),
     };
@@ -682,7 +690,7 @@ export class ReaderCache {
         CASE WHEN o.id IS NULL OR n.feed_id IS NOT o.feed_id OR n.title IS NOT o.title
           OR n.author IS NOT o.author OR n.source IS NOT o.source OR n.canonical_url IS NOT o.canonical_url
           OR n.published_at IS NOT o.published_at OR n.reading_minutes IS NOT o.reading_minutes
-          OR n.summary IS NOT o.summary
+          OR n.summary IS NOT o.summary OR n.thumbnail_url IS NOT o.thumbnail_url
           OR EXISTS (
             SELECT folder_id FROM reader_article_folders WHERE generation_id = n.generation_id AND article_id = n.id
             EXCEPT SELECT folder_id FROM reader_article_folders WHERE generation_id = o.generation_id AND article_id = o.id
@@ -704,7 +712,7 @@ export class ReaderCache {
         o.id IS NULL OR n.feed_id IS NOT o.feed_id OR n.title IS NOT o.title OR n.author IS NOT o.author
         OR n.source IS NOT o.source OR n.canonical_url IS NOT o.canonical_url
         OR n.published_at IS NOT o.published_at OR n.reading_minutes IS NOT o.reading_minutes
-        OR n.summary IS NOT o.summary OR ns.is_read IS NOT os.is_read OR ns.is_starred IS NOT os.is_starred
+        OR n.summary IS NOT o.summary OR n.thumbnail_url IS NOT o.thumbnail_url OR ns.is_read IS NOT os.is_read OR ns.is_starred IS NOT os.is_starred
         OR nb.content_html IS NOT ob.content_html
         OR EXISTS (
           SELECT folder_id FROM reader_article_folders WHERE generation_id = n.generation_id AND article_id = n.id
@@ -829,10 +837,11 @@ export class ReaderCache {
   }
 
   private insertNewArticle(generationId: string, article: Article) {
+    article = { ...article, thumbnailUrl: articleThumbnail(article) };
     const inserted = this.database.prepare(`
       INSERT OR IGNORE INTO reader_articles
-        (generation_id, id, feed_id, title, author, source, canonical_url, published_at, reading_minutes, summary)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (generation_id, id, feed_id, title, author, source, canonical_url, published_at, reading_minutes, summary, thumbnail_url)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       generationId,
       article.id,
@@ -844,6 +853,7 @@ export class ReaderCache {
       article.publishedAt,
       article.readingMinutes,
       article.summary,
+      article.thumbnailUrl ?? '',
     ).changes === 1;
     if (!inserted) return false;
     this.database.prepare(`INSERT INTO reader_article_bodies (generation_id, article_id, content_html) VALUES (?, ?, ?)`)
@@ -952,6 +962,7 @@ export class ReaderCache {
   }
 
   applyBodyReconciliation(run: ReaderCacheIncrementalRun, articles: Article[], cutoffSeconds: number) {
+    articles = articles.map((article) => ({ ...article, thumbnailUrl: articleThumbnail(article) }));
     const apply = this.database.transaction(() => {
       this.assertLease(run);
       const generationId = this.currentGenerationId(run.accountKey);
@@ -963,13 +974,13 @@ export class ReaderCache {
       for (const article of articles) {
         const existing = this.database.prepare(`
           SELECT a.feed_id, a.title, a.author, a.source, a.canonical_url, a.published_at,
-            a.reading_minutes, a.summary, b.content_html
+            a.reading_minutes, a.summary, a.thumbnail_url, b.content_html
           FROM reader_articles a JOIN reader_article_bodies b
             ON b.generation_id = a.generation_id AND b.article_id = a.id
           WHERE a.generation_id = ? AND a.id = ?
         `).get(generationId, article.id) as {
           feed_id: string; title: string; author: string | null; source: string; canonical_url: string; published_at: string;
-          reading_minutes: number; summary: string; content_html: string;
+          reading_minutes: number; summary: string; thumbnail_url: string | null; content_html: string;
         } | undefined;
         if (!existing) {
           if (this.insertNewArticle(generationId, article)) {
@@ -985,7 +996,8 @@ export class ReaderCache {
           || existing.canonical_url !== article.canonicalUrl
           || existing.published_at !== article.publishedAt
           || existing.reading_minutes !== article.readingMinutes
-          || existing.summary !== article.summary;
+          || existing.summary !== article.summary
+          || (existing.thumbnail_url ?? '') !== (article.thumbnailUrl ?? '');
         const bodyChanged = existing.content_html !== article.contentHtml;
         if (!metadataChanged && !bodyChanged) {
           unchanged += 1;
@@ -993,7 +1005,7 @@ export class ReaderCache {
         }
         this.database.prepare(`
           UPDATE reader_articles SET feed_id = ?, title = ?, author = ?, source = ?, canonical_url = ?,
-            published_at = ?, reading_minutes = ?, summary = ?
+            published_at = ?, reading_minutes = ?, summary = ?, thumbnail_url = ?
           WHERE generation_id = ? AND id = ?
         `).run(
           article.feedId,
@@ -1004,6 +1016,7 @@ export class ReaderCache {
           article.publishedAt,
           article.readingMinutes,
           article.summary,
+          article.thumbnailUrl ?? '',
           generationId,
           article.id,
         );
@@ -1020,6 +1033,7 @@ export class ReaderCache {
           publishedAt: existing.published_at,
           readingMinutes: existing.reading_minutes,
           summary: existing.summary,
+          thumbnailUrl: existing.thumbnail_url,
           contentHtml: existing.content_html,
         });
         const nextLogicalBytes = articleCoreLogicalBytes(article);
@@ -1596,7 +1610,7 @@ export class ReaderCache {
       `).all(generationId) as Array<{ subscription_id: string; folder_id: string }>;
       const articleRows = this.database.prepare(`
         SELECT a.id, a.feed_id, a.title, a.author, a.source, a.canonical_url, a.published_at,
-          a.reading_minutes, a.summary, b.content_html, s.is_read, s.is_starred
+          a.reading_minutes, a.summary, a.thumbnail_url, b.content_html, s.is_read, s.is_starred
         FROM reader_articles a
         JOIN reader_article_bodies b ON b.generation_id = a.generation_id AND b.article_id = a.id
         JOIN reader_article_state s ON s.generation_id = a.generation_id AND s.article_id = a.id
@@ -1604,7 +1618,7 @@ export class ReaderCache {
         ORDER BY a.published_at DESC, a.id
       `).all(generationId) as Array<{
         id: string; feed_id: string; title: string; author: string | null; source: string; canonical_url: string;
-        published_at: string; reading_minutes: number; summary: string; content_html: string; is_read: number; is_starred: number;
+        published_at: string; reading_minutes: number; summary: string; thumbnail_url: string | null; content_html: string; is_read: number; is_starred: number;
       }>;
       const articleFolderRows = this.database.prepare(`
         SELECT article_id, folder_id FROM reader_article_folders WHERE generation_id = ?
@@ -1641,21 +1655,25 @@ export class ReaderCache {
           folderIds: subscriptionFolders.get(row.id) ?? [],
           unreadCount: row.unread_count,
         })),
-        articles: articleRows.map((row) => ({
-          id: row.id,
-          feedId: row.feed_id,
-          folderIds: articleFolders.get(row.id) ?? [],
-          title: row.title,
-          author: row.author,
-          source: row.source,
-          canonicalUrl: row.canonical_url,
-          publishedAt: row.published_at,
-          readingMinutes: row.reading_minutes,
-          summary: row.summary,
-          contentHtml: row.content_html,
-          read: Boolean(row.is_read),
-          starred: Boolean(row.is_starred),
-        })),
+        articles: articleRows.map((row) => {
+          const thumbnailUrl = row.thumbnail_url ?? extractArticleThumbnail(row.content_html, row.canonical_url);
+          return {
+            id: row.id,
+            feedId: row.feed_id,
+            folderIds: articleFolders.get(row.id) ?? [],
+            title: row.title,
+            author: row.author,
+            source: row.source,
+            canonicalUrl: row.canonical_url,
+            publishedAt: row.published_at,
+            readingMinutes: row.reading_minutes,
+            summary: row.summary,
+            ...(thumbnailUrl ? { thumbnailUrl } : {}),
+            contentHtml: row.content_html,
+            read: Boolean(row.is_read),
+            starred: Boolean(row.is_starred),
+          };
+        }),
       } satisfies ReaderSnapshot;
     });
     return read.deferred();

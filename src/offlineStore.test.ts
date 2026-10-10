@@ -98,6 +98,23 @@ describe('offline reader storage', () => {
     await clearOfflineData();
   });
 
+  it('retains thumbnail metadata without downloading article bodies and replaces it through deltas', async () => {
+    await saveReaderNavigation('user-1', navigation());
+    const first = page();
+    first.articles[0]!.thumbnailUrl = 'https://example.test/forest.jpg';
+    await saveReaderArticlePage('user-1', first, true);
+    const stored = await loadCachedReader('user-1');
+    expect(stored?.snapshot.articles[0]).toMatchObject({ thumbnailUrl: 'https://example.test/forest.jpg', contentHtml: '' });
+    await applyLocalMutationToReaderCache('account-1', { articleId: 'article-1', operation: 'starred', value: true });
+    expect((await loadCachedReader('user-1'))?.snapshot.articles[0]?.thumbnailUrl).toBe('https://example.test/forest.jpg');
+    const replacement = { ...first.articles[0]!, thumbnailUrl: 'https://example.test/house.jpg' };
+    await applyReaderChanges({ accountKey: 'account-1', versions: first.versions, token: 'next', hasMore: false, changes: [{
+      sequence: 1, kind: 'upsert', articleId: 'article-1', metadataChanged: true, stateChanged: false,
+      bodyChanged: true, deleted: false, versions: first.versions, payload: replacement,
+    }] });
+    expect((await loadCachedReader('user-1'))?.snapshot.articles[0]?.thumbnailUrl).toBe('https://example.test/house.jpg');
+  });
+
   it('persists the reader snapshot and authenticated session', async () => {
     await saveCachedSnapshot(snapshot);
     await saveOfflineSession(session);

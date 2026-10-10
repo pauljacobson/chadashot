@@ -637,6 +637,15 @@ const migrations: Migration[] = [
       );
     `,
   },
+  {
+    version: 12,
+    name: 'article_thumbnails',
+    sql: `
+      -- NULL means an older row has not been inspected; an empty string means
+      -- the article has no suitable image. Avoid scanning all bodies at startup.
+      ALTER TABLE reader_articles ADD COLUMN thumbnail_url TEXT;
+    `,
+  },
 ];
 
 function ensureMigrationTable(database: AppDatabase) {

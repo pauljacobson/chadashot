@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { articlePreviewImage } from '../shared/articlePreview.js';
+import { extractArticleThumbnail } from './article-thumbnail.js';
 import { z } from 'zod';
 import type { ReaderArticleBody, ReaderArticleMetadata, ReaderArticlePage, ReaderVersions } from '../shared/reader.js';
 import type { AppDatabase } from './database.js';
@@ -19,7 +20,8 @@ export type ReaderArticleQuery = {
 };
 
 const articleCursorSchema = z.object({
-  version: z.literal(1),
+  // Older partial device caches must restart paging to include thumbnail fields.
+  version: z.literal(2),
   accountKey: z.string(),
   generation: z.string(),
   collectionVersion: z.number().int().nonnegative(),
@@ -34,7 +36,8 @@ const articleCursorSchema = z.object({
 });
 
 const deltaTokenSchema = z.object({
-  version: z.literal(1),
+  // Rebuild pre-thumbnail device metadata once, retaining queued offline writes.
+  version: z.literal(2),
   accountKey: z.string(),
   afterSequence: z.number().int().nonnegative(),
   targetSequence: z.number().int().nonnegative(),
@@ -146,6 +149,7 @@ export class ReaderApi {
   }
 
   articles(identity: ReaderCacheIdentity, query: ReaderArticleQuery): ReaderArticlePage & { etag: string } {
+    const pendingThumbnails: Array<{ generation: string; id: string; url: string }> = [];
     const read = this.database.transaction(() => {
     const context = this.context(identity);
     this.afterContext?.();
@@ -208,7 +212,7 @@ export class ReaderApi {
     parameters.limit = query.limit + 1;
     const rows = this.database.prepare(`
       SELECT a.id, a.feed_id, a.title, a.author, a.source, a.canonical_url, a.published_at,
-        a.reading_minutes, a.summary, state.is_read, state.is_starred,
+        a.reading_minutes, a.summary, a.thumbnail_url, state.is_read, state.is_starred,
         COALESCE((
           SELECT json_group_array(folder_id) FROM (
             SELECT folder_id FROM reader_article_folders
@@ -222,7 +226,7 @@ export class ReaderApi {
       LIMIT @limit
     `).all(parameters) as Array<{
       id: string; feed_id: string; title: string; author: string | null; source: string; canonical_url: string;
-      published_at: string; reading_minutes: number; summary: string; is_read: number; is_starred: number; folder_ids: string;
+      published_at: string; reading_minutes: number; summary: string; thumbnail_url: string | null; is_read: number; is_starred: number; folder_ids: string;
     }>;
     const hasMore = rows.length > query.limit;
     const pageRows = hasMore ? rows.slice(0, query.limit) : rows;
@@ -231,6 +235,15 @@ export class ReaderApi {
       SELECT substr(content_html, 1, 128000) AS content_html FROM reader_article_bodies
       WHERE generation_id = ? AND article_id = ?
     `) : null;
+    // Only legacy rows on this bounded page need body reads. Persist the derived
+    // result after the read transaction so future list requests stay metadata-only.
+    for (const row of pageRows) {
+      if (row.thumbnail_url !== null) continue;
+      const body = this.database.prepare('SELECT content_html FROM reader_article_bodies WHERE generation_id = ? AND article_id = ?')
+        .get(context.generation, row.id) as { content_html: string } | undefined;
+      row.thumbnail_url = extractArticleThumbnail(body?.content_html ?? '', row.canonical_url) ?? '';
+      pendingThumbnails.push({ generation: context.generation, id: row.id, url: row.thumbnail_url });
+    }
     const articles: ReaderArticleMetadata[] = pageRows.map((row) => ({
       id: row.id,
       feedId: row.feed_id,
@@ -246,12 +259,13 @@ export class ReaderApi {
         (previewBody.get(context.generation, row.id) as { content_html: string } | undefined)?.content_html ?? '',
         row.canonical_url,
       ) } : {}),
+      ...(row.thumbnail_url ? { thumbnailUrl: row.thumbnail_url } : {}),
       read: Boolean(row.is_read),
       starred: Boolean(row.is_starred),
     }));
     const last = hasMore ? pageRows.at(-1) : undefined;
     const nextCursor = last ? encode({
-      version: 1,
+      version: 2,
       accountKey: identity.accountKey,
       generation: context.generation,
       collectionVersion: context.versions.collection,
@@ -271,7 +285,7 @@ export class ReaderApi {
       total,
       articles,
       nextCursor,
-      etag: `"reader-articles-${hash([
+      etag: `"reader-articles-v2-${hash([
         context.generation,
         context.versions.collection,
         context.versions.state,
@@ -286,7 +300,21 @@ export class ReaderApi {
       ])}"`,
     };
     });
-    return read.deferred();
+    const result = read.deferred();
+    if (pendingThumbnails.length) {
+      const save = this.database.transaction(() => {
+        const update = this.database.prepare('UPDATE reader_articles SET thumbnail_url = ? WHERE generation_id = ? AND id = ? AND thumbnail_url IS NULL');
+        const addBytes = this.database.prepare('UPDATE reader_cache_generations SET logical_bytes = logical_bytes + ? WHERE id = ?');
+        for (const thumbnail of pendingThumbnails) {
+          // A concurrent reconciliation may already have replaced the body/image.
+          if (update.run(thumbnail.url, thumbnail.generation, thumbnail.id).changes) {
+            addBytes.run(Buffer.byteLength(thumbnail.url), thumbnail.generation);
+          }
+        }
+      });
+      save.immediate();
+    }
+    return result;
   }
 
   body(identity: ReaderCacheIdentity, articleId: string): (ReaderArticleBody & { etag: string }) | null {
@@ -395,14 +423,14 @@ export class ReaderApi {
         changes: [],
         hasMore: false,
         token: encode({
-          version: 1,
+          version: 2,
           accountKey: identity.accountKey,
           afterSequence: maximumSequence,
           targetSequence: maximumSequence,
           issuedAt: this.clock().getTime(),
         }),
         versions: context.versions,
-        etag: `"reader-changes-${maximumSequence}"`,
+        etag: `"reader-changes-v2-${maximumSequence}"`,
       };
     }
     let parsed: z.infer<typeof deltaTokenSchema>;
@@ -458,7 +486,7 @@ export class ReaderApi {
         issuedAt: hasMore ? parsed.issuedAt : this.clock().getTime(),
       }),
       versions: context.versions,
-      etag: `"reader-changes-${parsed.afterSequence}-${targetSequence}"`,
+      etag: `"reader-changes-v2-${parsed.afterSequence}-${targetSequence}"`,
     };
     });
     return read.deferred();

@@ -16,6 +16,7 @@ export type Article = ArticleState & {
   summary: string;
   /** Optional lightweight preview supplied for publication-window queries. */
   previewImageUrl?: string | null;
+  thumbnailUrl?: string | null;
   contentHtml: string;
 };
 

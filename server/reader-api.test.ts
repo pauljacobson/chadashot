@@ -101,6 +101,62 @@ describe('paginated reader API', () => {
     database.close();
   });
 
+  it('returns thumbnails as metadata and propagates image changes and removal through deltas', () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database, 'worker');
+    const original = article('one', { contentHtml: '<img src="/forest.jpg"><p>Body</p>' });
+    publish(cache, snapshot([original]));
+    const api = new ReaderApi(database);
+    const first = api.articles(identity, query());
+    expect(first.articles[0]).toMatchObject({ thumbnailUrl: 'https://example.test/forest.jpg' });
+    expect(first.articles[0]).not.toHaveProperty('contentHtml');
+    const token = api.changes(identity, undefined, 100).token;
+    const lease = cache.acquireLease(identity)!;
+    const run = cache.beginIncrementalRun(lease, 'body');
+    cache.applyBodyReconciliation(run, [{ ...original, contentHtml: '<img src="/house.jpg"><p>Body</p>' }], 100);
+    cache.completeIncrementalRun(run);
+    const changed = api.changes(identity, token, 100);
+    expect(changed.changes.find((change) => change.articleId === 'one')).toMatchObject({
+      metadataChanged: true, bodyChanged: true, payload: { thumbnailUrl: 'https://example.test/house.jpg' },
+    });
+    const removal = cache.beginIncrementalRun(cache.acquireLease(identity)!, 'body');
+    cache.applyBodyReconciliation(removal, [{ ...original, contentHtml: '<p>Text only</p>' }], 101);
+    cache.completeIncrementalRun(removal);
+    expect(api.articles(identity, query()).articles[0]).not.toHaveProperty('thumbnailUrl');
+    expect(api.changes(identity, changed.token, 100).changes.find((change) => change.articleId === 'one')?.metadataChanged).toBe(true);
+  });
+
+  it('backfills only the requested page of legacy rows and caches absent images too', () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database, 'worker');
+    publish(cache, snapshot([article('one', { contentHtml: '<img src="/forest.jpg">' }), article('two')]));
+    database.exec('UPDATE reader_articles SET thumbnail_url = NULL');
+    const api = new ReaderApi(database);
+    const first = api.articles(identity, query({ limit: 1 }));
+    expect(first.articles[0]?.id).toBe('two');
+    expect(database.prepare('SELECT id, thumbnail_url FROM reader_articles ORDER BY id').all()).toEqual([
+      { id: 'one', thumbnail_url: null }, { id: 'two', thumbnail_url: '' },
+    ]);
+    const second = api.articles(identity, query({ limit: 1, cursor: first.nextCursor! }));
+    expect(second.articles[0]?.thumbnailUrl).toBe('https://example.test/forest.jpg');
+    const bytes = database.prepare('SELECT logical_bytes FROM reader_cache_generations').get();
+    api.articles(identity, query());
+    expect(database.prepare('SELECT logical_bytes FROM reader_cache_generations').get()).toEqual(bytes);
+  });
+
+  it('requires pre-thumbnail paging and change tokens to rebuild metadata', () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database, 'worker');
+    publish(cache, snapshot([article('one'), article('two')]));
+    const api = new ReaderApi(database);
+    const token = JSON.parse(Buffer.from(api.changes(identity, undefined, 100).token, 'base64url').toString()) as { version: number };
+    token.version = 1;
+    expect(() => api.changes(identity, Buffer.from(JSON.stringify(token)).toString('base64url'), 100)).toThrow(ReaderCursorError);
+    const cursor = JSON.parse(Buffer.from(api.articles(identity, query({ limit: 1 })).nextCursor!, 'base64url').toString()) as { version: number };
+    cursor.version = 1;
+    expect(() => api.articles(identity, query({ limit: 1, cursor: Buffer.from(JSON.stringify(cursor)).toString('base64url') }))).toThrow(ReaderCursorError);
+  });
+
   it('traverses more than 20,000 articles without duplicates, omissions, or body transfer', () => {
     const database = openMemoryDatabase();
     const cache = new ReaderCache(database, 'worker');
