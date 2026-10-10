@@ -32,6 +32,7 @@ import {
 import { type ArticleReadFilter, type ReaderFilter, type SyncStatus, useReader } from './useReader';
 import { readerCountStatus, type ReaderCountStatus } from './readerCounts';
 import { buildFeedGroups, type FeedSortOrder, feedFaviconUrl } from './feedTree';
+import { usePreferences } from './usePreferences';
 import {
   clearOfflineData,
   loadOfflineSession,
@@ -42,6 +43,8 @@ import { finishArticleOpen, finishSelectionUpdate, markMilestone, recordMountedR
 
 type ContentView = 'list' | 'reader';
 const FEED_SORT_ORDER_KEY = 'chadashot.feedSortOrder';
+const DEFAULT_ARTICLE_VIEW_KEY = 'chadashot.defaultArticleView';
+type DefaultArticleView = Extract<ArticleReadFilter, 'all' | 'unread'>;
 const ACCENT_COLOR_KEY = 'chadashot.accentColor';
 const READING_FONT_KEY = 'chadashot.readingFont';
 const ARTICLE_TEXT_SIZE_KEY = 'chadashot.articleTextSize';
@@ -166,6 +169,14 @@ function savedFeedSortOrder(): FeedSortOrder {
     return localStorage.getItem(FEED_SORT_ORDER_KEY) === 'recent' ? 'recent' : 'alphabetical';
   } catch {
     return 'alphabetical';
+  }
+}
+
+function savedDefaultArticleView(): DefaultArticleView {
+  try {
+    return localStorage.getItem(DEFAULT_ARTICLE_VIEW_KEY) === 'unread' ? 'unread' : 'all';
+  } catch {
+    return 'all';
   }
 }
 
@@ -1052,12 +1063,15 @@ export function ReaderPane({
   );
 }
 
-function PreferencesPanel({ sortOrder, accentColor, readingFont, articleTextSize, onSortOrderChange, onAccentColorChange, onReadingFontChange, onArticleTextSizeChange, onClose }: {
+function PreferencesPanel({ sortOrder, defaultArticleView, accentColor, readingFont, articleTextSize, syncStatus, onSortOrderChange, onDefaultArticleViewChange, onAccentColorChange, onReadingFontChange, onArticleTextSizeChange, onClose }: {
   sortOrder: FeedSortOrder;
+  defaultArticleView: DefaultArticleView;
   accentColor: AccentColor;
   readingFont: ReadingFont;
   articleTextSize: ArticleTextSize;
+  syncStatus: 'loading' | 'synced' | 'pending';
   onSortOrderChange: (sortOrder: FeedSortOrder) => void;
+  onDefaultArticleViewChange: (view: DefaultArticleView) => void;
   onAccentColorChange: (accentColor: AccentColor) => void;
   onReadingFontChange: (readingFont: ReadingFont) => void;
   onArticleTextSizeChange: (articleTextSize: ArticleTextSize) => void;
@@ -1069,6 +1083,17 @@ function PreferencesPanel({ sortOrder, accentColor, readingFont, articleTextSize
         <header><div><div className="eyebrow">Chadashot</div><h1 id="preferences-title">Preferences</h1></div><button aria-label="Close preferences" onClick={onClose}>×</button></header>
         <div className="setting-section">
           <h2>Feed organization</h2>
+          <fieldset className="preference-options">
+            <legend>Default article view</legend>
+            <label className="preference-option">
+              <input type="radio" name="default-article-view" value="unread" checked={defaultArticleView === 'unread'} onChange={() => onDefaultArticleViewChange('unread')} />
+              <span><strong>Unread items only</strong><small>Show only unread items when opening any feed, folder, or collection.</small></span>
+            </label>
+            <label className="preference-option">
+              <input type="radio" name="default-article-view" value="all" checked={defaultArticleView === 'all'} onChange={() => onDefaultArticleViewChange('all')} />
+              <span><strong>All items</strong><small>Show read and unread items when opening any feed, folder, or collection. Inbox always shows unread items.</small></span>
+            </label>
+          </fieldset>
           <fieldset className="preference-options">
             <legend>Folder and feed order</legend>
             <label className="preference-option">
@@ -1138,7 +1163,7 @@ function PreferencesPanel({ sortOrder, accentColor, readingFont, articleTextSize
             <small>Each option uses separate light and dark colors for readable text and controls.</small>
           </fieldset>
         </div>
-        <p className="preferences-note">Preferences are saved in this browser.</p>
+        <p className="preferences-note" role="status">{syncStatus === 'synced' ? 'Preferences are saved to your account and sync across devices.' : syncStatus === 'loading' ? 'Loading your account preferences…' : 'Preferences apply now. Waiting to sync to your account.'}</p>
       </section>
     </div>
   );
@@ -1658,6 +1683,7 @@ export function App() {
   const [feedsOpen, setFeedsOpen] = useState(false);
   const [unreadFeedsOnly, setUnreadFeedsOnly] = useState(false);
   const [feedSortOrder, setFeedSortOrder] = useState<FeedSortOrder>(savedFeedSortOrder);
+  const [defaultArticleView, setDefaultArticleView] = useState<DefaultArticleView>(savedDefaultArticleView);
   const [accentColor, setAccentColor] = useState<AccentColor>(savedAccentColor);
   const [readingFont, setReadingFont] = useState<ReadingFont>(savedReadingFont);
   const [articleTextSize, setArticleTextSize] = useState<ArticleTextSize>(savedArticleTextSize);
@@ -1670,7 +1696,21 @@ export function App() {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const headerFeedsTriggerRef = useRef<HTMLButtonElement>(null);
   const activeFeedsTriggerRef = useRef<HTMLButtonElement>(null);
-  const reader = useReader(session?.authenticated ? session.user?.id : undefined);
+  const reader = useReader(session?.authenticated ? session.user?.id : undefined, defaultArticleView);
+  const { updatePreferences, syncStatus: preferencesSyncStatus } = usePreferences(
+    session?.authenticated ? session.user?.id : undefined,
+    { feedSortOrder, defaultArticleView, accentColor, readingFont, articleTextSize },
+    (patch) => {
+      if (patch.feedSortOrder) setFeedSortOrder(patch.feedSortOrder);
+      if (patch.defaultArticleView) {
+        setDefaultArticleView(patch.defaultArticleView);
+        reader.setReadFilter(reader.filter.kind === 'inbox' ? 'all' : patch.defaultArticleView);
+      }
+      if (patch.accentColor) setAccentColor(patch.accentColor);
+      if (patch.readingFont) setReadingFont(patch.readingFont);
+      if (patch.articleTextSize) setArticleTextSize(patch.articleTextSize);
+    },
+  );
 
   useLayoutEffect(() => {
     if (!session?.authenticated) return;
@@ -1722,6 +1762,14 @@ export function App() {
     mediaQuery.addEventListener('change', handleChange);
     return () => mediaQuery.removeEventListener('change', handleChange);
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(DEFAULT_ARTICLE_VIEW_KEY, defaultArticleView);
+    } catch {
+      // The preference remains available for this session if storage is unavailable.
+    }
+  }, [defaultArticleView]);
 
   useEffect(() => {
     try {
@@ -1826,7 +1874,8 @@ export function App() {
         : null;
 
   function chooseFilter(filter: ReaderFilter) {
-    if (filter.kind === 'inbox') reader.setReadFilter('all');
+    // View-level overrides last until navigation; every scope uses the global default.
+    reader.setReadFilter(filter.kind === 'inbox' ? 'all' : defaultArticleView);
     reader.setFilter(filter);
     setContentView('list');
   }
@@ -2022,7 +2071,7 @@ export function App() {
         onUnreadOnlyChange={setUnreadFeedsOnly}
         onClose={closeFeeds}
       />}
-      {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} accentColor={accentColor} readingFont={readingFont} articleTextSize={articleTextSize} onSortOrderChange={setFeedSortOrder} onAccentColorChange={setAccentColor} onReadingFontChange={setReadingFont} onArticleTextSizeChange={setArticleTextSize} onClose={() => setPreferencesOpen(false)} />}
+      {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} defaultArticleView={defaultArticleView} accentColor={accentColor} readingFont={readingFont} articleTextSize={articleTextSize} syncStatus={preferencesSyncStatus} onSortOrderChange={(feedSortOrder) => updatePreferences({ feedSortOrder })} onDefaultArticleViewChange={(defaultArticleView) => updatePreferences({ defaultArticleView })} onAccentColorChange={(accentColor) => updatePreferences({ accentColor })} onReadingFontChange={(readingFont) => updatePreferences({ readingFont })} onArticleTextSizeChange={(articleTextSize) => updatePreferences({ articleTextSize })} onClose={() => setPreferencesOpen(false)} />}
       {subscribeOpen && <SubscribePanel
         onClose={() => setSubscribeOpen(false)}
         onSubscribed={async (feedUrl) => {

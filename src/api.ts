@@ -6,6 +6,17 @@ import type {
   AuthenticationResponseJSON,
 } from '@simplewebauthn/browser';
 import { recordReaderResponse } from './performance';
+import type { UserPreferences } from '../shared/preferences';
+
+export function getUserPreferences(signal?: AbortSignal) {
+  return request<{ preferences: UserPreferences | null }>('/api/settings/preferences', { signal });
+}
+
+export function saveUserPreferences(preferences: Partial<UserPreferences>, signal?: AbortSignal) {
+  return request<{ preferences: UserPreferences }>('/api/settings/preferences', {
+    method: 'PUT', body: JSON.stringify(preferences), signal,
+  });
+}
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
