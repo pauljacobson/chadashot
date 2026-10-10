@@ -759,6 +759,20 @@ export class GoogleReaderClient {
     }
   }
 
+  async unsubscribe(subscriptionId: string) {
+    const auth = await this.authenticate();
+    const token = await this.writeToken(auth);
+    // Use the provider's stream ID; rebuilding it from a URL can target a different feed.
+    const response = await this.authorizedRequest('/reader/api/0/subscription/edit', auth, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ ac: 'unsubscribe', s: subscriptionId, T: token }),
+    });
+    if ((await response.text()).trim() !== 'OK') {
+      throw new Error('The RSS service did not confirm the feed removal');
+    }
+  }
+
   async subscribe(feedUrl: string) {
     const auth = await this.authenticate();
     const token = await this.writeToken(auth);

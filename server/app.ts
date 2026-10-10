@@ -103,6 +103,7 @@ const readerDocumentSchema = z.object({
 });
 type HighlightDeliveryBody = z.infer<typeof highlightSchema>;
 const subscriptionSchema = z.object({ feedUrl: z.url() });
+const unsubscribeSchema = z.object({ subscriptionId: z.string().trim().max(2_000).regex(/^feed\/.+$/) });
 const logQuerySchema = z.object({
   level: z.enum(['debug', 'info', 'warn', 'error']).optional(),
   search: z.string().trim().max(200).optional(),
@@ -1174,6 +1175,20 @@ export function createApp(config: AppConfig, dependencies: {
       return res.status(202).json(job);
     } catch (error) {
       return markReadJobFailure(res, error);
+    }
+  });
+
+  app.delete('/api/subscriptions', requireUser, async (req, res) => {
+    const { subscriptionId } = unsubscribeSchema.parse(req.body);
+    const credentials = loadBirchfeed(database, config);
+    if (!credentials) return res.status(409).json({ error: 'Connect an RSS service in Settings before removing feeds' });
+    try {
+      await new GoogleReaderClient(credentials, fetchImplementation).unsubscribe(subscriptionId);
+      logger.info('Feed unsubscribed');
+      return res.json({ removed: true });
+    } catch (error) {
+      logger.warn('Feed removal failed', { reason: error instanceof Error ? error.message : 'Unknown error' });
+      return res.status(502).json({ error: error instanceof Error ? error.message : 'Could not remove feed' });
     }
   });
 

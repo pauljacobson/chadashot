@@ -292,6 +292,13 @@ export function saveReadwiseDocument(article: {
   });
 }
 
+export function unsubscribeFromFeed(subscriptionId: string) {
+  return request<{ removed: true }>('/api/subscriptions', {
+    method: 'DELETE',
+    body: JSON.stringify({ subscriptionId }),
+  });
+}
+
 export function subscribeToFeed(feedUrl: string) {
   return request<{ subscription: { id: string; title: string; url: string }; synchronized: true }>('/api/subscriptions', {
     method: 'POST',
