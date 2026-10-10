@@ -110,13 +110,13 @@ export async function loadReaderSnapshotWithoutWaitingForReplay(
   return { ...reconciliation, replayResult };
 }
 
-export function useReader(userId?: string) {
+export function useReader(userId?: string, defaultReadFilter: ArticleReadFilter = 'all') {
   const enabled = Boolean(userId);
   const [snapshot, setSnapshot] = useState<ReaderSnapshot | null>(null);
   const [filter, setFilter] = useState<ReaderFilter>({ kind: 'inbox' });
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
-  const [readFilter, setReadFilter] = useState<ArticleReadFilter>('all');
+  const [readFilter, setReadFilter] = useState<ArticleReadFilter>(defaultReadFilter);
   const [status, setStatus] = useState<SyncStatus>(navigator.onLine ? 'syncing' : 'offline');
   const [error, setError] = useState<string | null>(null);
   const [pendingMutations, setPendingMutations] = useState(0);

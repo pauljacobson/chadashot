@@ -627,6 +627,16 @@ const migrations: Migration[] = [
       );
     `,
   },
+  {
+    version: 11,
+    name: 'account_preferences',
+    sql: `
+      CREATE TABLE user_preferences (
+        user_id TEXT PRIMARY KEY,
+        preferences_json TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 function ensureMigrationTable(database: AppDatabase) {

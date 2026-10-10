@@ -3,9 +3,13 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { App } from './App';
+import { DEFAULT_USER_PREFERENCES } from '../shared/preferences';
+import type { ArticleReadFilter, ReaderFilter } from './useReader';
 
 vi.mock('./api', async (importOriginal) => ({
   ...await importOriginal<typeof import('./api')>(),
+  getUserPreferences: vi.fn(async () => ({ preferences: null })),
+  saveUserPreferences: vi.fn(async (patch) => ({ preferences: { ...DEFAULT_USER_PREFERENCES, ...patch } })),
   getSession: vi.fn(async () => ({
     authenticated: true,
     mode: 'development',
@@ -30,36 +34,48 @@ vi.mock('./performance', () => ({
   startSelectionUpdate: vi.fn(),
 }));
 
-vi.mock('./useReader', () => ({
-  useReader: () => ({
+vi.mock('./useReader', async () => {
+  const { useState } = await import('react');
+  return { useReader: (_userId?: string, defaultReadFilter: ArticleReadFilter = 'all') => {
+    const [filter, setFilter] = useState<ReaderFilter>({ kind: 'inbox' });
+    const [readFilter, setReadFilter] = useState<ArticleReadFilter>(defaultReadFilter);
+    return {
     articles: [],
     bulkUnreadCount: 0,
     clear: vi.fn(),
     coverage: null,
     error: null,
-    filter: { kind: 'inbox' },
+    filter,
     loadMoreArticles: vi.fn(),
     markAllRead: vi.fn(),
     markReadJobs: [],
     navigateSelection: vi.fn(),
     pendingMutations: 0,
     query: '',
-    readFilter: 'all',
+    readFilter,
     retryMarkReadJob: vi.fn(),
     searchCoverage: 'complete',
     selectArticle: vi.fn(),
     selectedArticle: null,
-    setFilter: vi.fn(),
+    setFilter,
     setQuery: vi.fn(),
-    setReadFilter: vi.fn(),
-    snapshot: null,
+    setReadFilter,
+    snapshot: {
+      generatedAt: '2026-10-10T00:00:00Z', source: 'fixture', articles: [],
+      folders: [{ id: 'folder-1', title: 'News', unreadCount: 1 }],
+      subscriptions: [
+        { id: 'feed-1', title: 'First feed', folderIds: ['folder-1'], unreadCount: 1, url: 'https://example.test/feed', siteUrl: 'https://example.test', iconUrl: null },
+        { id: 'feed-2', title: 'Second feed', folderIds: ['folder-1'], unreadCount: 0, url: 'https://example.test/feed2', siteUrl: 'https://example.test', iconUrl: null },
+      ],
+    },
     status: 'idle',
     synchronize: vi.fn(),
     toggleRead: vi.fn(),
     toggleStarred: vi.fn(),
     totalArticles: 0,
-  }),
-}));
+    };
+  } };
+});
 
 class TestResizeObserver implements ResizeObserver {
   observe() {}
@@ -118,6 +134,52 @@ describe('reading preferences', () => {
     expect(localStorage.getItem('chadashot.readingFont')).toBe('sans-serif');
     expect(screen.getAllByText('אבג · Reading should feel calm and clear.')).toHaveLength(2);
     expect(screen.getAllByText('אבג · Reading should feel calm and clear.')[1]).toHaveAttribute('data-font', 'sans-serif');
+  });
+
+  it('uses the global default across feeds, folders, collections, and returning from Inbox', async () => {
+    render(<App />);
+    await openPreferences();
+    expect(screen.getByRole('radio', { name: /^All items/ })).toBeChecked();
+    fireEvent.click(screen.getByRole('radio', { name: /^Unread items only/ }));
+    expect(localStorage.getItem('chadashot.defaultArticleView')).toBe('unread');
+    fireEvent.click(screen.getByRole('button', { name: 'Close preferences' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Expand News feeds' }));
+    fireEvent.click(screen.getByRole('button', { name: /First feed/ }));
+    expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByRole('button', { name: 'All' }));
+    fireEvent.click(screen.getByRole('button', { name: /Second feed/ }));
+    expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getByRole('button', { name: /View News folder/ }));
+    expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getAllByRole('button', { name: /Inbox/ })[0]);
+    expect(screen.queryByRole('button', { name: 'Read' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'All articles' }));
+    expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
+    await openPreferences();
+    fireEvent.click(screen.getByRole('radio', { name: /^All items/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Close preferences' }));
+    expect(screen.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'true');
+    fireEvent.click(screen.getAllByRole('button', { name: 'Starred' })[0]);
+    expect(screen.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('restores the default view and tolerates invalid or unavailable storage', async () => {
+    localStorage.setItem('chadashot.defaultArticleView', 'unread');
+    const view = render(<App />);
+    await openPreferences();
+    expect(screen.getByRole('radio', { name: /^Unread items only/ })).toBeChecked();
+    view.unmount();
+    localStorage.setItem('chadashot.defaultArticleView', 'read');
+    const fallback = render(<App />);
+    await openPreferences();
+    expect(screen.getByRole('radio', { name: /^All items/ })).toBeChecked();
+    fallback.unmount();
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('blocked'); });
+    render(<App />);
+    await openPreferences();
+    fireEvent.click(screen.getByRole('radio', { name: /^Unread items only/ }));
+    expect(screen.getByRole('radio', { name: /^Unread items only/ })).toBeChecked();
   });
 
   it('restores a saved choice and falls back from an invalid saved value', async () => {

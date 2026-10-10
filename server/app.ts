@@ -18,6 +18,7 @@ import { deleteIntegration, hasIntegration, loadBirchfeed, loadBirchfeedWithGene
 import { ReaderHighlightDeliveryError, ReadwiseClient, type ReaderToolSessionFactory } from './integrations/readwise.js';
 import { AppLogger, readAppLogs, readLogExport, requestLogger } from './logging.js';
 import { ReaderApi, ReaderCacheUnavailableError, ReaderCursorError } from './reader-api.js';
+import { loadPreferences, preferencesPatchSchema, savePreferences } from './preferences.js';
 import { runBackgroundReaderPrune } from './reader-pruning-runner.js';
 import {
   readReaderStorageMetrics,
@@ -560,6 +561,18 @@ export function createApp(config: AppConfig, dependencies: {
       },
       readwise: { configured: hasIntegration(database, 'readwise') },
     });
+  });
+
+  app.get('/api/settings/preferences', requireUser, (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ preferences: loadPreferences(database, (res.locals.user as { id: string }).id) });
+  });
+
+  app.put('/api/settings/preferences', requireUser, (req, res) => {
+    const parsed = preferencesPatchSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: 'Invalid preferences' });
+    res.setHeader('Cache-Control', 'no-store');
+    return res.json({ preferences: savePreferences(database, (res.locals.user as { id: string }).id, parsed.data as Partial<import('../shared/preferences.js').UserPreferences>) });
   });
 
   app.put('/api/settings/rss', requireUser, async (req, res) => {
