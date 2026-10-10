@@ -10,7 +10,7 @@ describe('database migrations', () => {
     runMigrations(database);
     runMigrations(database);
 
-    expect(currentSchemaVersion(database)).toEqual({ version: 11 });
+    expect(currentSchemaVersion(database)).toEqual({ version: 12 });
     expect(database.prepare('SELECT version, name FROM schema_migrations ORDER BY version').all()).toEqual([
       { version: 1, name: 'initial_schema' },
       { version: 2, name: 'passkey_management_and_recovery' },
@@ -23,6 +23,7 @@ describe('database migrations', () => {
       { version: 9, name: 'reader_highlight_delivery' },
       { version: 10, name: 'bounded_reader_cache_generations' },
       { version: 11, name: 'account_preferences' },
+      { version: 12, name: 'article_thumbnails' },
     ]);
     expect(database.prepare("PRAGMA table_info('passkey_credentials')").all()).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'name' })]),
@@ -79,7 +80,7 @@ describe('database migrations', () => {
     runMigrations(database);
 
     expect(database.prepare('SELECT id, display_name FROM users').get()).toEqual({ id: 'user-1', display_name: 'Paul' });
-    expect(currentSchemaVersion(database)).toEqual({ version: 11 });
+    expect(currentSchemaVersion(database)).toEqual({ version: 12 });
   });
 
   it('repairs a database where the paginated migration was recorded without its navigation table', () => {
@@ -95,7 +96,7 @@ describe('database migrations', () => {
 
     expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reader_navigation_activity'").get())
       .toEqual({ name: 'reader_navigation_activity' });
-    expect(currentSchemaVersion(database)).toEqual({ version: 11 });
+    expect(currentSchemaVersion(database)).toEqual({ version: 12 });
   });
 
   it('preserves every mark-read job and target while removing the physical generation dependency', () => {

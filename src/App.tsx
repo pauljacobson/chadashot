@@ -4,6 +4,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { type CSSProperties, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { AccountSecurityState, AppLogLevel, AppLogResult, Article, IntegrationStatus, SavedHighlight, SessionState, Subscription } from '../shared/reader';
 import type { DefaultStartPage } from '../shared/preferences';
+import { resolveThumbnailUrl } from '../shared/thumbnail-url';
 import {
   appLogExportUrl,
   connectBirchfeed,
@@ -504,6 +505,24 @@ function SubscribePanel({ onClose, onSubscribed }: { onClose: () => void; onSubs
   );
 }
 
+function ArticleListPreview({ article }: { article: Article }) {
+  const source = resolveThumbnailUrl(article.thumbnailUrl, article.canonicalUrl);
+  const [failedSource, setFailedSource] = useState<string | null>(null);
+  return (
+    <div className="article-preview">
+      <div className="article-preview-text">
+        <div className="article-meta"><strong>{article.source}</strong><span>· {article.readingMinutes} min</span><time>{formatAge(article.publishedAt)}</time></div>
+        <h2>{article.title}</h2>
+        <p>{article.summary}</p>
+      </div>
+      {source && source !== failedSource && (
+        <img className="article-thumbnail" src={source} alt="" aria-hidden="true" width={100} height={76}
+          loading="lazy" decoding="async" referrerPolicy="no-referrer" onError={() => setFailedSource(source)} />
+      )}
+    </div>
+  );
+}
+
 export function ArticleList({
   listKey,
   title,
@@ -669,9 +688,7 @@ export function ArticleList({
                   style={{ transform: `translateY(${virtualRow.start}px)` }}
                 >
                   <button className="article-main-action" aria-current={selectedId === article.id ? 'true' : undefined} tabIndex={selectedId === article.id ? 0 : -1} onClick={() => onSelect(article)}>
-                    <div className="article-meta"><strong>{article.source}</strong><span>· {article.readingMinutes} min</span><time>{formatAge(article.publishedAt)}</time></div>
-                    <h2>{article.title}</h2>
-                    <p>{article.summary}</p>
+                    <ArticleListPreview article={article} />
                   </button>
                   <button className="row-read" title={article.read ? 'Mark unread' : 'Mark read'} aria-label={article.read ? 'Mark article unread' : 'Mark article read'} aria-pressed={article.read} onClick={() => onToggleRead(article)}>
                     {article.read ? '○' : '●'}

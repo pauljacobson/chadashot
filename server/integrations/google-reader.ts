@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { extractArticleThumbnail } from '../article-thumbnail.js';
 import { z } from 'zod';
 import type { Article, ArticleMutation, Folder, ReaderSnapshot, Subscription } from '../../shared/reader.js';
 import type { ReaderPerformanceRun, ReaderPhase } from '../reader-performance.js';
@@ -499,6 +500,7 @@ export class GoogleReaderClient {
           publishedAt: publishedAt(item),
           readingMinutes: Math.max(1, Math.ceil(text.split(/\s+/).filter(Boolean).length / 220)),
           summary: text.slice(0, 240),
+          thumbnailUrl: extractArticleThumbnail(html, item.canonical?.[0]?.href ?? item.alternate?.[0]?.href ?? item.origin.htmlUrl ?? '#'),
           contentHtml: html,
           read: !unreadItemIds.has(comparableId),
           starred: starredItemIds.has(comparableId),
@@ -587,6 +589,7 @@ export class GoogleReaderClient {
           publishedAt: publishedAt(item),
           readingMinutes: Math.max(1, Math.ceil(text.split(/\s+/).filter(Boolean).length / 220)),
           summary: text.slice(0, 240),
+          thumbnailUrl: extractArticleThumbnail(html, item.canonical?.[0]?.href ?? item.alternate?.[0]?.href ?? item.origin.htmlUrl ?? '#'),
           contentHtml: html,
           read: !context.unreadItemIds.has(comparableId),
           starred: context.starredItemIds.has(comparableId),
@@ -640,6 +643,7 @@ export class GoogleReaderClient {
         publishedAt: publishedAt(item),
         readingMinutes: Math.max(1, Math.ceil(text.split(/\s+/).filter(Boolean).length / 220)),
         summary: text.slice(0, 240),
+        thumbnailUrl: extractArticleThumbnail(html, item.canonical?.[0]?.href ?? item.alternate?.[0]?.href ?? item.origin.htmlUrl ?? '#'),
         contentHtml: html,
         // Birchfeed does not expose read/starred tags on sampled item bodies.
         // The independent authoritative state scan corrects these defaults.

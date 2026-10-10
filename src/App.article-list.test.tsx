@@ -92,6 +92,45 @@ describe('virtual article list', () => {
     resizeObservers.clear();
   });
 
+  it('renders a lazy right-hand thumbnail and preserves article and state actions', async () => {
+    const articles = [{ ...article(0), thumbnailUrl: 'https://example.test/forest.jpg' }, article(1)];
+    const actions = props(articles);
+    const { container } = render(<ArticleList {...actions} />);
+    const image = await waitFor(() => {
+      const result = container.querySelector('.article-thumbnail');
+      expect(result).toBeInTheDocument();
+      return result!;
+    });
+    expect(image).toHaveAttribute('loading', 'lazy');
+    expect(image).toHaveAttribute('alt', '');
+    expect(image).toHaveAttribute('referrerpolicy', 'no-referrer');
+    expect(container.querySelectorAll('.article-thumbnail')).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: /Article 0/ }));
+    expect(actions.onSelect).toHaveBeenCalledWith(articles[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Mark article read' })[0]!);
+    expect(actions.onToggleRead).toHaveBeenCalledWith(articles[0]);
+    expect(actions.onSelect).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getAllByRole('button', { name: 'Star article' })[0]!);
+    expect(actions.onToggleStar).toHaveBeenCalledWith(articles[0]);
+  });
+
+  it('removes broken thumbnails and tries a new URL when the article image changes', async () => {
+    const initial = { ...article(0), thumbnailUrl: 'https://example.test/broken.jpg' };
+    const { container, rerender } = render(<ArticleList {...props([initial])} />);
+    await waitFor(() => expect(container.querySelector('.article-thumbnail')).toBeInTheDocument());
+    fireEvent.error(container.querySelector('.article-thumbnail')!);
+    expect(container.querySelector('.article-thumbnail')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Article 0/ })).toBeInTheDocument();
+    rerender(<ArticleList {...props([{ ...initial, thumbnailUrl: 'https://example.test/new.jpg' }])} />);
+    expect(container.querySelector('.article-thumbnail')).toHaveAttribute('src', 'https://example.test/new.jpg');
+  });
+
+  it('does not render unsafe image metadata', async () => {
+    const { container } = render(<ArticleList {...props([{ ...article(0), thumbnailUrl: 'javascript:alert(1)' }])} />);
+    await screen.findByRole('button', { name: /Article 0/ });
+    expect(container.querySelector('.article-thumbnail')).not.toBeInTheDocument();
+  });
+
   it('keeps a 20,000-result list below the 200-mounted-row budget with useful list semantics', async () => {
     const articles = Array.from({ length: 20_000 }, (_, index) => article(index));
     const { container } = render(<ArticleList {...props(articles)} total={20_000} />);
