@@ -277,6 +277,19 @@ describe('offline reader storage', () => {
     ]));
   });
 
+  it('persists loaded bulk targets reached before metadata backfill without marking unseen items', async () => {
+    await saveReaderNavigation('user-1', navigation());
+    await saveReaderArticlePage('user-1', page({ nextCursor: 'next', total: 2 }), true);
+    const reached = { ...snapshot.articles[0]!, id: 'article-2', folderIds: [] };
+    await applyLocalReadStateToReaderCache('account-1', ['article-2'], true, [reached]);
+    const cached = await loadCachedReader('user-1');
+    expect(cached!.snapshot.articles.map(({ id, read }) => ({ id, read })).sort((a, b) => a.id.localeCompare(b.id)))
+      .toEqual([{ id: 'article-1', read: false }, { id: 'article-2', read: true }]);
+    expect(cached!.snapshot.counts!.inbox).toBe(1);
+    expect(cached!.coverage.loaded).toBe(2);
+    expect(cached!.coverage.complete).toBe(false);
+  });
+
   it('loads bodies on demand and rejects a cached body from an older body version', async () => {
     await saveReaderNavigation('user-1', navigation());
     await saveReaderArticlePage('user-1', page(), true);

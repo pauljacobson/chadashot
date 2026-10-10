@@ -1,7 +1,7 @@
 import DOMPurify from 'dompurify';
 import { startAuthentication, startRegistration } from '@simplewebauthn/browser';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { type CSSProperties, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { AccountSecurityState, AppLogLevel, AppLogResult, Article, IntegrationStatus, SavedHighlight, SessionState, Subscription } from '../shared/reader';
 import {
   appLogExportUrl,
@@ -477,6 +477,7 @@ export function ArticleList({
   readFilter,
   showReadFilter = true,
   markAllCount = 0,
+  markAllScope = 'all',
   selectedId,
   onSelect,
   onToggleRead,
@@ -493,6 +494,7 @@ export function ArticleList({
   readFilter: ArticleReadFilter;
   showReadFilter?: boolean;
   markAllCount?: number;
+  markAllScope?: 'all' | 'loaded';
   selectedId: string | null;
   onSelect: (article: Article) => void;
   onToggleRead: (article: Article) => void;
@@ -503,8 +505,13 @@ export function ArticleList({
   total?: number;
   totalStatus?: ReaderCountStatus;
 }) {
-  const [confirmingMarkAll, setConfirmingMarkAll] = useState(false);
+  const [markReadConfirmation, setMarkReadConfirmation] = useState<{
+    count: number;
+    scope: 'all' | 'loaded';
+    confirm: () => Promise<number>;
+  } | null>(null);
   const [markingAll, setMarkingAll] = useState(false);
+  const markAllStatusId = useId();
   const listRef = useRef<HTMLElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const listHasFocus = useRef(false);
@@ -554,11 +561,11 @@ export function ArticleList({
   }, [articles.length, onLoadMore, total, virtualRows]);
 
   async function confirmMarkAllRead() {
-    if (!onMarkAllRead || markingAll) return;
+    if (!markReadConfirmation || markingAll) return;
     setMarkingAll(true);
     try {
-      await onMarkAllRead();
-      setConfirmingMarkAll(false);
+      await markReadConfirmation.confirm();
+      setMarkReadConfirmation(null);
     } finally {
       setMarkingAll(false);
     }
@@ -583,15 +590,21 @@ export function ArticleList({
           </div>
         )}
         {onMarkAllRead && unreadCount > 0 && (
-          <button className="mark-all-button" onClick={() => setConfirmingMarkAll(true)}>✓ Mark all read</button>
+          <button className="mark-all-button" aria-describedby={markAllScope === 'loaded' ? markAllStatusId : undefined} onClick={() => {
+            // Capture the action and its targets before synchronization can widen the scope.
+            setMarkReadConfirmation({ count: unreadCount, scope: markAllScope, confirm: onMarkAllRead });
+          }}>✓ {markAllScope === 'loaded' ? 'Mark loaded read' : 'Mark all read'}</button>
         )}
       </header>
-      {confirmingMarkAll && unreadCount > 0 && (
-        <div className="mark-all-confirmation" role="alertdialog" aria-label="Confirm mark all read">
-          <span>Mark {unreadCount} unread {unreadCount === 1 ? 'item' : 'items'} in this view as read?</span>
+      {onMarkAllRead && unreadCount > 0 && markAllScope === 'loaded' && (
+        <p id={markAllStatusId} className="mark-all-status">Only items loaded on this device. Items loaded later stay unread.</p>
+      )}
+      {markReadConfirmation && (
+        <div className="mark-all-confirmation" role="alertdialog" aria-label={markReadConfirmation.scope === 'loaded' ? 'Confirm mark loaded read' : 'Confirm mark all read'}>
+          <span>Mark {markReadConfirmation.count} {markReadConfirmation.scope === 'loaded' ? 'loaded unread' : 'unread'} {markReadConfirmation.count === 1 ? 'item' : 'items'} in this view as read?</span>
           <div>
-            <button disabled={markingAll} onClick={() => setConfirmingMarkAll(false)}>Cancel</button>
-            <button className="primary-action" disabled={markingAll} onClick={() => void confirmMarkAllRead()}>{markingAll ? 'Marking…' : 'Mark all read'}</button>
+            <button disabled={markingAll} onClick={() => setMarkReadConfirmation(null)}>Cancel</button>
+            <button className="primary-action" disabled={markingAll} onClick={() => void confirmMarkAllRead()}>{markingAll ? 'Marking…' : markReadConfirmation.scope === 'loaded' ? 'Mark loaded read' : 'Mark all read'}</button>
           </div>
         </div>
       )}
@@ -1794,6 +1807,7 @@ export function App() {
   }
 
   const activeFilter = reader.filter;
+  const markReadAction = reader.coverage?.complete ? reader.markAllRead : reader.markLoadedRead;
   const title = activeFilter.kind === 'folder'
     ? reader.snapshot?.folders.find((folder) => folder.id === activeFilter.id)?.title ?? 'Folder'
     : activeFilter.kind === 'feed'
@@ -1935,15 +1949,16 @@ export function App() {
             totalStatus={reader.totalCountStatus}
             readFilter={reader.readFilter}
             showReadFilter={activeFilter.kind !== 'inbox'}
-            markAllCount={reader.readFilter !== 'read' && reader.coverage?.complete ? reader.bulkUnreadCount : 0}
+            markAllCount={reader.readFilter !== 'read' ? reader.coverage?.complete ? reader.bulkUnreadCount : reader.loadedUnreadCount : 0}
+            markAllScope={reader.coverage?.complete ? 'all' : 'loaded'}
             selectedId={reader.selectedArticle?.id ?? null}
             onSelect={chooseArticle}
             onToggleRead={(article) => void reader.toggleRead(article)}
             onToggleStar={(article) => void reader.toggleStarred(article)}
             onReadFilterChange={reader.setReadFilter}
             onLoadMore={() => void reader.loadMoreArticles()}
-            onMarkAllRead={reader.readFilter !== 'read' && reader.coverage?.complete ? async () => {
-              const count = await reader.markAllRead();
+            onMarkAllRead={reader.readFilter !== 'read' ? async () => {
+              const count = await markReadAction();
               setNotice(`${count} ${count === 1 ? 'item' : 'items'} accepted for marking as read`);
               return count;
             } : undefined}

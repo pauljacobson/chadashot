@@ -603,13 +603,14 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
 .list-header {
   min-height: 66px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 12px;
-  padding: 0 16px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--border);
 }
 .list-header h1 { margin: 0; font-size: 18px; letter-spacing: -.02em; }
-.list-heading { min-width: 0; flex: 1; display: flex; align-items: center; }
+.list-heading { min-width: 0; flex: 1 1 140px; display: flex; align-items: center; }
 .list-heading h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list-heading > span {
   min-width: 24px;
@@ -657,9 +658,18 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   font-size: 11px;
   cursor: pointer;
 }
-.mark-all-button:hover { border-color: var(--accent); color: var(--accent); }
+.mark-all-button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.mark-all-button:disabled { opacity: .55; cursor: default; }
+.mark-all-status {
+  margin: 0;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+}
 .mark-all-confirmation {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
@@ -668,7 +678,7 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   color: var(--text);
   font-size: 12px;
 }
-.mark-all-confirmation > span { flex: 1; }
+.mark-all-confirmation > span { flex: 1 1 180px; }
 .mark-all-confirmation > div { display: flex; gap: 6px; }
 .mark-all-confirmation button {
   padding: 6px 8px;
@@ -1266,6 +1276,9 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   .workspace { display: block; }
   .sidebar, .panel-resizer { display: none; }
   .article-list, .reader-pane { height: 100%; border-right: 0; }
+  .mark-all-button,
+  .mark-all-confirmation button,
+  .article-read-filter button { min-height: 44px; }
   .reader-toolbar {
     min-height: 0;
     display: grid;
@@ -1318,7 +1331,7 @@ body.panel-resizing * { cursor: col-resize !important; user-select: none !import
   .article-list, .reader-pane { height: calc(100dvh - 126px); border-right: 0; }
   .list-header { min-height: 50px; flex-wrap: wrap; padding-block: 8px; }
   .article-read-filter { order: 3; width: 100%; }
-  .article-read-filter button { flex: 1; min-height: 34px; }
+  .article-read-filter button { flex: 1; min-height: 44px; }
   .article-main-action { min-height: 112px; padding: 15px 42px 14px 17px; }
   .reader-toolbar { min-height: 0; gap: 6px 8px; padding: 6px 8px; overflow: visible; }
   .reader-toolbar button, .toolbar-link { min-width: 44px; min-height: 44px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; font-size: 12px; }

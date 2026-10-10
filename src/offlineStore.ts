@@ -825,18 +825,38 @@ export async function applyLocalMutationToReaderCache(
   notifyReaderUpdate(accountKey);
 }
 
-export async function applyLocalReadStateToReaderCache(accountKey: string, articleIds: string[], read: boolean) {
+export async function applyLocalReadStateToReaderCache(accountKey: string, articleIds: string[], read: boolean, fallbackArticles: Article[] = []) {
   if (articleIds.length === 0) return;
   const db = await database();
-  const transaction = db.transaction(['readerArticles', 'readerNavigation'], 'readwrite', { durability: 'strict' });
+  const transaction = db.transaction(['readerArticles', 'readerNavigation', 'readerSync'], 'readwrite', { durability: 'strict' });
   const savedAt = new Date().toISOString();
+  const fallbackById = new Map(fallbackArticles.map((article) => [article.id, article]));
+  let added = 0;
   const navigationRecord = await transaction.objectStore('readerNavigation').get(accountKey);
   let navigation = navigationRecord?.navigation;
   for (const articleId of articleIds) {
     const key = readerRecordKey(accountKey, articleId);
-    const article = await transaction.objectStore('readerArticles').get(key);
+    const stored = await transaction.objectStore('readerArticles').get(key);
+    const fallback = fallbackById.get(articleId);
+    // Server list pages can expose items before background backfill reaches them.
+    const article = stored ?? (fallback ? {
+      id: fallback.id,
+      feedId: fallback.feedId,
+      folderIds: fallback.folderIds,
+      title: fallback.title,
+      author: fallback.author,
+      source: fallback.source,
+      canonicalUrl: fallback.canonicalUrl,
+      publishedAt: fallback.publishedAt,
+      readingMinutes: fallback.readingMinutes,
+      summary: fallback.summary,
+      read: fallback.read,
+      starred: fallback.starred,
+      key, accountKey, savedAt,
+    } : undefined);
     if (!article || article.read === read) continue;
     await transaction.objectStore('readerArticles').put({ ...article, read, savedAt });
+    if (!stored) added += 1;
     if (navigation) {
       navigation = applyMutationToNavigation(navigation, article, {
         articleId,
@@ -847,6 +867,10 @@ export async function applyLocalReadStateToReaderCache(accountKey: string, artic
   }
   if (navigationRecord && navigation) {
     await transaction.objectStore('readerNavigation').put({ ...navigationRecord, navigation, savedAt });
+  }
+  if (added > 0) {
+    const sync = await transaction.objectStore('readerSync').get(accountKey);
+    if (sync) await transaction.objectStore('readerSync').put({ ...sync, loaded: Math.min(sync.total, sync.loaded + added), savedAt });
   }
   await transaction.done;
   notifyReaderUpdate(accountKey);
