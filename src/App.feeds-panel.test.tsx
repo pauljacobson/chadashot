@@ -38,7 +38,7 @@ const reader = vi.hoisted(() => ({
   clear: vi.fn(),
   coverage: null,
   error: null,
-  filter: { kind: 'inbox' as const },
+  filter: { kind: 'all' as const },
   loadMoreArticles: vi.fn(),
   markAllRead: vi.fn(),
   markLoadedRead: vi.fn(),
@@ -122,6 +122,38 @@ function createResponsiveNavigation(initiallyCompact: boolean) {
 }
 
 describe('responsive feeds navigation', () => {
+  it('opens Latest Edition from the main items, returns from an article, and retains All articles', async () => {
+    createResponsiveNavigation(false);
+    const recent = { ...article, publishedAt: new Date(Date.now() - 3_600_000).toISOString() };
+    Reflect.set(reader, 'articles', [recent]);
+    Reflect.set(reader, 'selectedArticle', recent);
+    Reflect.set(reader, 'totalArticles', 1);
+    Reflect.set(reader, 'snapshot', { generatedAt: new Date().toISOString(), source: 'fixture', folders: [], subscriptions: [], articles: [recent] });
+    render(<App />);
+    const navigation = await screen.findByRole('navigation', { name: 'Reader navigation' });
+    fireEvent.click(within(navigation).getByRole('button', { name: 'Latest Edition' }));
+    expect(reader.setFilter).toHaveBeenLastCalledWith({ kind: 'all' });
+    expect(reader.setReadFilter).toHaveBeenLastCalledWith('all');
+    expect(screen.getByRole('heading', { name: 'Latest Edition', level: 1 })).toBeInTheDocument();
+    expect(within(navigation).getByRole('button', { name: /^All articles/ })).not.toHaveClass('active');
+    fireEvent.click(screen.getByRole('button', { name: 'Read A selected article' }));
+    expect(reader.selectArticle).toHaveBeenLastCalledWith(recent.id);
+    fireEvent.click(screen.getByRole('button', { name: 'Close article and return to Latest Edition' }));
+    expect(screen.getByRole('heading', { name: 'Latest Edition', level: 1 })).toBeInTheDocument();
+    fireEvent.click(within(navigation).getByRole('button', { name: /^All articles/ }));
+    expect(screen.queryByRole('heading', { name: 'Latest Edition', level: 1 })).not.toBeInTheDocument();
+  });
+
+  it('makes Latest Edition available from the hamburger menu on tablet layouts', async () => {
+    createResponsiveNavigation(true);
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Open feeds panel' }));
+    const dialog = screen.getByRole('dialog', { name: 'Feeds' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Latest Edition' }));
+    expect(screen.queryByRole('dialog', { name: 'Feeds' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Latest Edition', level: 1 })).toBeInTheDocument();
+  });
+
   beforeEach(() => {
     reader.setFilter.mockClear();
     reader.setQuery.mockClear();
@@ -133,7 +165,7 @@ describe('responsive feeds navigation', () => {
     Reflect.set(reader, 'bulkUnreadCount', 0);
     Reflect.set(reader, 'loadedUnreadCount', 0);
     Reflect.set(reader, 'articles', []);
-    Reflect.set(reader, 'filter', { kind: 'inbox' });
+    Reflect.set(reader, 'filter', { kind: 'all' });
     Reflect.set(reader, 'coverage', null);
     Reflect.set(reader, 'query', '');
     Reflect.set(reader, 'readFilter', 'all');
@@ -178,7 +210,7 @@ describe('responsive feeds navigation', () => {
     expect(trigger).toHaveFocus();
   });
 
-  it('shows one full Inbox total while device metadata coverage is partial', async () => {
+  it('shows global unread counts separately from the All articles total with partial device coverage', async () => {
     createResponsiveNavigation(false);
     Reflect.set(reader, 'coverage', {
       loaded: 1_600,
@@ -196,12 +228,26 @@ describe('responsive feeds navigation', () => {
       folders: [],
       subscriptions: [],
     });
-    Reflect.set(reader, 'totalArticles', 18_916);
+    Reflect.set(reader, 'totalArticles', 29_402);
 
     render(<App />);
 
     expect(await screen.findAllByText('18916')).toHaveLength(2);
+    const navigation = screen.getByRole('navigation', { name: 'Reader navigation' });
+    const allArticles = within(navigation).getByRole('button', { name: /^All articles/ });
+    expect(allArticles).toHaveClass('active');
+    expect(within(allArticles).getByLabelText('18916 unread articles.')).toHaveTextContent('18916');
+    expect(within(navigation).queryByRole('button', { name: /Inbox/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'All articles' })).toBeInTheDocument();
+    expect(screen.getByText('29402')).toBeInTheDocument();
     expect(screen.queryByText('1192')).not.toBeInTheDocument();
+
+    fireEvent.click(within(navigation).getByRole('button', { name: 'Latest Edition' }));
+    expect(within(allArticles).getByLabelText('18916 unread articles.')).toHaveTextContent('18916');
+    expect(allArticles).not.toHaveClass('active');
+    fireEvent.click(allArticles);
+    expect(allArticles).toHaveClass('active');
+    expect(reader.setFilter).toHaveBeenLastCalledWith({ kind: 'all' });
   });
 
   it.each([true, false])('offers loaded-item marking during synchronization (compact: %s)', async (compact) => {
@@ -274,8 +320,44 @@ describe('responsive feeds navigation', () => {
 
     render(<App />);
 
-    expect(await screen.findAllByText('≥2')).toHaveLength(2);
-    expect(screen.getAllByTitle(/full count is not available offline/i)).toHaveLength(2);
+    expect(await screen.findAllByText('≥2')).toHaveLength(3);
+    expect(screen.getAllByTitle(/full count is not available offline/i)).toHaveLength(3);
+  });
+
+  it('uses the same All articles unread count in the mobile bar and hamburger menu', async () => {
+    createResponsiveNavigation(true);
+    Reflect.set(reader, 'snapshot', {
+      generatedAt: new Date().toISOString(), source: 'fixture',
+      counts: { all: 7, inbox: 3, starred: 0, uncategorized: 7 },
+      articles: [article], folders: [], subscriptions: [],
+    });
+    Reflect.set(reader, 'filter', { kind: 'starred' });
+    render(<App />);
+    const navigation = await screen.findByRole('navigation', { name: 'Primary navigation' });
+    const allArticles = within(navigation).getByRole('button', { name: /^All articles/ });
+    expect(within(allArticles).getByLabelText('3 unread articles.')).toHaveTextContent('3');
+    expect(within(navigation).queryByRole('button', { name: /Inbox/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Open feeds panel' }));
+    const dialog = screen.getByRole('dialog', { name: 'Feeds' });
+    const menuEntry = within(dialog).getByRole('button', { name: /^All articles/ });
+    expect(within(menuEntry).getByLabelText('3 unread articles.')).toHaveTextContent('3');
+    expect(within(dialog).queryByRole('button', { name: /Inbox/ })).not.toBeInTheDocument();
+    fireEvent.click(menuEntry);
+    expect(reader.setFilter).toHaveBeenLastCalledWith({ kind: 'all' });
+    expect(screen.queryByRole('dialog', { name: 'Feeds' })).not.toBeInTheDocument();
+    expect(allArticles).toHaveClass('active');
+  });
+
+  it('keeps unread-only and read-only filters available within All articles', async () => {
+    createResponsiveNavigation(false);
+    render(<App />);
+    await screen.findByRole('heading', { name: 'All articles' });
+    fireEvent.click(screen.getByRole('button', { name: 'Unread' }));
+    expect(reader.setReadFilter).toHaveBeenLastCalledWith('unread');
+    fireEvent.click(screen.getByRole('button', { name: 'Read' }));
+    expect(reader.setReadFilter).toHaveBeenLastCalledWith('read');
+    fireEvent.click(screen.getByRole('button', { name: 'All' }));
+    expect(reader.setReadFilter).toHaveBeenLastCalledWith('all');
   });
 
   it('traps focus, closes with Escape, and restores focus to the active trigger', async () => {
@@ -362,7 +444,7 @@ describe('responsive feeds navigation', () => {
     expect(screen.getByRole('button', { name: 'Expand navigation sidebar' })).toHaveAttribute('aria-expanded', 'false');
   });
 
-  it('uses one accessible brand control to clear search and return to the Inbox list', async () => {
+  it('uses one accessible brand control to clear search and return to the All articles list', async () => {
     createResponsiveNavigation(false);
     Reflect.set(reader, 'articles', [article]);
     Reflect.set(reader, 'filter', { kind: 'starred' });
@@ -374,7 +456,7 @@ describe('responsive feeds navigation', () => {
     fireEvent.click(await screen.findByRole('button', { name: /A selected article/ }));
     expect(screen.getByRole('heading', { name: 'A selected article' })).toBeInTheDocument();
 
-    const home = screen.getByRole('button', { name: 'Go to Inbox' });
+    const home = screen.getByRole('button', { name: 'Go to All articles' });
     expect(home).toHaveTextContent('ח');
     expect(home).toHaveTextContent('Chadashot');
     expect(home.tagName).toBe('BUTTON');
@@ -382,8 +464,8 @@ describe('responsive feeds navigation', () => {
 
     expect(reader.setReadFilter).toHaveBeenLastCalledWith('all');
     expect(reader.setQuery).toHaveBeenLastCalledWith('');
-    expect(reader.setFilter).toHaveBeenLastCalledWith({ kind: 'inbox' });
-    expect(screen.getByRole('list', { name: 'Inbox results' })).toBeInTheDocument();
+    expect(reader.setFilter).toHaveBeenLastCalledWith({ kind: 'all' });
+    expect(screen.getByRole('list', { name: 'All articles results' })).toBeInTheDocument();
     expect(screen.getByRole('searchbox')).toHaveValue('');
     expect(reader.toggleRead).not.toHaveBeenCalled();
 
@@ -398,10 +480,10 @@ describe('responsive feeds navigation', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Open feeds panel' }));
     expect(await screen.findByRole('dialog', { name: 'Feeds' })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Go to Inbox' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Go to All articles' }));
 
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Feeds' })).not.toBeInTheDocument());
     expect(reader.setQuery).toHaveBeenLastCalledWith('');
-    expect(reader.setFilter).toHaveBeenLastCalledWith({ kind: 'inbox' });
+    expect(reader.setFilter).toHaveBeenLastCalledWith({ kind: 'all' });
   });
 });

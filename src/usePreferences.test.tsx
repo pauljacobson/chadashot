@@ -28,7 +28,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.clearAllMocks(); localStor
 
 describe('preference synchronization', () => {
   it('loads account choices on another device and refreshes when the app regains focus', async () => {
-    server = { ...DEFAULT_USER_PREFERENCES, defaultArticleView: 'unread', accentColor: 'blue', articleTextSize: 130 };
+    server = { ...DEFAULT_USER_PREFERENCES, defaultArticleView: 'unread', accentColor: 'blue', articleTextSize: 130, latestEditionHours: 48 };
     const device = renderHook(() => useTestPreferences());
     await waitFor(() => expect(device.result.current.syncStatus).toBe('synced'));
     expect(device.result.current.preferences).toEqual(server);
@@ -50,7 +50,7 @@ describe('preference synchronization', () => {
   it('retains offline edits across remounts and merges them with other device changes', async () => {
     const online = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false);
     const device = renderHook(() => useTestPreferences());
-    act(() => device.result.current.updatePreferences({ defaultArticleView: 'unread' }));
+    act(() => device.result.current.updatePreferences({ defaultArticleView: 'unread', latestEditionHours: 12 }));
     expect(device.result.current.preferences.defaultArticleView).toBe('unread');
     expect(device.result.current.syncStatus).toBe('pending');
     device.unmount();
@@ -58,8 +58,8 @@ describe('preference synchronization', () => {
     online.mockReturnValue(true);
     const reopened = renderHook(() => useTestPreferences());
     await waitFor(() => expect(reopened.result.current.syncStatus).toBe('synced'));
-    expect(reopened.result.current.preferences).toMatchObject({ defaultArticleView: 'unread', accentColor: 'rose' });
-    expect(saveUserPreferences).toHaveBeenCalledWith({ defaultArticleView: 'unread' }, expect.any(AbortSignal));
+    expect(reopened.result.current.preferences).toMatchObject({ defaultArticleView: 'unread', accentColor: 'rose', latestEditionHours: 12 });
+    expect(saveUserPreferences).toHaveBeenCalledWith({ defaultArticleView: 'unread', latestEditionHours: 12 }, expect.any(AbortSignal));
     expect(localStorage.getItem('chadashot.pendingPreferences.user-1')).toBe('{}');
   });
 

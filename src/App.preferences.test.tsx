@@ -37,7 +37,7 @@ vi.mock('./performance', () => ({
 vi.mock('./useReader', async () => {
   const { useState } = await import('react');
   return { useReader: (_userId?: string, defaultReadFilter: ArticleReadFilter = 'all') => {
-    const [filter, setFilter] = useState<ReaderFilter>({ kind: 'inbox' });
+    const [filter, setFilter] = useState<ReaderFilter>({ kind: 'all' });
     const [readFilter, setReadFilter] = useState<ArticleReadFilter>(defaultReadFilter);
     return {
     articles: [],
@@ -123,6 +123,36 @@ describe('reading preferences', () => {
     vi.unstubAllGlobals();
   });
 
+  it('defaults Latest Edition to 24 hours and persists each supported publication window', async () => {
+    const view = render(<App />);
+    await openPreferences();
+    expect(screen.getByRole('radio', { name: '24 hours' })).toBeChecked();
+    for (const hours of [12, 48]) {
+      fireEvent.click(screen.getByRole('radio', { name: `${hours} hours` }));
+      expect(localStorage.getItem('chadashot.latestEditionHours')).toBe(String(hours));
+    }
+    view.unmount();
+    render(<App />);
+    await openPreferences();
+    expect(screen.getByRole('radio', { name: '48 hours' })).toBeChecked();
+  });
+
+  it('falls back to 24 hours for unsupported saved windows', async () => {
+    localStorage.setItem('chadashot.latestEditionHours', '72');
+    render(<App />);
+    await openPreferences();
+    expect(screen.getByRole('radio', { name: '24 hours' })).toBeChecked();
+  });
+
+  it('keeps Latest Edition preferences usable when storage is blocked', async () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('blocked'); });
+    render(<App />);
+    await openPreferences();
+    fireEvent.click(screen.getByRole('radio', { name: '12 hours' }));
+    expect(screen.getByRole('radio', { name: '12 hours' })).toBeChecked();
+  });
+
   it('applies and persists a keyboard-accessible font choice immediately', async () => {
     render(<App />);
     await openPreferences();
@@ -136,7 +166,7 @@ describe('reading preferences', () => {
     expect(screen.getAllByText('אבג · Reading should feel calm and clear.')[1]).toHaveAttribute('data-font', 'sans-serif');
   });
 
-  it('uses the global default across feeds, folders, collections, and returning from Inbox', async () => {
+  it('uses the global default across feeds, folders, collections, and returning from Latest Edition', async () => {
     render(<App />);
     await openPreferences();
     expect(screen.getByRole('radio', { name: /^All items/ })).toBeChecked();
@@ -151,9 +181,9 @@ describe('reading preferences', () => {
     expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
     fireEvent.click(screen.getByRole('button', { name: /View News folder/ }));
     expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
-    fireEvent.click(screen.getAllByRole('button', { name: /Inbox/ })[0]);
+    fireEvent.click(screen.getAllByRole('button', { name: /Latest Edition/ })[0]);
     expect(screen.queryByRole('button', { name: 'Read' })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'All articles' }));
+    fireEvent.click(screen.getAllByRole('button', { name: /^All articles/ })[0]);
     expect(screen.getByRole('button', { name: 'Unread' })).toHaveAttribute('aria-pressed', 'true');
     await openPreferences();
     fireEvent.click(screen.getByRole('radio', { name: /^All items/ }));

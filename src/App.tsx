@@ -33,6 +33,8 @@ import { type ArticleReadFilter, type ReaderFilter, type SyncStatus, useReader }
 import { readerCountStatus, type ReaderCountStatus } from './readerCounts';
 import { buildFeedGroups, type FeedSortOrder, feedFaviconUrl } from './feedTree';
 import { usePreferences } from './usePreferences';
+import { LatestEdition } from './LatestEdition';
+import { EDITION_WINDOWS, EDITION_WINDOW_KEY, savedEditionHours, type EditionHours } from './editionModel';
 import {
   clearOfflineData,
   loadOfflineSession,
@@ -330,7 +332,8 @@ function FeedTree({ snapshot, filter, unreadOnly, sortOrder, onFilter, onSubscri
 
 function Navigation({
   snapshot,
-  coverage,
+  unreadCount,
+  unreadCountStatus,
   filter,
   onFilter,
   onSettings,
@@ -339,9 +342,12 @@ function Navigation({
   sortOrder,
   onUnreadOnlyChange,
   status,
+  editionActive,
+  onEdition,
 }: {
   snapshot: ReturnType<typeof useReader>['snapshot'];
-  coverage: ReturnType<typeof useReader>['coverage'];
+  unreadCount: number;
+  unreadCountStatus: ReaderCountStatus;
   filter: ReaderFilter;
   onFilter: (filter: ReaderFilter) => void;
   onSettings: () => void;
@@ -350,23 +356,20 @@ function Navigation({
   sortOrder: FeedSortOrder;
   onUnreadOnlyChange: (unreadOnly: boolean) => void;
   status: SyncStatus;
+  editionActive: boolean;
+  onEdition: () => void;
 }) {
-  const hasCompleteCount = Boolean(snapshot?.counts);
-  const unread = snapshot?.counts?.inbox
-    ?? snapshot?.articles.filter((article) => !article.read).length
-    ?? 0;
-  const countStatus = readerCountStatus(hasCompleteCount, coverage, status === 'current');
   return (
     <aside className="sidebar" id="reader-sidebar">
       <nav aria-label="Reader navigation">
         <div className="nav-group">
-          <button className={`nav-item ${filter.kind === 'inbox' ? 'active' : ''}`} onClick={() => onFilter({ kind: 'inbox' })}>
-            <span aria-hidden="true">●</span><span>Inbox</span><ReaderCount value={unread} status={countStatus} className="nav-count" />
+          <button className={`nav-item ${!editionActive && filter.kind === 'all' ? 'active' : ''}`} onClick={() => onFilter({ kind: 'all' })}>
+            <span aria-hidden="true">○</span><span>All articles</span><ReaderCount value={unreadCount} status={unreadCountStatus} unit="unread articles" className="nav-count" />
           </button>
-          <button className={`nav-item ${filter.kind === 'all' ? 'active' : ''}`} onClick={() => onFilter({ kind: 'all' })}>
-            <span aria-hidden="true">○</span><span>All articles</span>
+          <button className={`nav-item ${editionActive ? 'active' : ''}`} aria-current={editionActive ? 'page' : undefined} onClick={onEdition}>
+            <span aria-hidden="true">▤</span><span>Latest Edition</span>
           </button>
-          <button className={`nav-item ${filter.kind === 'starred' ? 'active' : ''}`} onClick={() => onFilter({ kind: 'starred' })}>
+          <button className={`nav-item ${!editionActive && filter.kind === 'starred' ? 'active' : ''}`} onClick={() => onFilter({ kind: 'starred' })}>
             <span aria-hidden="true">☆</span><span>Starred</span>
           </button>
         </div>
@@ -380,13 +383,14 @@ function Navigation({
   );
 }
 
-function ReaderCount({ value, status, className }: { value: number; status: ReaderCountStatus; className?: string }) {
+function ReaderCount({ value, status, className, unit }: { value: number; status: ReaderCountStatus; className?: string; unit?: string }) {
   const partial = status === 'cached-partial';
+  const noun = unit ?? 'items';
   const title = partial
-    ? `At least ${value} items are available in the device cache; the full count is not available offline.`
+    ? `At least ${value} ${noun} are available in the device cache; the full count is not available offline.`
     : status === 'last-synced'
-      ? `${value} items at the last successful sync.`
-      : undefined;
+      ? `${value} ${noun} at the last successful sync.`
+      : unit ? `${value} ${unit}.` : undefined;
   return (
     <span
       className={className}
@@ -397,8 +401,10 @@ function ReaderCount({ value, status, className }: { value: number; status: Read
   );
 }
 
-function MobileFeedsPanel({ snapshot, filter, unreadOnly, sortOrder, onFilter, onSubscribe, onUnreadOnlyChange, onClose }: {
+function MobileFeedsPanel({ snapshot, unreadCount, unreadCountStatus, filter, unreadOnly, sortOrder, onFilter, onSubscribe, onUnreadOnlyChange, onClose, editionActive, onEdition }: {
   snapshot: ReturnType<typeof useReader>['snapshot'];
+  unreadCount: number;
+  unreadCountStatus: ReaderCountStatus;
   filter: ReaderFilter;
   unreadOnly: boolean;
   sortOrder: FeedSortOrder;
@@ -406,6 +412,8 @@ function MobileFeedsPanel({ snapshot, filter, unreadOnly, sortOrder, onFilter, o
   onSubscribe: () => void;
   onUnreadOnlyChange: (unreadOnly: boolean) => void;
   onClose: () => void;
+  editionActive: boolean;
+  onEdition: () => void;
 }) {
   const panelRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -441,6 +449,11 @@ function MobileFeedsPanel({ snapshot, filter, unreadOnly, sortOrder, onFilter, o
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
       <section ref={panelRef} id="mobile-feeds-panel" className="mobile-feeds-panel" role="dialog" aria-modal="true" aria-labelledby="mobile-feeds-title" onKeyDown={handleKeyDown}>
         <header><h1 id="mobile-feeds-title">Feeds</h1><button onClick={onSubscribe}>＋ Add feed</button><button ref={closeButtonRef} aria-label="Close feeds" onClick={onClose}>×</button></header>
+        <nav className="nav-group" aria-label="Reading views">
+          <button className={`nav-item ${!editionActive && filter.kind === 'all' ? 'active' : ''}`} onClick={() => { onFilter({ kind: 'all' }); onClose(); }}><span aria-hidden="true">○</span><span>All articles</span><ReaderCount value={unreadCount} status={unreadCountStatus} unit="unread articles" className="nav-count" /></button>
+          <button className={`nav-item ${editionActive ? 'active' : ''}`} onClick={onEdition}><span aria-hidden="true">▤</span><span>Latest Edition</span></button>
+          <button className={`nav-item ${!editionActive && filter.kind === 'starred' ? 'active' : ''}`} onClick={() => { onFilter({ kind: 'starred' }); onClose(); }}><span aria-hidden="true">☆</span><span>Starred</span></button>
+        </nav>
         <FeedTree snapshot={snapshot} filter={filter} unreadOnly={unreadOnly} sortOrder={sortOrder} onFilter={onFilter} onFeedSelection={onClose} onSubscribe={onSubscribe} onUnreadOnlyChange={onUnreadOnlyChange} showHeading={false} />
       </section>
     </div>
@@ -771,6 +784,7 @@ export function ReaderPane({
   onNotify,
   onHighlight,
   onSaveToReader,
+  returnToEdition = false,
 }: {
   article: Article | null;
   position: number;
@@ -785,6 +799,7 @@ export function ReaderPane({
   onNotify: (message: string) => void;
   onHighlight: (article: Article, selection: SelectionAnchor, note?: string) => Promise<{ highlight: SavedHighlight; synchronized: boolean; warning?: string }>;
   onSaveToReader: (article: Article) => Promise<void>;
+  returnToEdition?: boolean;
 }) {
   const contentRef = useRef<HTMLDivElement>(null);
   const selectionPanelRef = useRef<HTMLDivElement>(null);
@@ -958,8 +973,8 @@ export function ReaderPane({
   return (
     <main className="reader-pane" id="reader-pane">
       <header className="reader-toolbar">
-        <button className="reader-close" aria-label="Close article and return to article list" onClick={onClose}>
-          <span aria-hidden="true">←</span><span className="button-label">All items</span>
+        <button className="reader-close" aria-label={returnToEdition ? 'Close article and return to Latest Edition' : 'Close article and return to article list'} onClick={onClose}>
+          <span aria-hidden="true">←</span><span className="button-label">{returnToEdition ? 'Latest Edition' : 'All items'}</span>
         </button>
         <div className="reader-navigation" role="group" aria-label="Article navigation">
           <button aria-label="Previous article" disabled={!hasPrevious} onClick={onPrevious}>
@@ -1063,13 +1078,15 @@ export function ReaderPane({
   );
 }
 
-function PreferencesPanel({ sortOrder, defaultArticleView, accentColor, readingFont, articleTextSize, syncStatus, onSortOrderChange, onDefaultArticleViewChange, onAccentColorChange, onReadingFontChange, onArticleTextSizeChange, onClose }: {
+function PreferencesPanel({ sortOrder, defaultArticleView, accentColor, readingFont, articleTextSize, editionHours, onEditionHoursChange, syncStatus, onSortOrderChange, onDefaultArticleViewChange, onAccentColorChange, onReadingFontChange, onArticleTextSizeChange, onClose }: {
   sortOrder: FeedSortOrder;
   defaultArticleView: DefaultArticleView;
   accentColor: AccentColor;
   readingFont: ReadingFont;
   articleTextSize: ArticleTextSize;
   syncStatus: 'loading' | 'synced' | 'pending';
+  editionHours: EditionHours;
+  onEditionHoursChange: (hours: EditionHours) => void;
   onSortOrderChange: (sortOrder: FeedSortOrder) => void;
   onDefaultArticleViewChange: (view: DefaultArticleView) => void;
   onAccentColorChange: (accentColor: AccentColor) => void;
@@ -1082,6 +1099,17 @@ function PreferencesPanel({ sortOrder, defaultArticleView, accentColor, readingF
       <section className="preferences-panel" role="dialog" aria-modal="true" aria-labelledby="preferences-title">
         <header><div><div className="eyebrow">Chadashot</div><h1 id="preferences-title">Preferences</h1></div><button aria-label="Close preferences" onClick={onClose}>×</button></header>
         <div className="setting-section">
+          <h2>Latest Edition</h2>
+          <fieldset className="preference-options">
+            <legend>Recent article window</legend>
+            {EDITION_WINDOWS.map((hours) => <label className="preference-option" key={hours}>
+              <input type="radio" name="edition-hours" value={hours} checked={editionHours === hours} onChange={() => onEditionHoursChange(hours)} />
+              <span><strong>{hours} hours</strong></span>
+            </label>)}
+          </fieldset>
+          <p className="preferences-note">Include read and unread articles published within this window, grouped by feed category.</p>
+        </div>
+        <div className="setting-section">
           <h2>Feed organization</h2>
           <fieldset className="preference-options">
             <legend>Default article view</legend>
@@ -1091,7 +1119,7 @@ function PreferencesPanel({ sortOrder, defaultArticleView, accentColor, readingF
             </label>
             <label className="preference-option">
               <input type="radio" name="default-article-view" value="all" checked={defaultArticleView === 'all'} onChange={() => onDefaultArticleViewChange('all')} />
-              <span><strong>All items</strong><small>Show read and unread items when opening any feed, folder, or collection. Inbox always shows unread items.</small></span>
+              <span><strong>All items</strong><small>Show read and unread items when opening any feed, folder, or collection.</small></span>
             </label>
           </fieldset>
           <fieldset className="preference-options">
@@ -1687,6 +1715,9 @@ export function App() {
   const [accentColor, setAccentColor] = useState<AccentColor>(savedAccentColor);
   const [readingFont, setReadingFont] = useState<ReadingFont>(savedReadingFont);
   const [articleTextSize, setArticleTextSize] = useState<ArticleTextSize>(savedArticleTextSize);
+  const [editionHours, setEditionHours] = useState<EditionHours>(savedEditionHours);
+  const [editionActive, setEditionActive] = useState(false);
+  const [editionNow, setEditionNow] = useState(Date.now);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [floatingFeeds, setFloatingFeeds] = useState(() => typeof window.matchMedia === 'function' && window.matchMedia(FLOATING_FEEDS_QUERY).matches);
   const [contentView, setContentView] = useState<ContentView>('list');
@@ -1696,21 +1727,35 @@ export function App() {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const headerFeedsTriggerRef = useRef<HTMLButtonElement>(null);
   const activeFeedsTriggerRef = useRef<HTMLButtonElement>(null);
-  const reader = useReader(session?.authenticated ? session.user?.id : undefined, defaultArticleView);
+  const publishedSince = useMemo(() => editionActive ? new Date(editionNow - editionHours * 3_600_000).toISOString() : undefined, [editionActive, editionHours, editionNow]);
+  const reader = useReader(session?.authenticated ? session.user?.id : undefined, defaultArticleView, publishedSince);
   const { updatePreferences, syncStatus: preferencesSyncStatus } = usePreferences(
     session?.authenticated ? session.user?.id : undefined,
-    { feedSortOrder, defaultArticleView, accentColor, readingFont, articleTextSize },
+    { feedSortOrder, defaultArticleView, accentColor, readingFont, articleTextSize, latestEditionHours: editionHours },
     (patch) => {
       if (patch.feedSortOrder) setFeedSortOrder(patch.feedSortOrder);
       if (patch.defaultArticleView) {
         setDefaultArticleView(patch.defaultArticleView);
-        reader.setReadFilter(reader.filter.kind === 'inbox' ? 'all' : patch.defaultArticleView);
+        reader.setReadFilter(editionActive ? 'all' : patch.defaultArticleView);
       }
+      if (patch.latestEditionHours) setEditionHours(patch.latestEditionHours);
       if (patch.accentColor) setAccentColor(patch.accentColor);
       if (patch.readingFont) setReadingFont(patch.readingFont);
       if (patch.articleTextSize) setArticleTextSize(patch.articleTextSize);
     },
   );
+
+  useEffect(() => {
+    if (!editionActive || contentView !== 'list') return;
+    const timer = window.setInterval(() => setEditionNow(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, [editionActive, contentView]);
+
+  useEffect(() => {
+    try { localStorage.setItem(EDITION_WINDOW_KEY, String(editionHours)); } catch {
+      // The choice remains usable for this session when browser storage is blocked.
+    }
+  }, [editionHours]);
 
   useLayoutEffect(() => {
     if (!session?.authenticated) return;
@@ -1856,6 +1901,11 @@ export function App() {
 
   const activeFilter = reader.filter;
   const markReadAction = reader.coverage?.complete ? reader.markAllRead : reader.markLoadedRead;
+  // Use the global snapshot total so searches and Latest Edition never narrow the badge.
+  const unreadCount = reader.snapshot?.counts?.inbox
+    ?? reader.snapshot?.articles.filter((article) => !article.read).length
+    ?? 0;
+  const unreadCountStatus = readerCountStatus(Boolean(reader.snapshot?.counts), reader.coverage, reader.status === 'current');
   const title = activeFilter.kind === 'folder'
     ? reader.snapshot?.folders.find((folder) => folder.id === activeFilter.id)?.title ?? 'Folder'
     : activeFilter.kind === 'feed'
@@ -1874,15 +1924,26 @@ export function App() {
         : null;
 
   function chooseFilter(filter: ReaderFilter) {
+    setEditionActive(false);
     // View-level overrides last until navigation; every scope uses the global default.
-    reader.setReadFilter(filter.kind === 'inbox' ? 'all' : defaultArticleView);
+    reader.setReadFilter(defaultArticleView);
     reader.setFilter(filter);
     setContentView('list');
   }
 
+  function chooseEdition() {
+    reader.setFilter({ kind: 'all' });
+    reader.setReadFilter('all');
+    reader.setQuery('');
+    setEditionNow(Date.now());
+    setEditionActive(true);
+    setContentView('list');
+    setFeedsOpen(false);
+  }
+
   function goHome() {
     reader.setQuery('');
-    chooseFilter({ kind: 'inbox' });
+    chooseFilter({ kind: 'all' });
     setFeedsOpen(false);
   }
 
@@ -1952,7 +2013,7 @@ export function App() {
               }
             }}
           >☰</button>
-          <button className="brand-home" aria-label="Go to Inbox" onClick={goHome}>
+          <button className="brand-home" aria-label="Go to All articles" onClick={goHome}>
             <span className="app-mark" aria-hidden="true">ח</span>
             <span>Chadashot</span>
           </button>
@@ -1977,7 +2038,7 @@ export function App() {
         </div>
       </header>
       <div className="workspace" ref={workspaceRef} style={workspaceStyle}>
-        <Navigation snapshot={reader.snapshot} coverage={reader.coverage} filter={reader.filter} unreadOnly={unreadFeedsOnly} sortOrder={feedSortOrder} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} onSubscribe={() => setSubscribeOpen(true)} onUnreadOnlyChange={setUnreadFeedsOnly} status={reader.status} />
+        <Navigation snapshot={reader.snapshot} unreadCount={unreadCount} unreadCountStatus={unreadCountStatus} filter={reader.filter} unreadOnly={unreadFeedsOnly} sortOrder={feedSortOrder} onFilter={chooseFilter} onSettings={() => setSettingsOpen(true)} onSubscribe={() => setSubscribeOpen(true)} onUnreadOnlyChange={setUnreadFeedsOnly} status={reader.status} editionActive={editionActive} onEdition={chooseEdition} />
         <PanelResizer
           className="sidebar-resizer"
           label="Resize feed sidebar"
@@ -1988,7 +2049,26 @@ export function App() {
           defaultValue={DEFAULT_PANEL_WIDTHS.sidebar}
           onResize={(sidebar) => setPanelWidths((current) => ({ ...current, sidebar }))}
         />
-        {contentView === 'list' ? (
+        {editionActive && (
+          <div className="edition-container" hidden={contentView !== 'list'}>
+            <LatestEdition
+              snapshot={reader.snapshot}
+              articles={reader.articles}
+              hours={editionHours}
+              now={editionNow}
+              sortOrder={feedSortOrder}
+              total={reader.totalArticles}
+              hasMore={reader.hasMoreArticles}
+              partial={reader.totalCountStatus === 'cached-partial'}
+              loading={reader.status === 'syncing'}
+              onLoadMore={reader.loadMoreArticles}
+              onOpen={chooseArticle}
+              onToggleStar={(article) => void reader.toggleStarred(article)}
+              onPreferences={() => setPreferencesOpen(true)}
+            />
+          </div>
+        )}
+        {contentView === 'list' && !editionActive ? (
           <ArticleList
             key={activeListKey}
             listKey={activeListKey}
@@ -2012,8 +2092,9 @@ export function App() {
               return count;
             } : undefined}
           />
-        ) : (
+        ) : contentView === 'reader' ? (
           <ReaderPane
+            returnToEdition={editionActive}
             key={reader.selectedArticle?.id ?? 'empty-reader'}
             article={reader.selectedArticle}
             position={selectedArticlePosition}
@@ -2050,11 +2131,12 @@ export function App() {
               setNotice('Article saved to Readwise Reader');
             }}
           />
-        )}
+        ) : null}
       </div>
       <nav className="mobile-navigation" aria-label="Primary navigation">
-        <button className={reader.filter.kind === 'inbox' ? 'active' : ''} onClick={() => chooseFilter({ kind: 'inbox' })}><span>●</span>Inbox</button>
-        <button className={reader.filter.kind === 'starred' ? 'active' : ''} onClick={() => chooseFilter({ kind: 'starred' })}><span>☆</span>Starred</button>
+        <button className={!editionActive && reader.filter.kind === 'all' ? 'active' : ''} onClick={() => chooseFilter({ kind: 'all' })}>All articles <span className="mobile-articles-summary"><span aria-hidden="true">○</span><ReaderCount value={unreadCount} status={unreadCountStatus} unit="unread articles" className="mobile-unread-count" /></span></button>
+        <button className={editionActive ? 'active' : ''} aria-current={editionActive ? 'page' : undefined} onClick={chooseEdition}><span>▤</span>Latest Edition</button>
+        <button className={!editionActive && reader.filter.kind === 'starred' ? 'active' : ''} onClick={() => chooseFilter({ kind: 'starred' })}><span>☆</span>Starred</button>
         <button onClick={(event) => openFeeds(event.currentTarget)}><span>⌁</span>Feeds</button>
         <button onClick={() => setPreferencesOpen(true)}><span>☷</span>Prefs</button>
         <button onClick={() => setSettingsOpen(true)}><span>⚙</span>Settings</button>
@@ -2062,7 +2144,11 @@ export function App() {
       {notice && <div className="toast" role="status" aria-live="polite">{notice}</div>}
       {reader.error && <div className="error-banner" role="alert">{reader.error}</div>}
       {feedsOpen && <MobileFeedsPanel
+        editionActive={editionActive}
+        onEdition={chooseEdition}
         snapshot={reader.snapshot}
+        unreadCount={unreadCount}
+        unreadCountStatus={unreadCountStatus}
         filter={reader.filter}
         unreadOnly={unreadFeedsOnly}
         sortOrder={feedSortOrder}
@@ -2071,7 +2157,7 @@ export function App() {
         onUnreadOnlyChange={setUnreadFeedsOnly}
         onClose={closeFeeds}
       />}
-      {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} defaultArticleView={defaultArticleView} accentColor={accentColor} readingFont={readingFont} articleTextSize={articleTextSize} syncStatus={preferencesSyncStatus} onSortOrderChange={(feedSortOrder) => updatePreferences({ feedSortOrder })} onDefaultArticleViewChange={(defaultArticleView) => updatePreferences({ defaultArticleView })} onAccentColorChange={(accentColor) => updatePreferences({ accentColor })} onReadingFontChange={(readingFont) => updatePreferences({ readingFont })} onArticleTextSizeChange={(articleTextSize) => updatePreferences({ articleTextSize })} onClose={() => setPreferencesOpen(false)} />}
+      {preferencesOpen && <PreferencesPanel sortOrder={feedSortOrder} defaultArticleView={defaultArticleView} accentColor={accentColor} readingFont={readingFont} articleTextSize={articleTextSize} editionHours={editionHours} onEditionHoursChange={(latestEditionHours) => updatePreferences({ latestEditionHours })} syncStatus={preferencesSyncStatus} onSortOrderChange={(feedSortOrder) => updatePreferences({ feedSortOrder })} onDefaultArticleViewChange={(defaultArticleView) => updatePreferences({ defaultArticleView })} onAccentColorChange={(accentColor) => updatePreferences({ accentColor })} onReadingFontChange={(readingFont) => updatePreferences({ readingFont })} onArticleTextSizeChange={(articleTextSize) => updatePreferences({ articleTextSize })} onClose={() => setPreferencesOpen(false)} />}
       {subscribeOpen && <SubscribePanel
         onClose={() => setSubscribeOpen(false)}
         onSubscribed={async (feedUrl) => {
