@@ -203,6 +203,8 @@ a { color: inherit; }
 }
 .pwa-prompt > div { margin-left: auto; display: flex; gap: 7px; }
 .pwa-prompt button { min-height: 34px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface-muted); cursor: pointer; }
+/* The prompt uses a muted background, so its primary action needs green text. */
+.pwa-prompt .primary-action { color: light-dark(#39735d, #8ac4a8); }
 
 button:focus-visible,
 a:focus-visible,
