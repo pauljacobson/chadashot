@@ -108,13 +108,13 @@ describe('article navigation toolbar', () => {
     expect(screen.getByRole('button', { name: 'Mark unread' })).toHaveAttribute('aria-pressed', 'true');
     expect(screen.getByRole('button', { name: 'Star article' })).toHaveAttribute('aria-pressed', 'false');
 
-    const save = screen.getByRole('button', { name: 'Save to Reader' });
+    const share = screen.getByRole('button', { name: 'Share article' });
     const original = screen.getByRole('link', { name: 'Open original' });
-    expect(save).toHaveAttribute('aria-label', 'Save to Reader');
+    expect(share).toHaveAttribute('aria-label', 'Share article');
     expect(original).toHaveAttribute('aria-label', 'Open original');
-    expect(within(save).getByText('Save to Reader')).toHaveClass('button-label');
+    expect(within(share).getByText('Share')).toHaveClass('button-label');
     expect(within(original).getByText('Open original')).toHaveClass('button-label');
-    expect(within(save).getByText('＋')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save to Reader' })).not.toBeInTheDocument();
     expect(within(original).getByText('↗')).toBeInTheDocument();
   });
 });

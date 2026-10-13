@@ -8,6 +8,7 @@ import helmet from 'helmet';
 import { serveProductionAssets } from './production-assets.js';
 import { z } from 'zod';
 import type { Article, ArticleMutation, ReaderInitializationState, ReaderMarkReadJobRequest, ReaderSnapshot, SavedHighlight } from '../shared/reader.js';
+import { featureFlags } from '../shared/features.js';
 import type { AppConfig } from './config.js';
 import { developmentSession, requireDevelopmentUser } from './auth/development.js';
 import { createPasskeyAuthentication } from './auth/passkeys.js';
@@ -848,6 +849,7 @@ export function createApp(config: AppConfig, dependencies: {
   });
 
   app.post('/api/readwise/documents', requireUser, async (req, res) => {
+    if (!featureFlags.readerDocumentSaving) return res.status(404).json({ error: 'Reader document saving is disabled' });
     const body = readerDocumentSchema.parse(req.body);
     const credentials = loadReadwise(database, config);
     if (!credentials) return res.status(409).json({ error: 'Connect Readwise in Settings before saving to Reader' });
