@@ -5,6 +5,8 @@ import { type CSSProperties, useCallback, useEffect, useId, useLayoutEffect, use
 import type { AccountSecurityState, AppLogLevel, AppLogResult, Article, IntegrationStatus, SavedHighlight, SessionState, Subscription } from '../shared/reader';
 import type { DefaultStartPage } from '../shared/preferences';
 import { resolveThumbnailUrl } from '../shared/thumbnail-url';
+import { featureFlags } from '../shared/features';
+import { articleShareData, copyArticleLink, shareArticle } from './articleShare';
 import {
   appLogExportUrl,
   connectBirchfeed,
@@ -942,6 +944,8 @@ export function ReaderPane({
   const [noteOpen, setNoteOpen] = useState(false);
   const [note, setNote] = useState('');
   const [savingAction, setSavingAction] = useState<'highlight' | 'document' | null>(null);
+  const [sharing, setSharing] = useState(false);
+  const [shareFallback, setShareFallback] = useState<{ articleId: string; url: string } | null>(null);
   const [retryingHighlightId, setRetryingHighlightId] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<MediaLightboxState | null>(null);
   const articleId = article?.id;
@@ -1044,7 +1048,7 @@ export function ReaderPane({
   }
 
   async function saveDocument() {
-    if (!article) return;
+    if (!article || !featureFlags.readerDocumentSaving) return;
     setSavingAction('document');
     try {
       await onSaveToReader(article);
@@ -1052,6 +1056,33 @@ export function ReaderPane({
       onNotify(error instanceof Error ? error.message : 'Could not save to Reader');
     } finally {
       setSavingAction(null);
+    }
+  }
+
+  async function shareCurrentArticle() {
+    if (!article || sharing) return;
+    const data = articleShareData(article);
+    if (!data) {
+      onNotify('This article has no valid original link to share');
+      return;
+    }
+    setSharing(true);
+    setShareFallback(null);
+    try {
+      const result = await shareArticle(data);
+      if (result === 'copied') onNotify('Link copied');
+      if (result === 'manual') setShareFallback({ articleId: article.id, url: data.url });
+    } finally {
+      setSharing(false);
+    }
+  }
+
+  async function copyShareLink(url: string) {
+    if (await copyArticleLink(url)) {
+      setShareFallback(null);
+      onNotify('Link copied');
+    } else {
+      onNotify('Could not copy link. Select and copy it below.');
     }
   }
 
@@ -1118,21 +1149,35 @@ export function ReaderPane({
           </button>
         </div>
         <span className="toolbar-spacer"></span>
-        <div className="reader-actions">
+        <div className={`reader-actions${featureFlags.readerDocumentSaving ? ' reader-actions-with-save' : ''}`}>
           <button aria-label={article.read ? 'Mark unread' : 'Mark read'} aria-pressed={article.read} onClick={() => onToggleRead(article)}>
             <span aria-hidden="true">{article.read ? '○' : '●'}</span><span className="button-label">{article.read ? 'Unread' : 'Read'}</span>
           </button>
           <button aria-label={article.starred ? 'Remove star' : 'Star article'} aria-pressed={article.starred} onClick={() => onToggleStar(article)}>
             <span aria-hidden="true">{article.starred ? '★' : '☆'}</span><span className="button-label">{article.starred ? 'Starred' : 'Star'}</span>
           </button>
-          <button className="save-reader-action" aria-label={savingAction === 'document' ? 'Saving to Reader' : 'Save to Reader'} disabled={savingAction !== null} onClick={() => void saveDocument()}>
-            <span aria-hidden="true">＋</span><span className="button-label">{savingAction === 'document' ? 'Saving…' : 'Save to Reader'}</span>
+          <button type="button" aria-label="Share article" disabled={sharing} onClick={() => void shareCurrentArticle()}>
+            <svg aria-hidden="true" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"><path d="M12 16V3m-4 4 4-4 4 4M7 11H4v10h16V11h-3" /></svg>
+            <span className="button-label">Share</span>
           </button>
+          {featureFlags.readerDocumentSaving && <button className="save-reader-action" aria-label={savingAction === 'document' ? 'Saving to Reader' : 'Save to Reader'} disabled={savingAction !== null} onClick={() => void saveDocument()}>
+            <span aria-hidden="true">＋</span><span className="button-label">{savingAction === 'document' ? 'Saving…' : 'Save to Reader'}</span>
+          </button>}
           <a className="toolbar-link" aria-label="Open original" href={article.canonicalUrl} target="_blank" rel="noreferrer">
             <span aria-hidden="true">↗</span><span className="button-label">Open original</span>
           </a>
         </div>
       </header>
+      {shareFallback?.articleId === article.id && (
+        <div className="article-share-fallback" role="region" aria-label="Share article link">
+          <label>Article link<input autoFocus readOnly value={shareFallback.url} onFocus={(event) => event.currentTarget.select()} /></label>
+          <span>Copy this link to share the article.</span>
+          <div>
+            <button type="button" onClick={() => void copyShareLink(shareFallback.url)}>Copy link</button>
+            <button type="button" onClick={() => setShareFallback(null)}>Close</button>
+          </div>
+        </div>
+      )}
       <div className="reading-scroll">
         <article className="reading-column">
           <div className="article-source">{article.source}</div>
@@ -1734,7 +1779,7 @@ function SettingsPanel({ session, onClose, onConnected, onRssDisconnected, onCle
         </div>
         <div className="setting-section">
           <h2>Readwise</h2>
-          <div className="setting-line"><div><strong>Readwise and Reader</strong><span>Highlights and saved documents remain separate actions.</span></div><span className="setting-state">{status?.readwise.configured ? 'Connected' : 'Not connected'}</span></div>
+          <div className="setting-line"><div><strong>Readwise and Reader</strong><span>{featureFlags.readerDocumentSaving ? 'Highlights and saved documents remain separate actions.' : 'Save selected passages and notes to Readwise Reader.'}</span></div><span className="setting-state">{status?.readwise.configured ? 'Connected' : 'Not connected'}</span></div>
           {status?.readwise.configured && <div className="connection-actions"><button className="danger-action" type="button" disabled={disconnecting !== null} onClick={() => void removeReadwise()}>{disconnecting === 'readwise' ? 'Disconnecting…' : 'Disconnect Readwise'}</button></div>}
           {!status?.readwise.configured && (
             <div className="connection-form">

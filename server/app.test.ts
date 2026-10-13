@@ -8,11 +8,38 @@ import { loadConfig } from './config.js';
 import { openMemoryDatabase } from './database.js';
 import { fixtureSnapshot } from './fixtures.js';
 import { AppLogger } from './logging.js';
+import { featureFlags } from '../shared/features.js';
 
 const config = loadConfig({ NODE_ENV: 'test', AUTH_MODE: 'development' });
 
 describe('application API', () => {
   const app = createApp(config, { database: openMemoryDatabase() });
+
+  it('rejects standalone document saving before contacting Readwise', async () => {
+    const fetchImplementation = vi.fn();
+    const disabledApp = createApp(config, { database: openMemoryDatabase(), fetchImplementation });
+    const response = await request(disabledApp).post('/api/readwise/documents').send({});
+    expect(response.status).toBe(404);
+    expect(response.body.error).toBe('Reader document saving is disabled');
+    expect(fetchImplementation).not.toHaveBeenCalled();
+  });
+
+  it('restores standalone document saving when the feature flag is enabled', async () => {
+    const enabledConfig = loadConfig({ NODE_ENV: 'test', AUTH_MODE: 'development', ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64') });
+    const fetchImplementation = vi.fn(async () => new Response(JSON.stringify({ id: 'saved-doc', url: 'https://read.readwise.io/new/read/saved-doc' }), { status: 201 }));
+    const enabledApp = createApp(enabledConfig, { database: openMemoryDatabase(), fetchImplementation });
+    await request(enabledApp).put('/api/settings/readwise').send({ token: 'test-token' });
+    featureFlags.readerDocumentSaving = true;
+    try {
+      const response = await request(enabledApp).post('/api/readwise/documents').send({
+        articleId: 'article-1', title: 'Article', author: null, canonicalUrl: 'https://example.test/article',
+      });
+      expect(response.status).toBe(201);
+      expect(response.body.document.id).toBe('saved-doc');
+    } finally {
+      featureFlags.readerDocumentSaving = false;
+    }
+  });
 
   it('reports health without authentication', async () => {
     const response = await request(app).get('/api/health');
@@ -319,8 +346,9 @@ describe('application API', () => {
     expect(duplicate.status).toBe(200);
     expect(duplicate.body).toMatchObject({ synchronized: true, reused: true, highlight: { id: highlight.body.highlight.id } });
     expect(persistedHighlights.body.highlights).toHaveLength(1);
-    expect(document.status).toBe(201);
-    expect(document.body.document.id).toBe('doc-1');
+    // Document saving is disabled independently of Reader highlight delivery.
+    expect(document.status).toBe(404);
+    expect(document.body.error).toBe('Reader document saving is disabled');
     expect(database.prepare('SELECT readwise_status FROM highlights').get()).toEqual({ readwise_status: 'saved' });
     expect(callTool.mock.calls.filter(([name]) => name === 'reader_create_highlight')).toHaveLength(1);
   });

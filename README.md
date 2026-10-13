@@ -1,12 +1,12 @@
 # Chadashot
 
-Chadashot is a personal RSS reading client for Birchfeed. It is an installable Progressive Web App with a responsive desktop and Android interface, passkey authentication, system light/dark appearance, and separate Readwise highlight and Reader document-saving actions.
+Chadashot is a personal RSS reading client for Birchfeed. It is an installable Progressive Web App with a responsive desktop and Android interface, passkey authentication, system light/dark appearance, native article sharing, and Readwise highlights.
 
 The previous FreshRSS deployment wrapper has been moved to a local, Git-ignored archive while the new client is developed. GitHub will remain the source for Railway deployments, and the new application will replace the existing FreshRSS service only after the client is ready for production cutover.
 
 ## Project status
 
-The initial review version includes the responsive reading interface, an expandable folder/feed tree with favicons and persistent ordering preferences, fixture-backed local use, a durable transactional server cache for live Birchfeed data, manual feed subscriptions, offline article caching and queued read/star changes, encrypted service credentials with explicit disconnect controls, production passkey onboarding with recovery codes and multiple passkeys, persistent Readwise highlights, Reader document saving, and versioned database migrations. The product specification, deployment guide, and supporting research are in [`docs/`](docs/).
+The initial review version includes the responsive reading interface, an expandable folder/feed tree with favicons and persistent ordering preferences, fixture-backed local use, a durable transactional server cache for live Birchfeed data, manual feed subscriptions, offline article caching and queued read/star changes, encrypted service credentials with explicit disconnect controls, production passkey onboarding with recovery codes and multiple passkeys, persistent Readwise highlights, article sharing, and versioned database migrations. The product specification, deployment guide, and supporting research are in [`docs/`](docs/).
 
 ## Run locally
 
@@ -60,4 +60,5 @@ Five-minute polling adds up to 288 checks a day, plus checks triggered by device
 - The production app remains at `chadashot.app`.
 - Railway deploys the application from this GitHub repository.
 - Local development uses a tightly scoped development identity; production uses one-time onboarding followed by passkey authentication.
-- Readwise highlight creation and Reader document saving are separate first-release actions.
+- Article sharing uses the device's native share sheet with the original article title and URL. Unsupported browsers copy the link; denied clipboard access exposes a selectable link. Cancelling native sharing is silent.
+- Standalone Save to Reader is disabled in both the toolbar and `/api/readwise/documents`. To restore it, set `featureFlags.readerDocumentSaving` to `true` in `shared/features.ts` and rebuild the browser and server. Readwise highlights remain available and can still create their corresponding Reader documents.
