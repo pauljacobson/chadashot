@@ -9,6 +9,7 @@ import {
   ReaderCache,
   ReaderCacheFencedError,
   readerSubscriptionFingerprint,
+  READER_IMPORT_RESUME_MAX_AGE_MS,
   type ReaderCacheIdentity,
   type ReaderCacheImport,
 } from './reader-cache.js';
@@ -78,6 +79,112 @@ function publish(cache: ReaderCache, value: ReaderSnapshot, cacheIdentity = iden
 }
 
 describe('transactional reader cache', () => {
+  it('resumes a checkpoint from disk after a crash and fences the previous writer', async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'chadashot-import-resume-'));
+    let now = new Date('2026-10-23T00:00:00.000Z');
+    let database = openDatabase(directory);
+    const cache = new ReaderCache(database, 'before-crash', 45_000, () => now);
+    const value = snapshot([article('first'), article('second')]);
+    const first = cache.beginResumableImport(cache.acquireLease(identity)!);
+    cache.stageImportStructure(first.run, value.folders, value.subscriptions);
+    cache.stageImportPage(first.run, [article('first')], 'next-page');
+    expect(() => cache.publish(first.run)).toThrow('incomplete');
+    database.close();
+
+    now = new Date(now.getTime() + 60_000);
+    database = openDatabase(directory);
+    const restarted = new ReaderCache(database, 'after-crash', 45_000, () => now);
+    expect((await restarted.prune({ maxDeletes: 100 })).deletions).toEqual([]);
+    const resumed = restarted.beginResumableImport(restarted.acquireLease(identity)!);
+    expect(resumed.run.generationId).toBe(first.run.generationId);
+    expect(resumed.checkpoint).toEqual({ continuation: 'next-page', contentComplete: false });
+    expect(resumed.itemsStaged).toBe(1);
+    const staleWriter = new ReaderCache(database, 'before-crash', 45_000, () => now);
+    expect(() => staleWriter.stageImportPage(first.run, [article('stale')], null)).toThrow(ReaderCacheFencedError);
+    // Even a late error handler from the old process must not destroy new progress.
+    staleWriter.fail(first.run, new ReaderCacheFencedError());
+    restarted.stageImportStructure(resumed.run, value.folders, value.subscriptions);
+    restarted.stageImportPage(resumed.run, [article('first'), article('second')], null);
+    restarted.applyConfirmedMutations(identity, [
+      { articleId: 'first', operation: 'starred', value: true },
+      { articleId: 'second', operation: 'read', value: true },
+    ]);
+    restarted.reconcileImportState(resumed.run, new Set(['second']), new Set());
+    restarted.publish(resumed.run);
+    expect(restarted.readSnapshot(identity)!.articles.map(({ id, read, starred }) => ({ id, read, starred })).sort((a, b) => a.id.localeCompare(b.id)))
+      .toEqual([{ id: 'first', read: true, starred: true }, { id: 'second', read: true, starred: false }]);
+    expect(restarted.readSnapshot(identity)!.subscriptions[0].unreadCount).toBe(0);
+    expect(restarted.readSnapshot(identity)!.folders[0].unreadCount).toBe(0);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_import_progress').get()).toEqual({ count: 0 });
+    database.close();
+  });
+
+  it('rolls back all page batches and the continuation when a later batch cannot be staged', () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database, 'worker');
+    const { run } = cache.beginResumableImport(cache.acquireLease(identity)!);
+    cache.stageImportPage(run, [article('saved')], 'next');
+    database.exec(`CREATE TRIGGER reject_article BEFORE INSERT ON reader_article_bodies
+      WHEN new.article_id = 'rejected' BEGIN SELECT RAISE(ABORT, 'disk write failed'); END`);
+    expect(() => cache.stageImportPage(run, [
+      ...Array.from({ length: 500 }, (_, index) => article(`page-${index}`)), article('rejected'),
+    ], 'later')).toThrow('disk write failed');
+    expect(database.prepare('SELECT id FROM reader_articles').all()).toEqual([{ id: 'saved' }]);
+    expect(database.prepare('SELECT continuation, pages_staged FROM reader_import_progress').get())
+      .toEqual({ continuation: 'next', pages_staged: 1 });
+    expect(database.prepare('SELECT items_staged FROM reader_sync_runs').get()).toEqual({ items_staged: 1 });
+  });
+
+  it('bounds abandoned resume data by age and removes invalidated account progress', async () => {
+    const database = openMemoryDatabase();
+    let now = new Date('2026-10-23T00:00:00.000Z');
+    const cache = new ReaderCache(database, 'worker', 45_000, () => now);
+    const { run } = cache.beginResumableImport(cache.acquireLease(identity)!);
+    cache.stageImportPage(run, [article('saved')], 'next');
+    cache.fail(run, new Error('timeout'), true);
+    expect((await cache.prune()).deletions).toEqual([]);
+    now = new Date(now.getTime() + READER_IMPORT_RESUME_MAX_AGE_MS + 1);
+    expect((await cache.prune()).deletions.map((entry) => entry.generationId)).toEqual([run.generationId]);
+    const replacement = cache.beginResumableImport(cache.acquireLease(identity)!);
+    cache.stageImportPage(replacement.run, [article('saved')], 'next');
+    cache.fail(replacement.run, new Error('timeout'), true);
+    cache.invalidate(identity);
+    expect((await cache.prune()).deletions.map((entry) => entry.generationId)).toEqual([replacement.run.generationId]);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_import_progress').get()).toEqual({ count: 0 });
+  });
+
+  it('remembers continuation cycles across separate attempts', () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database, 'worker');
+    const first = cache.beginResumableImport(cache.acquireLease(identity)!);
+    cache.stageImportPage(first.run, [article('first')], 'token-a');
+    cache.fail(first.run, new Error('timeout'), true);
+    const second = cache.beginResumableImport(cache.acquireLease(identity)!);
+    cache.stageImportPage(second.run, [article('second')], 'token-b');
+    cache.fail(second.run, new Error('timeout'), true);
+    const third = cache.beginResumableImport(cache.acquireLease(identity)!);
+    expect(() => cache.stageImportPage(third.run, [article('third')], 'token-a')).toThrow('repeating continuation');
+    expect(database.prepare('SELECT id FROM reader_articles ORDER BY id').all()).toEqual([{ id: 'first' }, { id: 'second' }]);
+  });
+
+  it('does not keep scheduling full imports for expired progress after a replacement succeeds', () => {
+    const database = openMemoryDatabase();
+    let now = new Date('2026-10-23T00:00:00.000Z');
+    const cache = new ReaderCache(database, 'worker', 45_000, () => now);
+    publish(cache, snapshot());
+    const abandoned = cache.beginResumableImport(cache.acquireLease(identity)!);
+    cache.stageImportPage(abandoned.run, [article('partial')], 'next');
+    cache.fail(abandoned.run, new Error('timeout'), true);
+    now = new Date(now.getTime() + READER_IMPORT_RESUME_MAX_AGE_MS + 1);
+    const replacement = cache.beginResumableImport(cache.acquireLease(identity)!);
+    cache.stageImportStructure(replacement.run, snapshot().folders, snapshot().subscriptions);
+    cache.stageImportPage(replacement.run, [article('replacement')], null);
+    cache.publish(replacement.run);
+    // Auto-pruning may be disabled or deferred; old progress must not force work.
+    expect(cache.syncPlan(identity, { routineMs: 180_000, stateMs: 900_000, bodyMs: 21_600_000,
+      fullMs: 86_400_000, overlapSeconds: 21_600 })).toMatchObject({ full: false });
+  });
+
   it('fingerprints subscription structure without volatile provider metadata', () => {
     const value = snapshot();
     const initial = readerSubscriptionFingerprint(value.subscriptions, value.folders);

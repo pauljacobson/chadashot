@@ -14,8 +14,20 @@ export type GoogleReaderCredentials = {
 
 export type GoogleReaderImportSink = {
   stageStructure: (folders: Folder[], subscriptions: Subscription[]) => void | Promise<void>;
-  stageArticles: (articles: Article[]) => void | Promise<void>;
+  stageArticles: (articles: Article[], continuation: string | null) => void | Promise<void>;
+  stageState?: (unreadIds: Set<string>, starredIds: Set<string>) => void | Promise<void>;
 };
+
+export type GoogleReaderImportCheckpoint = { continuation: string | null; contentComplete: boolean };
+
+// These failures invalidate the scan itself; retrying the same token cannot help.
+export class ReaderImportRestartError extends Error {}
+
+class GoogleReaderRequestError extends Error {
+  constructor(readonly status: number) {
+    super(`RSS service request failed (${status})`);
+  }
+}
 
 type FetchImplementation = typeof fetch;
 
@@ -316,7 +328,7 @@ export class GoogleReaderClient {
     }
     if (!response.ok) {
       if (phase) this.performanceRun?.providerResponseIncomplete(phase);
-      throw new Error(`RSS service request failed (${response.status})`);
+      throw new GoogleReaderRequestError(response.status);
     }
     return response;
   }
@@ -346,24 +358,31 @@ export class GoogleReaderClient {
 
   private async forEachStreamItemPage(
     auth: string,
-    consume: (items: z.infer<typeof streamItemSchema>[]) => void | Promise<void>,
-    options: { startTimeSeconds?: number; order?: 'newest' | 'oldest' } = {},
+    consume: (items: z.infer<typeof streamItemSchema>[], continuation: string | null) => void | Promise<void>,
+    options: { startTimeSeconds?: number; order?: 'newest' | 'oldest'; continuation?: string | null } = {},
   ) {
     const itemIds = new Set<string>();
     const continuationTokens = new Set<string>();
-    let continuation: string | undefined;
+    let continuation = options.continuation ?? undefined;
+    if (continuation) continuationTokens.add(continuation);
 
     do {
       const query = new URLSearchParams({ output: 'json', n: String(STREAM_PAGE_SIZE) });
       query.set('r', options.order === 'oldest' ? 'o' : 'n');
       if (options.startTimeSeconds) query.set('ot', String(options.startTimeSeconds));
       if (continuation) query.set('c', continuation);
-      const response = await this.authorizedRequest(
-        `/reader/api/0/stream/contents/user/-/state/com.google/reading-list?${query}`,
-        auth,
-        undefined,
-        'contentPages',
-      );
+      let response: Response;
+      try {
+        response = await this.authorizedRequest(
+          `/reader/api/0/stream/contents/user/-/state/com.google/reading-list?${query}`,
+          auth, undefined, 'contentPages',
+        );
+      } catch (error) {
+        if (continuation && error instanceof GoogleReaderRequestError && [400, 404, 410].includes(error.status)) {
+          throw new ReaderImportRestartError('RSS service rejected the import continuation; a new scan is required');
+        }
+        throw error;
+      }
       const text = await this.responseText(response, 'contentPages');
       const page = streamSchema.parse(JSON.parse(text));
       this.performanceRun?.recordItems('contentPages', page.items.length, 1);
@@ -372,13 +391,12 @@ export class GoogleReaderClient {
         itemIds.add(item.id);
         return true;
       });
-      await consume(uniqueItems);
-
       const nextContinuation = page.continuation;
-      if (!nextContinuation) break;
-      if (continuationTokens.has(nextContinuation)) {
-        throw new Error('RSS service returned a repeating continuation token');
+      if (nextContinuation && continuationTokens.has(nextContinuation)) {
+        throw new ReaderImportRestartError('RSS service returned a repeating continuation token');
       }
+      await consume(uniqueItems, nextContinuation ?? null);
+      if (!nextContinuation) break;
       continuationTokens.add(nextContinuation);
       continuation = nextContinuation;
     } while (continuation);
@@ -525,10 +543,10 @@ export class GoogleReaderClient {
   }
 
   /**
-   * Streams mapped article pages to durable storage. Provider requests remain
-   * concurrent, but only one content page is retained while its batch commits.
+   * Streams mapped article pages to durable storage. Structure/state requests
+   * run concurrently, then each content page commits with its continuation.
    */
-  async importTo(sink: GoogleReaderImportSink) {
+  async importTo(sink: GoogleReaderImportSink, checkpoint?: GoogleReaderImportCheckpoint) {
     const measure = <T>(phase: ReaderPhase, operation: () => Promise<T>) => this.performanceRun
       ? this.performanceRun.measure(phase, operation)
       : operation();
@@ -570,9 +588,11 @@ export class GoogleReaderClient {
         ? this.performanceRun.measureSync('mapping', () => mapContext(context))
         : mapContext(context);
     });
-    const structure = mappedContextPromise.then((context) => sink.stageStructure(context.folders, context.subscriptions));
-    const articles = measure('contentPages', () => this.forEachStreamItemPage(auth, async (items) => {
-      const context = await mappedContextPromise;
+    const context = await mappedContextPromise;
+    // Validate structure before consuming a resumed scan, so changed memberships
+    // cannot publish pages mapped against different subscription collections.
+    await sink.stageStructure(context.folders, context.subscriptions);
+    if (!checkpoint?.contentComplete) await measure('contentPages', () => this.forEachStreamItemPage(auth, async (items, continuation) => {
       const mapArticles = () => items.map((item) => {
         const html = item.content?.content ?? item.summary?.content ?? '';
         const text = plainText(html);
@@ -596,9 +616,11 @@ export class GoogleReaderClient {
         } satisfies Article;
       });
       const mapped = this.performanceRun ? this.performanceRun.measureSync('mapping', mapArticles) : mapArticles();
-      await sink.stageArticles(mapped);
-    }));
-    await Promise.all([structure, articles]);
+      await sink.stageArticles(mapped, continuation);
+    }, { order: 'oldest', continuation: checkpoint?.continuation }));
+    // Earlier pages may predate this attempt. Reconcile the whole staged state
+    // using complete authoritative sets, then let publication overlay local intent.
+    await sink.stageState?.(context.unreadItemIds, context.starredItemIds);
   }
 
   private async incrementalContext(auth: string) {
