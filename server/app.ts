@@ -14,7 +14,7 @@ import { developmentSession, requireDevelopmentUser } from './auth/development.j
 import { createPasskeyAuthentication } from './auth/passkeys.js';
 import { newId, nowIso, openDatabase, type AppDatabase } from './database.js';
 import { fixtureSnapshot } from './fixtures.js';
-import { BIRCHFEED_API_URL, GoogleReaderClient } from './integrations/google-reader.js';
+import { BIRCHFEED_API_URL, GoogleReaderClient, ReaderImportRestartError } from './integrations/google-reader.js';
 import { deleteIntegration, hasIntegration, loadBirchfeed, loadBirchfeedWithGeneration, loadReadwise, saveIntegration } from './integrations/settings.js';
 import { ReaderHighlightDeliveryError, ReadwiseClient, type ReaderToolSessionFactory } from './integrations/readwise.js';
 import { AppLogger, readAppLogs, readLogExport, requestLogger } from './logging.js';
@@ -397,23 +397,26 @@ export function createApp(config: AppConfig, dependencies: {
           return;
         }
         readerCache.clearStorageDeferral(currentLease.accountKey);
-        const importRun = readerCache.beginImport(currentLease);
+        const resumed = readerCache.beginResumableImport(currentLease);
+        const importRun = resumed.run;
+        articleCount = resumed.itemsStaged;
         activeRun = importRun;
+        if (resumed.itemsStaged > 0) logger.info('Reader cache full import resumed', { articles: resumed.itemsStaged });
         const client = new GoogleReaderClient(integration.credentials, fetchImplementation, performanceRun, controller.signal);
         await client.importTo({
           stageStructure(folders, subscriptions) {
             subscriptionCount = subscriptions.length;
-            readerCache.stageFolders(importRun, folders);
-            readerCache.stageSubscriptions(importRun, subscriptions);
+            readerCache.stageImportStructure(importRun, folders, subscriptions);
           },
-          stageArticles(articles) {
-            for (let offset = 0; offset < articles.length; offset += 500) {
-              const batch = articles.slice(offset, offset + 500);
-              readerCache.stageArticles(importRun, batch);
-              articleCount += batch.length;
-            }
+          stageArticles(articles, continuation) {
+            controller.signal.throwIfAborted();
+            articleCount = readerCache.stageImportPage(importRun, articles, continuation);
           },
-        });
+          stageState(unreadIds, starredIds) {
+            controller.signal.throwIfAborted();
+            readerCache.reconcileImportState(importRun, unreadIds, starredIds);
+          },
+        }, resumed.checkpoint);
         if (controller.signal.aborted) throw controller.signal.reason;
         if (loadBirchfeedWithGeneration(database, config)?.generation !== integration.generation) {
           throw new StaleSynchronizationError();
@@ -468,8 +471,14 @@ export function createApp(config: AppConfig, dependencies: {
           );
           const fingerprint = readerSubscriptionFingerprint(discovery.subscriptions, discovery.folders);
           if (discovery.structureChanged) {
-            readerCache.completeIncrementalRun(incrementalRun, { releaseLease: false });
+            readerCache.completeIncrementalRun(incrementalRun, { releaseLease: !plan.fullRetryDue, updateFreshness: false });
             activeRun = null;
+            if (!plan.fullRetryDue) {
+              // Structure discovery must honor the same persistent cooldown as
+              // scheduled maintenance. Keep the prior complete collection usable.
+              logger.info('Reader subscription refresh deferred until full import retry');
+              return;
+            }
             logger.info('Reader subscription structure changed; promoting synchronization to a full import');
             await runFullImport(lease);
             return;
@@ -527,7 +536,8 @@ export function createApp(config: AppConfig, dependencies: {
         });
       } catch (error) {
         if (activeRun) {
-          readerCache.fail(activeRun, error);
+          readerCache.fail(activeRun, error,
+            !(error instanceof StaleSynchronizationError) && !(error instanceof ReaderImportRestartError));
           activeRun = null;
           pruneAfterRun = 'failed';
         }

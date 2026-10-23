@@ -10,9 +10,11 @@ import type {
 } from '../shared/reader.js';
 import type { AppDatabase } from './database.js';
 import { newId, nowIso } from './database.js';
-import { normalizeGoogleReaderItemId, type GoogleReaderCredentials } from './integrations/google-reader.js';
+import { normalizeGoogleReaderItemId, ReaderImportRestartError, type GoogleReaderCredentials } from './integrations/google-reader.js';
 
 export const READER_IMPORT_BATCH_SIZE = 500;
+// Bound retained partial scans and the lifetime of provider continuation tokens.
+export const READER_IMPORT_RESUME_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
 
 export type ReaderCacheIdentity = {
   accountKey: string;
@@ -43,6 +45,7 @@ export type ReaderCacheIncrementalRun = ReaderCacheLease & {
 
 export type ReaderSyncPlan = {
   full: boolean;
+  fullRetryDue: boolean;
   routine: boolean;
   state: boolean;
   body: boolean;
@@ -259,6 +262,115 @@ export class ReaderCache {
     return begin.immediate();
   }
 
+  private resumeCutoff() {
+    return new Date(this.clock().getTime() - READER_IMPORT_RESUME_MAX_AGE_MS).toISOString();
+  }
+
+  beginResumableImport(lease: ReaderCacheLease) {
+    const begin = this.database.transaction(() => {
+      this.assertLease(lease);
+      const prior = this.database.prepare(`
+        SELECT generation.id, generation.generation_number, generation.started_at,
+          progress.continuation, progress.content_complete,
+          (SELECT COUNT(*) FROM reader_articles WHERE generation_id = generation.id) AS items_staged
+        FROM reader_cache_generations generation
+        JOIN reader_import_progress progress ON progress.generation_id = generation.id
+        WHERE generation.account_key = ? AND generation.status = 'staging' AND generation.started_at > ?
+        ORDER BY generation.generation_number DESC LIMIT 1
+      `).get(lease.accountKey, this.resumeCutoff()) as {
+        id: string; generation_number: number; started_at: string;
+        continuation: string | null; content_complete: number; items_staged: number;
+      } | undefined;
+      if (!prior) {
+        const run = this.beginImport(lease);
+        this.database.prepare('INSERT INTO reader_import_progress (generation_id) VALUES (?)').run(run.generationId);
+        return { run, checkpoint: { continuation: null, contentComplete: false }, itemsStaged: 0 };
+      }
+      const timestamp = this.timestamp();
+      // Claim the existing generation under the new lease fence. A worker from
+      // before the restart cannot advance its pages or publish after this point.
+      this.database.prepare(`UPDATE reader_sync_runs SET status = 'failed', finished_at = ?,
+        error = 'Import interrupted before resuming' WHERE generation_id = ? AND status = 'running'`)
+        .run(timestamp, prior.id);
+      this.database.prepare('UPDATE reader_cache_generations SET fence_token = ?, error = NULL, failed_at = NULL WHERE id = ?')
+        .run(lease.fenceToken, prior.id);
+      const runId = newId();
+      this.database.prepare(`INSERT INTO reader_sync_runs
+        (id, account_key, generation_id, fence_token, status, items_staged, started_at)
+        VALUES (?, ?, ?, ?, 'running', ?, ?)`)
+        .run(runId, lease.accountKey, prior.id, lease.fenceToken, prior.items_staged, timestamp);
+      this.database.prepare('UPDATE reader_accounts SET last_attempt_at = ? WHERE account_key = ?')
+        .run(timestamp, lease.accountKey);
+      const run: ReaderCacheImport = { ...lease, generationId: prior.id,
+        generationNumber: prior.generation_number, runId, startedAt: prior.started_at };
+      return { run, checkpoint: { continuation: prior.continuation, contentComplete: Boolean(prior.content_complete) },
+        itemsStaged: prior.items_staged };
+    });
+    return begin.immediate();
+  }
+
+  stageImportStructure(run: ReaderCacheImport, folders: Folder[], subscriptions: Subscription[]) {
+    const stage = this.database.transaction(() => {
+      this.assertLease(run);
+      const progress = this.database.prepare(`SELECT subscription_fingerprint FROM reader_import_progress WHERE generation_id = ?`)
+        .get(run.generationId) as { subscription_fingerprint: string | null };
+      const fingerprint = readerSubscriptionFingerprint(subscriptions, folders);
+      if (progress.subscription_fingerprint && progress.subscription_fingerprint !== fingerprint) {
+        throw new ReaderImportRestartError('Subscriptions changed during a resumable import; a new scan is required');
+      }
+      if (!progress.subscription_fingerprint) {
+        this.stageFolders(run, folders);
+        this.stageSubscriptions(run, subscriptions);
+        this.database.prepare('UPDATE reader_import_progress SET subscription_fingerprint = ? WHERE generation_id = ?')
+          .run(fingerprint, run.generationId);
+      }
+    });
+    stage.immediate();
+  }
+
+  stageImportPage(run: ReaderCacheImport, articles: Article[], continuation: string | null) {
+    const stage = this.database.transaction(() => {
+      this.assertLease(run);
+      const progress = this.database.prepare(`SELECT continuation_history, content_complete FROM reader_import_progress WHERE generation_id = ?`)
+        .get(run.generationId) as { continuation_history: string; content_complete: number };
+      const history = JSON.parse(progress.continuation_history) as string[];
+      if (progress.content_complete || (continuation && history.includes(continuation))) {
+        throw new ReaderImportRestartError('RSS service returned a repeating continuation token');
+      }
+      // Provider pages can overlap, including across attempts. Retain the first
+      // copy without inflating progress or storage estimates on a replay.
+      const known = this.database.prepare('SELECT 1 FROM reader_articles WHERE generation_id = ? AND id = ?');
+      const unique = new Map(articles.map((article) => [article.id, article]));
+      const fresh = [...unique.values()].filter((article) => !known.get(run.generationId, article.id));
+      for (const batch of chunks(fresh, READER_IMPORT_BATCH_SIZE)) this.stageArticles(run, batch);
+      if (continuation) history.push(continuation);
+      // Pages and their cursor commit together. A crash can replay the current
+      // page but can never skip one that was not fully written.
+      this.database.prepare(`UPDATE reader_import_progress SET continuation = ?, content_complete = ?,
+        pages_staged = pages_staged + 1, continuation_history = ? WHERE generation_id = ?`)
+        .run(continuation, Number(continuation === null), JSON.stringify(history), run.generationId);
+      return (this.database.prepare('SELECT items_staged FROM reader_sync_runs WHERE id = ?')
+        .get(run.runId) as { items_staged: number }).items_staged;
+    });
+    return stage.immediate();
+  }
+
+  reconcileImportState(run: ReaderCacheImport, unreadIds: Set<string>, starredIds: Set<string>) {
+    const reconcile = this.database.transaction(() => {
+      this.assertLease(run);
+      const rows = this.database.prepare('SELECT article_id FROM reader_article_state WHERE generation_id = ?')
+        .all(run.generationId) as Array<{ article_id: string }>;
+      const update = this.database.prepare(`UPDATE reader_article_state SET is_read = ?, is_starred = ?
+        WHERE generation_id = ? AND article_id = ?`);
+      for (const row of rows) {
+        const normalized = normalizeGoogleReaderItemId(row.article_id);
+        update.run(Number(!unreadIds.has(normalized)), Number(starredIds.has(normalized)), run.generationId, row.article_id);
+      }
+      this.refreshUnreadCounts(run.generationId);
+    });
+    reconcile.immediate();
+  }
+
   beginIncrementalRun(lease: ReaderCacheLease, kind: ReaderCacheIncrementalRun['kind'] = 'routine'): ReaderCacheIncrementalRun {
     const begin = this.database.transaction(() => {
       this.assertLease(lease);
@@ -354,9 +466,14 @@ export class ReaderCache {
     const maintenanceRetryMs = cadence.fullRetryMs ?? 6 * 60 * 60 * 1_000;
     const retryMs = hasGeneration ? maintenanceRetryMs : Math.min(maintenanceRetryMs, 180_000);
     const retryDue = lastFull?.status !== 'failed' || due(lastFull.finished_at, retryMs);
-    const full = !deferred && retryDue && (!hasGeneration || due(checkpoint?.last_full_at, cadence.fullMs));
+    const pendingImport = Boolean(this.database.prepare(`SELECT 1 FROM reader_cache_generations generation
+      JOIN reader_import_progress progress ON progress.generation_id = generation.id
+      WHERE generation.account_key = ? AND generation.status = 'staging' AND generation.started_at > ?
+      LIMIT 1`).get(identity.accountKey, this.resumeCutoff()));
+    const full = !deferred && retryDue && (pendingImport || !hasGeneration || due(checkpoint?.last_full_at, cadence.fullMs));
     return {
       full,
+      fullRetryDue: retryDue,
       routine: !deferred && (full || (hasGeneration && due(checkpoint?.last_routine_at, cadence.routineMs))),
       state: !deferred && (full || (hasGeneration && due(checkpoint?.last_state_at, cadence.stateMs))),
       body: !deferred && (full || (hasGeneration && due(checkpoint?.last_body_at, cadence.bodyMs))),
@@ -567,6 +684,25 @@ export class ReaderCache {
       )
     `).get(generationId) as { total: number; unread: number; latest: string | null };
     scopeInsert.run(generationId, 'uncategorized', uncategorized.total, uncategorized.unread, uncategorized.latest);
+  }
+
+  private refreshUnreadCounts(generationId: string) {
+    this.database.prepare(`
+      UPDATE reader_subscriptions SET unread_count = (
+        SELECT COUNT(*) FROM reader_articles a JOIN reader_article_state s
+          ON s.generation_id = a.generation_id AND s.article_id = a.id
+        WHERE a.generation_id = reader_subscriptions.generation_id
+          AND a.feed_id = reader_subscriptions.id AND s.is_read = 0
+      ) WHERE generation_id = ?
+    `).run(generationId);
+    this.database.prepare(`
+      UPDATE reader_folders SET unread_count = (
+        SELECT COUNT(*) FROM reader_article_folders af JOIN reader_article_state s
+          ON s.generation_id = af.generation_id AND s.article_id = af.article_id
+        WHERE af.generation_id = reader_folders.generation_id
+          AND af.folder_id = reader_folders.id AND s.is_read = 0
+      ) WHERE generation_id = ?
+    `).run(generationId);
   }
 
   private applyState(generationId: string, mutation: ArticleMutation) {
@@ -1108,22 +1244,7 @@ export class ReaderCache {
           value: Boolean(override.value),
         });
       }
-      this.database.prepare(`
-        UPDATE reader_subscriptions SET unread_count = (
-          SELECT COUNT(*) FROM reader_articles a JOIN reader_article_state s
-            ON s.generation_id = a.generation_id AND s.article_id = a.id
-          WHERE a.generation_id = reader_subscriptions.generation_id
-            AND a.feed_id = reader_subscriptions.id AND s.is_read = 0
-        ) WHERE generation_id = ?
-      `).run(generationId);
-      this.database.prepare(`
-        UPDATE reader_folders SET unread_count = (
-          SELECT COUNT(*) FROM reader_article_folders af JOIN reader_article_state s
-            ON s.generation_id = af.generation_id AND s.article_id = af.article_id
-          WHERE af.generation_id = reader_folders.generation_id
-            AND af.folder_id = reader_folders.id AND s.is_read = 0
-        ) WHERE generation_id = ?
-      `).run(generationId);
+      this.refreshUnreadCounts(generationId);
       const timestamp = this.timestamp();
       this.database.prepare(`
         INSERT INTO reader_incremental_checkpoints (account_key, last_state_at) VALUES (?, ?)
@@ -1170,15 +1291,17 @@ export class ReaderCache {
     return versions;
   }
 
-  completeIncrementalRun(run: ReaderCacheIncrementalRun, options: { releaseLease?: boolean } = {}) {
+  completeIncrementalRun(run: ReaderCacheIncrementalRun, options: { releaseLease?: boolean; updateFreshness?: boolean } = {}) {
     const complete = this.database.transaction(() => {
       this.assertLease(run);
       const timestamp = this.timestamp();
       this.database.prepare(`UPDATE reader_sync_runs SET status = 'succeeded', finished_at = ? WHERE id = ?`)
         .run(timestamp, run.runId);
-      this.database.prepare(`
-        UPDATE reader_accounts SET last_success_at = ?, last_error = NULL WHERE account_key = ?
-      `).run(timestamp, run.accountKey);
+      if (options.updateFreshness !== false) {
+        this.database.prepare(`
+          UPDATE reader_accounts SET last_success_at = ?, last_error = NULL WHERE account_key = ?
+        `).run(timestamp, run.accountKey);
+      }
       if (options.releaseLease !== false) {
         this.database.prepare(`
           DELETE FROM reader_sync_leases WHERE account_key = ? AND owner_id = ? AND fence_token = ?
@@ -1195,6 +1318,9 @@ export class ReaderCache {
         SELECT status, started_at FROM reader_cache_generations WHERE id = ? AND account_key = ? AND fence_token = ?
       `).get(importRun.generationId, importRun.accountKey, importRun.fenceToken) as { status: string; started_at: string } | undefined;
       if (!generation || generation.status !== 'staging') throw new ReaderCacheFencedError();
+      const progress = this.database.prepare('SELECT content_complete FROM reader_import_progress WHERE generation_id = ?')
+        .get(importRun.generationId) as { content_complete: number } | undefined;
+      if (progress && !progress.content_complete) throw new Error('Cannot publish an incomplete reader import');
 
       const overrides = this.database.prepare(`
         SELECT article_id, operation, value, revision, confirmed_at
@@ -1289,6 +1415,7 @@ export class ReaderCache {
       this.database.prepare(`
         UPDATE reader_sync_runs SET status = 'succeeded', finished_at = ? WHERE id = ?
       `).run(committedAt, importRun.runId);
+      this.database.prepare('DELETE FROM reader_import_progress WHERE generation_id = ?').run(importRun.generationId);
       this.database.prepare(`
         DELETE FROM reader_sync_leases WHERE account_key = ? AND owner_id = ? AND fence_token = ?
       `).run(importRun.accountKey, importRun.ownerId, importRun.fenceToken);
@@ -1297,7 +1424,7 @@ export class ReaderCache {
     return publish.immediate();
   }
 
-  fail(importRun: ReaderCacheImport | ReaderCacheIncrementalRun, error: unknown) {
+  fail(importRun: ReaderCacheImport | ReaderCacheIncrementalRun, error: unknown, preserveProgress = false) {
     const message = error instanceof Error ? error.message : 'Reader import failed';
     const timestamp = this.timestamp();
     const fail = this.database.transaction(() => {
@@ -1305,10 +1432,18 @@ export class ReaderCache {
         SELECT 1 FROM reader_sync_leases WHERE account_key = ? AND owner_id = ? AND fence_token = ?
       `).get(importRun.accountKey, importRun.ownerId, importRun.fenceToken));
       if (importRun.generationId) {
+        const resumable = preserveProgress && stillOwned && Boolean(this.database.prepare(`
+          SELECT 1 FROM reader_import_progress progress
+          JOIN reader_accounts account ON account.account_key = ?
+          WHERE progress.generation_id = ? AND progress.pages_staged > 0 AND account.invalidated_at IS NULL
+        `).get(importRun.accountKey, importRun.generationId));
         this.database.prepare(`
-          UPDATE reader_cache_generations SET status = 'failed', failed_at = ?, error = ?
-          WHERE id = ? AND status = 'staging'
-        `).run(timestamp, message, importRun.generationId);
+          UPDATE reader_cache_generations SET status = ?, failed_at = ?, error = ?
+          WHERE id = ? AND status = 'staging' AND fence_token = ?
+        `).run(resumable ? 'staging' : 'failed', timestamp, message, importRun.generationId, importRun.fenceToken);
+        if (stillOwned && !resumable) {
+          this.database.prepare('DELETE FROM reader_import_progress WHERE generation_id = ?').run(importRun.generationId);
+        }
       }
       this.database.prepare(`
         UPDATE reader_sync_runs SET status = ?, finished_at = ?, error = ? WHERE id = ? AND status = 'running'
@@ -1364,6 +1499,11 @@ export class ReaderCache {
       JOIN reader_accounts account ON account.account_key = generation.account_key
       WHERE generation.id IS NOT account.current_generation_id
         AND NOT (
+          generation.status = 'staging' AND account.invalidated_at IS NULL AND generation.started_at > ?
+          AND EXISTS (SELECT 1 FROM reader_import_progress progress
+            WHERE progress.generation_id = generation.id AND progress.pages_staged > 0)
+        )
+        AND NOT (
           generation.status = 'staging' AND EXISTS (
             SELECT 1 FROM reader_sync_leases lease
             WHERE lease.account_key = generation.account_key
@@ -1375,7 +1515,7 @@ export class ReaderCache {
         CASE generation.status WHEN 'failed' THEN 0 WHEN 'staging' THEN 1 ELSE 2 END,
         generation.generation_number,
         generation.id
-    `).all(timestamp) as Array<{
+    `).all(this.resumeCutoff(), timestamp) as Array<{
       id: string;
       account_key: string;
       generation_number: number;
@@ -1450,6 +1590,11 @@ export class ReaderCache {
             WHERE generation.id = ?
               AND generation.id IS NOT account.current_generation_id
               AND NOT (
+                generation.status = 'staging' AND account.invalidated_at IS NULL AND generation.started_at > ?
+                AND EXISTS (SELECT 1 FROM reader_import_progress progress
+                  WHERE progress.generation_id = generation.id AND progress.pages_staged > 0)
+              )
+              AND NOT (
                 generation.status = 'staging' AND EXISTS (
                   SELECT 1 FROM reader_sync_leases lease
                   WHERE lease.account_key = generation.account_key
@@ -1457,7 +1602,7 @@ export class ReaderCache {
                     AND lease.expires_at > ?
                 )
               )
-          `).get(candidate.generationId, this.timestamp());
+          `).get(candidate.generationId, this.resumeCutoff(), this.timestamp());
           const protectionCheckMs = performance.now() - protectionStarted;
           if (!deletable) {
             this.database.exec('COMMIT');
@@ -1584,6 +1729,9 @@ export class ReaderCache {
       this.database.prepare(`UPDATE reader_accounts SET invalidated_at = ? WHERE account_key = ?`)
         .run(timestamp, identity.accountKey);
       this.database.prepare(`DELETE FROM reader_sync_leases WHERE account_key = ?`).run(identity.accountKey);
+      this.database.prepare(`DELETE FROM reader_import_progress WHERE generation_id IN (
+        SELECT id FROM reader_cache_generations WHERE account_key = ?
+      )`).run(identity.accountKey);
     });
     invalidate.immediate();
   }

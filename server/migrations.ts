@@ -646,6 +646,20 @@ const migrations: Migration[] = [
       ALTER TABLE reader_articles ADD COLUMN thumbnail_url TEXT;
     `,
   },
+  {
+    version: 13,
+    name: 'resumable_reader_imports',
+    sql: `
+      CREATE TABLE reader_import_progress (
+        generation_id TEXT PRIMARY KEY REFERENCES reader_cache_generations(id) ON DELETE CASCADE,
+        continuation TEXT,
+        content_complete INTEGER NOT NULL DEFAULT 0 CHECK (content_complete IN (0, 1)),
+        subscription_fingerprint TEXT,
+        pages_staged INTEGER NOT NULL DEFAULT 0,
+        continuation_history TEXT NOT NULL DEFAULT '[]'
+      );
+    `,
+  },
 ];
 
 function ensureMigrationTable(database: AppDatabase) {

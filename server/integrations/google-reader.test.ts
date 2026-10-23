@@ -193,6 +193,32 @@ describe('Google Reader compatible Birchfeed client', () => {
     expect(pages).toEqual([['article-1', 'duplicate'], ['article-2']]);
   });
 
+  it('rechecks structure and authoritative state without fetching bodies for a completed checkpoint', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith('/accounts/ClientLogin')) return new Response('Auth=reader-key\n');
+      if (url.pathname.includes('/subscription/list')) return jsonResponse({ subscriptions: [{ id: 'feed/1', title: 'Feed', categories: [] }] });
+      if (url.pathname.includes('/unread-count')) return jsonResponse({ unreadcounts: [] });
+      if (url.pathname.includes('/stream/items/ids')) return jsonResponse({ itemRefs:
+        url.searchParams.has('xt') ? [{ id: '123' }] : [],
+      });
+      throw new Error('A completed checkpoint must not download article bodies');
+    });
+    const structures: string[][] = [];
+    const states: string[][] = [];
+    const pages: string[][] = [];
+    await new GoogleReaderClient({
+      serverUrl: 'https://complete.example.test', email: 'reader@example.test', apiKey: 'secret',
+    }, fetchMock).importTo({
+      stageStructure(_folders, subscriptions) { structures.push(subscriptions.map((subscription) => subscription.id)); },
+      stageArticles(articles) { pages.push(articles.map((article) => article.id)); },
+      stageState(unread) { states.push([...unread]); },
+    }, { continuation: null, contentComplete: true });
+    expect(structures).toEqual([['feed/1']]);
+    expect(states).toEqual([['123']]);
+    expect(pages).toEqual([]);
+  });
+
   it('stops a malformed service from repeating the same continuation forever', async () => {
     const fetchMock = vi.fn<typeof fetch>(async (input) => {
       const url = String(input);
