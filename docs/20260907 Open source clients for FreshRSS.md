@@ -42,4 +42,4 @@ Keep FreshRSS as the sole aggregation/sync backend and use its built-in web read
 
 If a different web UI is important, trial **FriRSS** alongside—not instead of—FreshRSS. Put it behind HTTPS, back up its data volume, use a dedicated FreshRSS API password, and retain FreshRSS’s UI as the fallback while FriRSS develops a longer security and maintenance track record.
 
-For installed apps, choose **FeedFlow** for one consistent client across desktop and mobile; choose **Capy Reader** on Android when FreshRSS feature coverage and sync performance matter most; choose **RSS Guard** for a mature, feature-heavy desktop client. All three use `chadashot.app` as the source of truth, so Birchfeed is unnecessary for this arrangement.
+For installed apps, choose **FeedFlow** for one consistent client across desktop and mobile; choose **Capy Reader** on Android when FreshRSS feature coverage and sync performance matter most; choose **RSS Guard** for a mature, feature-heavy desktop client. All three use `chadashot.app` as the source of truth.

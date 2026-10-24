@@ -42,7 +42,7 @@ export function describeOutboxFailure(result: OutboxRunResult) {
   if (!result.failureKind) return null;
   const progress = result.acknowledged > 0 ? `${result.acknowledged} synchronized; ` : '';
   if (result.failureKind === 'authentication') {
-    return `${progress}${result.pending} changes need you to reconnect Birchfeed`;
+    return `${progress}${result.pending} changes need you to reconnect FreshRSS`;
   }
   if (result.failureKind === 'permanent') {
     return `${progress}${result.pending} changes were rejected and remain pending`;

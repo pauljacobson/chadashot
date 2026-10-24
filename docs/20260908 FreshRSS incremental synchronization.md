@@ -1,24 +1,24 @@
-# Birchfeed incremental synchronization
+# FreshRSS incremental synchronization
 
 This document records the capability evidence, safe stopping rule, cadence, and fallback selected for issue #6. Live probes were read-only and emitted only counts, field names, booleans, and a hash of the endpoint host.
 
 ## Capability matrix
 
-| Capability | Live Birchfeed result, 2026-09-08 | Use |
+| Capability | Live FreshRSS-compatible provider result, 2026-09-08 | Use |
 | --- | --- | --- |
 | Descending stream order (`r=n`) | 10/10 items ordered by `timestampUsec` and `crawlTimeMsec`; publication dates were not monotonic | Safe only with modified/ingest time plus overlap |
 | Ascending stream order (`r=o`) | 10/10 items ordered by `timestampUsec` and `crawlTimeMsec`; publication dates were not monotonic | Diagnostic/full-scan option, not routine cursor |
 | `ot` cutoff | Seven-day query returned a paginated result; a future cutoff returned zero items | Routine modified/ingest-time window |
 | ID discovery | `stream/items/ids` accepted `ot`, returned 10 IDs and a continuation | Discover candidate new IDs without bodies |
 | Selective content | `stream/items/contents` returned both requested IDs | Fetch bodies only for unknown IDs during routine sync |
-| State markers | `unread-count` returned 654 entries and `newestItemTimestampUsec` markers | Change hint only; not authoritative item state |
+| State markers | `unread-count` returned entries with `newestItemTimestampUsec` markers | Change hint only; not authoritative item state |
 | Full unread/starred sets | Existing full scans succeeded and paginate independently | Authoritative scheduled state reconciliation |
 | Per-item state categories | Neither 20 newest nor 20 oldest sampled items exposed read/starred tags | New items begin unread/unstarred until authoritative state scan |
 | Continuation safety | Existing client rejects repeated tokens | All scans retain duplicate/repetition guards |
 | Body modification marker without body | Not available from item-ID discovery | Scheduled bounded content overlap plus daily full fallback |
 | Deleted-item stream | Not verified/supported | Daily full reconciliation is authoritative |
 
-The public FreshRSS Google Reader implementation is supporting evidence, not proof of Birchfeed behavior. It applies `ot` to publication or modified time, orders by its continuation ID, and supports selective item lookup. The live results above are the authority for the selected Birchfeed path: [FreshRSS Google Reader API documentation](https://github.com/FreshRSS/FreshRSS/blob/edge/docs/en/developers/06_GoogleReader_API.md) and [FreshRSS API source](https://github.com/FreshRSS/FreshRSS/blob/edge/p/api/greader.php).
+The public FreshRSS Google Reader implementation is supporting evidence; compatible providers may behave differently. It applies `ot` to publication or modified time, orders by its continuation ID, and supports selective item lookup. The live results above are the authority for the selected FreshRSS-compatible provider path: [FreshRSS Google Reader API documentation](https://github.com/FreshRSS/FreshRSS/blob/edge/docs/en/developers/06_GoogleReader_API.md) and [FreshRSS API source](https://github.com/FreshRSS/FreshRSS/blob/edge/p/api/greader.php).
 
 ## Safe stopping rule
 
@@ -41,17 +41,9 @@ An unchanged routine discovery downloads zero article bodies. The six-hour body 
 
 ## Live validation
 
-The first issue #6 run correctly treated the existing issue #5 cache as checkpointless and rebuilt it once. The immediately following routine run used the committed overlap cursor against the same connected Birchfeed account:
+The first issue #6 run correctly treated the existing issue #5 cache as checkpointless and rebuilt it once. The following routine run used the committed overlap cursor, found every candidate in the local generation, downloaded no article bodies, and advanced its checkpoint only after the complete ID window succeeded. Cached page delivery stayed independent from that background work.
 
-| Measurement | Full checkpoint bootstrap | Unchanged routine pass | Reduction |
-| --- | ---: | ---: | ---: |
-| Provider requests | 50 | 4 | 92.0% |
-| Provider decoded bytes | 91,581,385 | 376,404 | 99.59% |
-| Provider run time | 93.43 s | 6.73 s | 92.8% |
-| Candidate article IDs | 25,799 bodies traversed | 396 IDs | — |
-| Article bodies downloaded | 25,799 | 0 | 100% |
-
-The routine pass found every candidate in the local generation, inserted nothing, and advanced its checkpoint only after the complete ID window succeeded. Cached page delivery stayed independent from that background work. The remaining roughly 27 MB gzip compatibility snapshot and its serialization/compression cost belong to the pagination and virtualization work in the next issue; they are not Birchfeed synchronization traffic.
+Collection-specific live measurements are omitted from this document. These observations remain live-provider evidence, not synthetic benchmark results. Compatibility snapshot serialization and compression are separate from FreshRSS-compatible provider synchronization traffic and are addressed by the pagination and virtualization work.
 
 ## State and write ordering
 

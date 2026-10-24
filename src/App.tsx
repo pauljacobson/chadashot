@@ -1765,7 +1765,7 @@ function SettingsPanel({ session, onClose, onConnected, onRssDisconnected, onCle
         {error && <div className="settings-error-banner" role="alert"><strong>Integration problem</strong><span>{error}</span></div>}
         <div className="setting-section">
           <h2>RSS service</h2>
-          <div className="setting-line"><div><strong>Birchfeed or compatible service</strong><span>Google Reader compatible synchronization.</span></div><span className="setting-state">{status?.rss.configured ? 'Connected' : 'Not connected'}</span></div>
+          <div className="setting-line"><div><strong>FreshRSS or compatible service</strong><span>Google Reader compatible synchronization.</span></div><span className="setting-state">{status?.rss.configured ? 'Connected' : 'Not connected'}</span></div>
           {status?.rss.configured && status.rss.serverUrl && <div className="connected-endpoint">{status.rss.serverUrl}</div>}
           {status?.rss.configured && <div className="connection-actions"><button className="danger-action" type="button" disabled={disconnecting !== null} onClick={() => void removeRssService()}>{disconnecting === 'rss' ? 'Disconnecting…' : 'Disconnect RSS service'}</button></div>}
           {!status?.rss.configured && (
@@ -1811,7 +1811,7 @@ function SettingsPanel({ session, onClose, onConnected, onRssDisconnected, onCle
 }
 
 export function AuthenticationScreen({ session, onAuthenticated }: { session: SessionState; onAuthenticated: () => Promise<void> }) {
-  const [displayName, setDisplayName] = useState('Paul');
+  const [displayName, setDisplayName] = useState('');
   const [bootstrapToken, setBootstrapToken] = useState('');
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);

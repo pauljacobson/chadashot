@@ -40,7 +40,7 @@ Only a successful provider mutation writes cached state. The same transaction in
 
 ## Backup and rollback
 
-All cache state is ordinary SQLite data on the Railway volume and is deliberately excluded from offsite backups because Birchfeed can rebuild it. Local serialization tests reopen a committed database and confirm that bodies and state remain readable. Only the committed account pointer is served. Issue #43 adds bounded startup recovery for abandoned staging data and safe pruning for superseded generations; see [bounded reader cache pruning](./20260910%20Bounded%20reader%20cache%20pruning.md).
+All cache state is ordinary SQLite data on the Railway volume and is deliberately excluded from offsite backups because FreshRSS can rebuild it. Local serialization tests reopen a committed database and confirm that bodies and state remain readable. Only the committed account pointer is served. Issue #43 adds bounded startup recovery for abandoned staging data and safe pruning for superseded generations; see [bounded reader cache pruning](./20260910%20Bounded%20reader%20cache%20pruning.md).
 
 Set `READER_CLIENT_PATH=snapshot` to route the browser through the compatibility snapshot API. Leave `READER_CACHE_ENABLED=true` to assemble that response from the committed SQLite generation. Set `READER_CACHE_ENABLED=false` as well only when the provider-direct, request-blocking server path is required. Neither switch reverses migrations or clears committed generations, browser outboxes, acknowledgement barriers, queued mark-read jobs, or durable server jobs. Restore `READER_CACHE_ENABLED=true` and `READER_CLIENT_PATH=paginated` to resume the incremental path.
 

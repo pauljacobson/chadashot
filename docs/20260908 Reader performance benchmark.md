@@ -5,7 +5,7 @@ This document defines the baseline and repeatable measurement procedure for issu
 ## Safety and data handling
 
 - Use the deterministic synthetic fixture for browser and state-changing scenarios. It contains 20,000 articles, 50 feeds with 400 articles each, old unread and starred items, 2 KiB standard bodies, and a 64 KiB body every 500 articles. All URLs use the reserved `example.invalid` domain.
-- Live Birchfeed measurements are read-only. Do not run mutation, backlog, or reconnect scenarios against a production collection.
+- Live FreshRSS-compatible provider measurements are read-only. Do not run mutation, backlog, or reconnect scenarios against a production collection.
 - Metrics contain run IDs, phase names, counts, durations, byte counts, and completion state. They do not contain credentials, article/highlight text, article/feed IDs, or private URLs.
 - Encoded provider bytes come from `Content-Length` when present. For an identity response without that header they equal the fully decoded body bytes. For a compressed response with no usable `Content-Length`, encoded bytes remain unknown. An incomplete response never contributes an inferred byte total.
 
@@ -70,27 +70,11 @@ The baseline cannot produce an uncached-body result because every legacy snapsho
 
 ## Baseline results — 2026-09-08
 
-### Live read-only Birchfeed synchronization
+### Live read-only FreshRSS-compatible synchronization
 
-The local development app used the configured Birchfeed connection and did not send state-changing requests.
+The local development app used a configured FreshRSS-compatible connection and did not send state-changing requests. Full provider traversal and body transfer dominated the observed synchronization; mapping and serialization were smaller contributors.
 
-| Measurement | Result |
-| --- | ---: |
-| Articles | 25,654 |
-| Subscriptions | 809 |
-| Provider requests | 50 |
-| Provider decoded/identity bytes | 91,183,936 |
-| Total synchronization | 61,480.65 ms |
-| Authentication | 1,370.06 ms |
-| Subscriptions | 2,000.97 ms |
-| Content pages | 26 requests, 25,654 items, 59,232.16 ms |
-| Unread IDs | 20 requests, 19,140 IDs, 33,037.23 ms |
-| Starred IDs | 1 request, 0 IDs, 227.71 ms |
-| Mapping | 698.20 ms |
-| Serialized snapshot | 89,969,990 bytes in 162.12 ms |
-| Response | Completed; 89,969,990 identity bytes |
-
-This run confirms that full provider traversal and body transfer dominate. Mapping plus serialization was under one second; it does not explain the roughly 61-second synchronization.
+Collection-specific counts, timings, and transfer measurements are omitted from this document. This qualitative observation comes from a live provider and is separate from the synthetic desktop results below.
 
 ### Synthetic desktop browser
 
@@ -130,7 +114,7 @@ Compression retains the decoded legacy snapshot contract and negotiates Brotli, 
 | Gzip level 6 | 820,746 | 98.44% | 112.62 ms | 145,615 µs user + 2,802 µs system |
 | Brotli quality 4 | 357,165 | 99.32% | 59.54 ms | 89,393 µs user + 3,399 µs system |
 
-These unusually large ratios reflect deliberately repetitive synthetic bodies. They demonstrate correct encoding and measurement, not a forecast for real feeds. An aborted Brotli request logged 49,152 partial bytes while leaving completed encoded bytes unknown, confirming that disconnects do not become false transfer totals. Compression reduces browser transfer but does not remove the 50-request, 61-second live provider traversal measured above.
+These unusually large ratios reflect deliberately repetitive synthetic bodies. They demonstrate correct encoding and measurement, not a forecast for real feeds. An aborted Brotli request logged 49,152 partial bytes while leaving completed encoded bytes unknown, confirming that disconnects do not become false transfer totals. Compression reduces browser transfer but does not remove the provider traversal required by a full synchronization.
 
 ## Issue #7 paginated API result
 

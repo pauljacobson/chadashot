@@ -18,7 +18,7 @@ export default defineConfig({
       manifest: {
         name: 'Chadashot — Personal RSS Reader',
         short_name: 'Chadashot',
-        description: 'A quiet personal RSS reader for Birchfeed.',
+        description: 'A quiet personal RSS reader for FreshRSS-compatible services.',
         theme_color: '#39735d',
         background_color: '#f6f8f5',
         display: 'standalone',

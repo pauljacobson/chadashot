@@ -75,12 +75,12 @@ describe('database migrations', () => {
     const database = new Database(':memory:');
     database.exec(`
       CREATE TABLE users (id TEXT PRIMARY KEY, display_name TEXT NOT NULL, created_at TEXT NOT NULL);
-      INSERT INTO users VALUES ('user-1', 'Paul', '2026-09-07T00:00:00.000Z');
+      INSERT INTO users VALUES ('user-1', 'Reader', '2026-09-07T00:00:00.000Z');
     `);
 
     runMigrations(database);
 
-    expect(database.prepare('SELECT id, display_name FROM users').get()).toEqual({ id: 'user-1', display_name: 'Paul' });
+    expect(database.prepare('SELECT id, display_name FROM users').get()).toEqual({ id: 'user-1', display_name: 'Reader' });
     expect(currentSchemaVersion(database)).toEqual({ version: 13 });
   });
 

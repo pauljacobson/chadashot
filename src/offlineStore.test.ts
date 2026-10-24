@@ -50,7 +50,7 @@ const session: SessionState = {
   authenticated: true,
   mode: 'passkey',
   setupRequired: false,
-  user: { id: 'user-1', displayName: 'Paul' },
+  user: { id: 'user-1', displayName: 'Reader' },
 };
 
 function navigation(accountKey = 'account-1', generation = 'generation-1'): ReaderNavigation {

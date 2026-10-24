@@ -6,7 +6,7 @@ function jsonResponse(value: unknown) {
   return new Response(JSON.stringify(value), { status: 200, headers: { 'Content-Type': 'application/json' } });
 }
 
-describe('Google Reader compatible Birchfeed client', () => {
+describe('Google Reader compatible FreshRSS client', () => {
   beforeEach(() => clearGoogleReaderSessionCache());
 
   it('turns transport failures into an actionable connection error', async () => {

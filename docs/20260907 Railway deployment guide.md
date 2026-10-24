@@ -18,15 +18,15 @@ Chadashot deploys as one Docker-based Railway service from the repository root. 
 - Reader synchronization defaults are `READER_ROUTINE_SYNC_INTERVAL_MS=180000`, `READER_STATE_SYNC_INTERVAL_MS=900000`, `READER_BODY_SYNC_INTERVAL_MS=21600000`, `READER_FULL_SYNC_INTERVAL_MS=86400000`, and `READER_SYNC_OVERLAP_SECONDS=21600`. They bound discovery delay while keeping complete state, body, and collection reconciliation less frequent.
 - The deployment health check is `/api/health`.
 
-Treat `ENCRYPTION_KEY` as permanent application data: changing it makes the saved Birchfeed and Readwise credentials unreadable. Store it in a password manager as well as Railway.
+Treat `ENCRYPTION_KEY` as permanent application data: changing it makes the saved FreshRSS and Readwise credentials unreadable. Store it in a password manager as well as Railway.
 
 #### Source and configuration recovery
 
-GitHub is the source of truth for Chadashot's application code and deployment configuration. The production container does not replicate `/data/chadashot.sqlite` to Cloudflare R2 because that database is dominated by rebuildable Birchfeed articles, bodies, indexes, and synchronization state.
+GitHub is the source of truth for Chadashot's application code and deployment configuration. The production container does not replicate `/data/chadashot.sqlite` to Cloudflare R2 because that database is dominated by rebuildable FreshRSS articles, bodies, indexes, and synchronization state.
 
-Keep `ENCRYPTION_KEY` in a password manager or offline recovery record outside both GitHub and Railway. Changing or losing it makes saved Birchfeed and Readwise credentials unreadable. Keep the non-secret Railway configuration documented here and in `.env.example`.
+Keep `ENCRYPTION_KEY` in a password manager or offline recovery record outside both GitHub and Railway. Changing or losing it makes saved FreshRSS and Readwise credentials unreadable. Keep the non-secret Railway configuration documented here and in `.env.example`.
 
-Railway's persistent volume remains the working copy of runtime state. If the volume is lost, redeploy from GitHub, bootstrap a new account and passkey, reconnect Birchfeed and Readwise, and rebuild the reader cache from Birchfeed. A future offsite backup may export only application configuration—account/passkey records, recovery-code hashes, encrypted integration settings, and schema metadata—but it must exclude highlights, sessions, authentication challenges, and every `reader_*` table.
+Railway's persistent volume remains the working copy of runtime state. If the volume is lost, redeploy from GitHub, bootstrap a new account and passkey, reconnect FreshRSS and Readwise, and rebuild the reader cache from FreshRSS. A future offsite backup may export only application configuration—account/passkey records, recovery-code hashes, encrypted integration settings, and schema metadata—but it must exclude highlights, sessions, authentication challenges, and every `reader_*` table.
 
 #### Database migrations
 
@@ -42,7 +42,7 @@ Migration rules:
 
 #### Reader import process model
 
-Run one Railway web service and do not add a separate reader worker in this phase. A request serves the latest committed SQLite generation immediately and asks the same web process to refresh in the background. Routine runs discover IDs inside an overlapping time window and request bodies only for unknown IDs. Scheduled state, changed-body, and daily full reconciliation cover provider capabilities that have no reliable incremental marker. Short transactions stage at most 500 articles at a time; no transaction stays open during a Birchfeed request. Every data-changing phase verifies the current fencing token and advances its checkpoint in the same SQLite transaction.
+Run one Railway web service and do not add a separate reader worker in this phase. A request serves the latest committed SQLite generation immediately and asks the same web process to refresh in the background. Routine runs discover IDs inside an overlapping time window and request bodies only for unknown IDs. Scheduled state, changed-body, and daily full reconciliation cover provider capabilities that have no reliable incremental marker. Short transactions stage at most 500 articles at a time; no transaction stays open during a FreshRSS request. Every data-changing phase verifies the current fencing token and advances its checkpoint in the same SQLite transaction.
 
 The lease is stored in SQLite rather than process memory so overlapping Railway deployments cannot publish competing generations. Its default 45-second expiry and 15-second heartbeat allow a replacement process to recover after an old process stops. An expired or replaced owner is fenced from publication even if its old provider request later completes. A failed or interrupted generation remains uncommitted and the last successful generation remains readable.
 
@@ -57,7 +57,7 @@ Only `reader_accounts.current_generation_id` is served. An incomplete generation
 5. Open Chadashot, enter the Railway `BOOTSTRAP_TOKEN`, create the initial account, register the first passkey, and save the one-time recovery codes.
 6. Remove `BOOTSTRAP_TOKEN` from Railway after setup succeeds. The server also refuses bootstrap after an account exists.
 7. Add a second passkey from Settings → Account security, then verify that one recovery code can sign in and is rejected when reused.
-8. Connect Birchfeed and Readwise from Settings, then verify synchronization, read/star mutations, persistent highlights, and Reader document saving.
+8. Connect FreshRSS and Readwise from Settings, then verify synchronization, read/star mutations, persistent highlights, and Reader document saving.
 9. Confirm the service logs contain no Litestream startup or R2 replication attempts.
 
 #### Rollback boundary

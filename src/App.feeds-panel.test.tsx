@@ -12,7 +12,7 @@ vi.mock('./api', async (importOriginal) => ({
     authenticated: true,
     mode: 'development',
     setupRequired: false,
-    user: { id: 'user-1', username: 'Paul' },
+    user: { id: 'user-1', username: 'Reader' },
   })),
   unsubscribeFromFeed: vi.fn(async () => ({ removed: true as const })),
 }));
@@ -70,7 +70,7 @@ const article: Article = {
   feedId: 'feed-1',
   folderIds: [],
   title: 'A selected article',
-  author: 'Paul',
+  author: 'Reader',
   source: 'Example',
   canonicalUrl: 'https://example.test/article-1',
   publishedAt: '2026-09-09T00:00:00.000Z',

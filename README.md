@@ -1,12 +1,12 @@
 # Chadashot
 
-Chadashot is a personal RSS reading client for Birchfeed. It is an installable Progressive Web App with a responsive desktop and Android interface, passkey authentication, system light/dark appearance, native article sharing, and Readwise highlights.
+Chadashot is a personal RSS reading client for FreshRSS-compatible services. It is an installable Progressive Web App with a responsive desktop and Android interface, passkey authentication, system light/dark appearance, native article sharing, and Readwise highlights.
 
 The previous FreshRSS deployment wrapper has been moved to a local, Git-ignored archive while the new client is developed. GitHub will remain the source for Railway deployments, and the new application will replace the existing FreshRSS service only after the client is ready for production cutover.
 
 ## Project status
 
-The initial review version includes the responsive reading interface, an expandable folder/feed tree with favicons and persistent ordering preferences, fixture-backed local use, a durable transactional server cache for live Birchfeed data, manual feed subscriptions, offline article caching and queued read/star changes, encrypted service credentials with explicit disconnect controls, production passkey onboarding with recovery codes and multiple passkeys, persistent Readwise highlights, article sharing, and versioned database migrations. The product specification, deployment guide, and supporting research are in [`docs/`](docs/).
+The initial review version includes the responsive reading interface, an expandable folder/feed tree with favicons and persistent ordering preferences, fixture-backed local use, a durable transactional server cache for live FreshRSS data, manual feed subscriptions, offline article caching and queued read/star changes, encrypted service credentials with explicit disconnect controls, production passkey onboarding with recovery codes and multiple passkeys, persistent Readwise highlights, article sharing, and versioned database migrations. The product specification, deployment guide, and supporting research are in [`docs/`](docs/).
 
 ## Run locally
 
@@ -20,7 +20,7 @@ npm run dev
 
 Open `http://localhost:5173`. Local development authentication only accepts loopback requests and cannot be enabled when `NODE_ENV=production`.
 
-The fixture reader works without secrets. Local development automatically creates a private encryption key under the ignored `data/` directory when one is not supplied. Enter Birchfeed and Readwise credentials in the app's Settings panel rather than in the environment file. Production always requires an explicit `ENCRYPTION_KEY`.
+The fixture reader works without secrets. Local development automatically creates a private encryption key under the ignored `data/` directory when one is not supplied. Enter FreshRSS and Readwise credentials in the app's Settings panel rather than in the environment file. Production always requires an explicit `ENCRYPTION_KEY`.
 
 Run all verification checks with:
 
@@ -53,13 +53,13 @@ Full imports save each completed content page and its provider continuation in o
 
 Subscription changes use the same persisted full-import retry cooldown, including for manual refreshes. Deferred discovery does not advance the last successful sync time. Partial scans expire after 24 hours; changed subscription membership, rejected continuation tokens (HTTP 400/404/410), or token cycles discard that scan and require a fresh import after cooldown. Disconnecting or replacing RSS credentials invalidates the old scan. Logs record resumed article counts without exposing provider continuation tokens. This behavior uses the existing timeout and retry settings; it does not raise the two-minute default.
 
-Five-minute polling adds up to 288 checks a day, plus checks triggered by device use. Based on recent logs, routine checks without body reconciliation downloaded roughly 0.34–0.52 MB, suggesting about 98–150 MB/day for those checks alone. State scans, new articles, body reconciliation, and daily full maintenance add traffic; roughly 0.3–0.5 GB/day is an initial estimate rather than measured hosted usage. Failed maintenance attempts can add more. The loop uses the existing process and bounded cache retention; it creates no extra service or copy of the database. Periodic outbound requests may prevent Railway sleeping, so compute costs could increase materially if the service previously slept. Freshness also depends on the RSS provider discovering new content. Review synchronization logs and Railway usage after rollout; a ten-minute interval halves routine polling traffic.
+Five-minute polling adds up to 288 checks a day, plus checks triggered by device use. Estimate routine polling traffic from the measured bytes per check for your collection, then account separately for state scans, new articles, body reconciliation, and daily full maintenance. Failed maintenance attempts can add more. The loop uses the existing process and bounded cache retention; it creates no extra service or copy of the database. Periodic outbound requests may prevent Railway sleeping, so compute costs could increase materially if the service previously slept. Freshness also depends on the RSS provider discovering new content. Review synchronization logs and Railway usage after rollout; a ten-minute interval halves routine polling traffic.
 
 ## Current decisions
 
-- Birchfeed is the production RSS aggregation service.
-- The client uses Birchfeed's Google Reader-compatible API.
-- The connection endpoint is configurable for Birchfeed or another compatible service; Birchfeed's documented endpoint is prefilled.
+- The client connects to a FreshRSS-compatible RSS aggregation service.
+- The client uses the Google Reader-compatible API supported by FreshRSS.
+- The connection endpoint is configurable for FreshRSS or another compatible service in Settings.
 - Fever support is deferred.
 - The production app remains at `chadashot.app`.
 - Railway deploys the application from this GitHub repository.

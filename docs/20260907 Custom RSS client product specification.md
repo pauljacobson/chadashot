@@ -2,13 +2,15 @@
 
 **Status:** Proposed v0.1  
 **Date:** 2026-09-07  
-**Primary user:** Paul  
-**Primary devices:** Android phone and desktop browser  
-**Deployment:** Personal web application deployed from GitHub to Railway at `chadashot.app`
+**Primary user:** A single account owner
+
+**Target platforms:** Mobile and desktop browsers
+
+**Deployment:** Web application deployed from GitHub to Railway
 
 ### Product definition
 
-Chadashot is a focused personal reading client that uses Birchfeed as its RSS aggregation and synchronization service. It provides a quieter, more personal interface than a general-purpose RSS reader while leaving feed polling, subscription state, unread state, and starring in Birchfeed.
+Chadashot is a focused personal reading client that uses FreshRSS as its RSS aggregation and synchronization service. It provides a quieter, more personal interface than a general-purpose RSS reader while leaving feed polling, subscription state, unread state, and starring in FreshRSS.
 
 The client is an installable Progressive Web App. It uses passkeys for passwordless authentication, follows the device's light or dark appearance, supports offline reading of recently synchronized articles, and can send selected passages to Readwise.
 
@@ -20,18 +22,18 @@ The first release is intentionally single-user and single-provider. The design s
 2. **Fast on a phone.** Core actions remain reachable with one hand and have visible controls even when swipe gestures are also supported.
 3. **Quietly capable.** Search, shortcuts, highlighting, offline state, and synchronization are available without filling the screen with permanent toolbars.
 4. **System-native appearance.** Light and dark themes follow the operating-system/browser setting automatically.
-5. **The service is the source of truth.** Birchfeed owns subscriptions and read/starred state; the client caches and queues changes but does not become a second aggregator.
-6. **Secrets stay on the server.** Birchfeed and Readwise keys never enter browser storage or application logs.
+5. **The service is the source of truth.** FreshRSS owns subscriptions and read/starred state; the client caches and queues changes but does not become a second aggregator.
+6. **Secrets stay on the server.** FreshRSS and Readwise keys never enter browser storage or application logs.
 
 ### Goals for the first useful release
 
 - Sign in with a passkey on Android and desktop.
 - Install and launch the client as a PWA.
-- Connect one Birchfeed account through its Google Reader-compatible API.
+- Connect one FreshRSS account through its Google Reader-compatible API.
 - Browse all articles, unread articles, starred articles, folders, and individual feeds.
 - Read sanitized feed content in a focused reading view.
 - Mark articles read/unread and starred/unstarred with optimistic updates.
-- Add and remove subscriptions when supported by the configured Birchfeed API key.
+- Add and remove subscriptions when supported by the configured FreshRSS API key.
 - Cache recent content for offline reading and queue state changes made offline.
 - Select text, optionally add a note, and save the highlight to Readwise.
 - Save the current article to Readwise Reader as a separate explicit action.
@@ -42,7 +44,7 @@ The first release is intentionally single-user and single-provider. The design s
 - Multiple application users, public registration, organizations, or sharing accounts.
 - Multiple simultaneous RSS providers.
 - Fever API support.
-- Running a feed fetcher or replacing Birchfeed/FreshRSS.
+- Running a feed fetcher or replacing FreshRSS or compatible services.
 - Full-text extraction from arbitrary article pages. The initial reader renders sanitized content supplied by the feed and offers “Open original” for truncated feeds.
 - Bidirectional Readwise synchronization or editing highlights after they have been sent.
 - Guaranteeing that highlights created through the Readwise Highlights API appear attached to the corresponding document inside Readwise Reader.
@@ -55,8 +57,8 @@ The first release is intentionally single-user and single-provider. The design s
 
 - **Inbox:** unread items across all feeds.
 - **All:** all synchronized items, newest first.
-- **Starred:** items starred in Birchfeed.
-- **Feeds:** an expandable tree of Birchfeed folders/labels with their feeds nested beneath them; feeds without a recognized folder appear under Uncategorized. A toggle above the tree limits it to feeds containing unread items and hides folders left empty by that filter.
+- **Starred:** items starred in FreshRSS.
+- **Feeds:** an expandable tree of FreshRSS folders/labels with their feeds nested beneath them; feeds without a recognized folder appear under Uncategorized. A toggle above the tree limits it to feeds containing unread items and hides folders left empty by that filter.
 - **Preferences:** personal interface choices, including system appearance and alphabetical or most-recent folder/feed ordering.
 - **Settings:** service connections, passkeys, offline storage, and application information. Each connected service has a confirmation-protected Disconnect action that removes only Chadashot's stored credential and does not alter the remote account or previously synchronized content.
 
@@ -109,7 +111,7 @@ Swiping an article may mark it read or star it, but every gesture must have an e
 
 - Initial search covers the locally synchronized article title, source, author, and cached feed content.
 - Search results clearly indicate when the device is offline and therefore searching only cached material.
-- Provider-side historical search may be added if Birchfeed's supported API surface proves reliable in the compatibility spike.
+- Provider-side historical search may be added if FreshRSS's supported API surface proves reliable in the compatibility spike.
 
 #### Highlighting
 
@@ -132,34 +134,34 @@ The user receives one of three outcomes: Saved, Already in Reader, or Retry need
 
 #### Protocol choice
 
-Use the Google Reader-compatible API as the first integration surface. FreshRSS recommends it over Fever and documents subscription, unread-count, tag, stream, write-token, and subscription-edit endpoints. The connection screen accepts an explicit server or API URL so the same adapter can work with Birchfeed or another compatible service; Birchfeed's documented `https://birchfeed.app/api/greader.php` endpoint is prefilled.
+Use the Google Reader-compatible API as the first integration surface. FreshRSS recommends it over Fever and documents subscription, unread-count, tag, stream, write-token, and subscription-edit endpoints. The connection screen accepts an explicit server or API URL so the same adapter can work with FreshRSS or another compatible service.
 
 The application stores the complete API base URL explicitly. It must not blindly append FreshRSS-specific paths to an arbitrary service root.
 
 #### Required provider operations
 
-- Authenticate through `accounts/ClientLogin` using the Birchfeed account email and a dedicated API key.
+- Authenticate through `accounts/ClientLogin` using the configured account credentials and a dedicated API password or key.
 - Add a feed or website URL through the write-token-protected `subscription/quickadd` endpoint, with `subscription/edit` and `ac=subscribe` as the compatibility fallback.
 - Fetch subscriptions, folders/tags, unread counts, article streams, continuation pages, and individual item content.
 - Obtain and refresh the write token required for mutations.
 - Mark read/unread, star/unstar, and mark a stream read.
-- Add, edit, move, and remove subscriptions where Birchfeed supports the corresponding operation.
+- Add, edit, move, and remove subscriptions where FreshRSS supports the corresponding operation.
 
 #### Provider boundary
 
 The application does not need a plugin system, but network operations should sit behind one small `ReaderSource` interface. Application state must consume normalized subscriptions, folders, articles, and mutations rather than raw Google Reader response objects.
 
 ```text
-Birchfeed Google Reader API
+FreshRSS Google Reader API
           │
           ▼
-   BirchfeedSource
+   GoogleReaderSource
           │ normalized domain objects
           ▼
  application services ── local cache/outbox ── React interface
 ```
 
-A future `FreshRssSource` can initially reuse the same implementation with a different compatibility profile. FreshRSS-only operations such as its private “actualize feeds” action must never enter the shared interface.
+Provider-specific compatibility profiles can reuse the same implementation. FreshRSS-only operations such as its private “actualize feeds” action must never enter the shared interface.
 
 ### Readwise integration
 
@@ -188,7 +190,7 @@ If Readwise publishes a supported Reader-highlight endpoint, the integration can
 
 - Public registration does not exist.
 - A fresh deployment creates no default account and exposes a one-time setup route only while the user table is empty.
-- Deployment requires a high-entropy bootstrap token supplied as an environment secret. The setup route accepts that token, creates Paul's initial account, and immediately starts passkey registration.
+- Deployment requires a high-entropy bootstrap token supplied as an environment secret. The setup route accepts that token, creates the owner's initial account, and immediately starts passkey registration.
 - Account creation and first-passkey registration complete as one setup transaction. An account without a usable credential must not be left behind after a failed ceremony.
 - After successful registration, the database records setup completion and the bootstrap token is no longer accepted, even if the deployment variable still exists. The variable should then be removed from Railway.
 
@@ -238,12 +240,12 @@ If Readwise publishes a supported Reader-highlight endpoint, the integration can
 
 ### Synchronization cadence
 
-- Birchfeed remains responsible for polling publisher feeds; Chadashot never polls individual publisher URLs.
+- FreshRSS remains responsible for polling publisher feeds; Chadashot never polls individual publisher URLs.
 - Synchronize immediately after sign-in and PWA launch.
 - Synchronize when the application regains focus after at least one minute, when connectivity returns, and after a manual refresh gesture.
-- While the application is visible, poll Birchfeed approximately every three minutes with overlap protection and backoff after errors or rate limiting.
+- While the application is visible, poll FreshRSS approximately every three minutes with overlap protection and backoff after errors or rate limiting.
 - Stop the foreground timer while the application is hidden. Mobile browsers cannot be relied on to run periodic background work consistently.
-- Push notifications are not part of the initial release. A later server-side job may poll Birchfeed every five to ten minutes and send opt-in Web Push notifications if timely article alerts become desirable.
+- Push notifications are not part of the initial release. A later server-side job may poll FreshRSS every five to ten minutes and send opt-in Web Push notifications if timely article alerts become desirable.
 
 ### System theme behavior
 
@@ -274,8 +276,8 @@ One process is sufficient for a personal app. A separate reverse proxy, Redis, b
 - Before cutover, export FreshRSS subscriptions as OPML and take a recoverable backup of its Railway volume.
 - Give the new application a fresh persistent volume mounted at its own data path; do not treat the existing FreshRSS database as an application database.
 - Verify the production container, health endpoint, migrations, and bootstrap guard on a Railway-provided staging address.
-- Switch `chadashot.app` to the new service only when the release is ready. Because passkeys are bound to their relying-party domain, complete Paul's real account-and-passkey onboarding after the custom domain and HTTPS certificate are active.
-- Keep the prior FreshRSS service or volume available for rollback until Birchfeed synchronization, passkey login, PWA installation, and Readwise actions have been verified in production.
+- Point the deployment's custom domain to the new service only when the release is ready. Because passkeys are bound to their relying-party domain, complete account-and-passkey onboarding after the custom domain and HTTPS certificate are active.
+- Keep the prior FreshRSS service or volume available for rollback until FreshRSS synchronization, passkey login, PWA installation, and Readwise actions have been verified in production.
 - Removing the prior FreshRSS service and volume is a separate destructive step and is not part of an automatic deployment.
 
 #### Logical modules
@@ -291,7 +293,7 @@ Web/PWA interface
             ▼
 Same-origin application API
     ├── passkey and session service
-    ├── BirchfeedSource adapter
+    ├── GoogleReaderSource adapter
     ├── Readwise integration
     ├── synchronization coordinator
     └── encrypted credential store
@@ -319,7 +321,7 @@ Same-origin application API
 - Encrypt provider tokens with an authenticated cipher.
 - Supply the master encryption key through the deployment secret store; never place it in SQLite or a backup containing SQLite.
 - Redact credentials and sensitive query parameters from structured logs.
-- Never send Birchfeed or Readwise tokens to the browser.
+- Never send FreshRSS or Readwise tokens to the browser.
 
 ### Security requirements
 
@@ -347,8 +349,8 @@ Same-origin application API
 #### Automated checks
 
 - Unit tests for normalization, pagination, mutation coalescing, highlight anchoring, and retry behavior.
-- Contract tests using recorded redacted Birchfeed responses.
-- An opt-in live compatibility suite using a dedicated Birchfeed API key and disposable test feed.
+- Contract tests using recorded redacted FreshRSS responses.
+- An opt-in live compatibility suite using a dedicated FreshRSS API key and disposable test feed.
 - Integration tests for passkey challenge expiry, replay rejection, origin/RP validation, counters, and multiple credentials.
 - Browser-level tests at desktop and Android-sized viewports for sign-in, installability, offline launch, read/star queues, selection highlighting, Readwise retry, and system-theme changes.
 - Security regression tests for token leakage, XSS payloads in feed content, CSRF, unauthorized connection access, and unsafe redirects.
@@ -369,7 +371,7 @@ The MVP is complete when all of the following are true:
 - A fresh deployment can be bootstrapped exactly once and two passkeys can be registered.
 - The same account can sign in from current Chrome on Android and a desktop browser.
 - The installed PWA launches in standalone mode and follows system light/dark changes.
-- Birchfeed subscriptions, folders, unread counts, articles, read state, and stars synchronize reliably.
+- FreshRSS subscriptions, folders, unread counts, articles, read state, and stars synchronize reliably.
 - The most recent cached articles remain readable offline.
 - Offline read/star changes synchronize without duplication or lost state.
 - Selecting text creates a durable local highlight and sends it to Readwise when connected.
@@ -381,10 +383,10 @@ The MVP is complete when all of the following are true:
 
 #### Phase 0 — compatibility spike
 
-- Connect to Birchfeed with a disposable API key.
+- Connect to FreshRSS with a disposable API key.
 - Exercise the precise read and write endpoints needed by the MVP.
 - Capture sanitized fixtures and document deviations from FreshRSS behavior.
-- Decide whether subscription management belongs in MVP based on actual Birchfeed responses.
+- Decide whether subscription management belongs in MVP based on actual FreshRSS responses.
 
 #### Phase 0.5 — delivery foundation
 
@@ -414,7 +416,7 @@ The MVP is complete when all of the following are true:
 
 ### Decisions recommended now
 
-1. Use Birchfeed rather than running FreshRSS as the production aggregation service.
+1. Use FreshRSS or a compatible service for aggregation and synchronization.
 2. Use the Google Reader-compatible API, not Fever.
 3. Build a small new client while borrowing patterns and selected MIT-licensed utilities from FriRSS where they pass review.
 4. Keep `chadashot.app` as the product name/domain unless a separate name emerges during implementation.
@@ -423,7 +425,6 @@ The MVP is complete when all of the following are true:
 
 ### Primary references
 
-- [Birchfeed developer documentation](https://birchfeed.app/developers)
 - [FreshRSS Google Reader-compatible API documentation](https://github.com/FreshRSS/FreshRSS/blob/edge/docs/en/developers/06_GoogleReader_API.md)
 - [Readwise Highlight API](https://readwise.io/api_deets)
 - [Readwise Reader API](https://readwise.io/reader_api)

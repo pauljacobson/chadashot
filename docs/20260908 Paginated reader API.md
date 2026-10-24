@@ -12,7 +12,7 @@ All endpoints require the normal Chadashot session and operate only on the authe
 | `GET /api/reader/articles` | Cursor-paginated metadata for a scope/filter/search | ETag and cursor bind to collection and state revisions; no article HTML |
 | `GET /api/reader/articles/:articleId/body` | One sanitized provider body | Body-specific ETag includes the body revision and content identity |
 | `GET /api/reader/status` | Initialization, refresh, stale/error, progress, and revision status | `no-store` |
-| `POST /api/reader/refresh` | Explicitly schedule background refresh without waiting for Birchfeed | Returns `202`; current cached data remains readable |
+| `POST /api/reader/refresh` | Explicitly schedule background refresh without waiting for FreshRSS | Returns `202`; current cached data remains readable |
 | `GET /api/reader/changes` | Versioned metadata/state/body-invalidations and removals for IndexedDB | Bounded repeatable pages; no article HTML |
 
 `GET /api/reader/articles` accepts `scope=inbox|all|starred|uncategorized|folder|feed`, `scopeId` for folder/feed, `read=all|unread|read`, `search`, `limit` from 1 through 100, and an opaque `cursor`. Inbox is the unread collection, matching the existing browser behavior. Results are ordered by `publishedAt DESC, id DESC`; the ID is the deterministic tie-breaker.

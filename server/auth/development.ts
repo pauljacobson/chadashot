@@ -16,7 +16,7 @@ export function developmentSession(req: Request, config: AppConfig): SessionStat
     authenticated,
     mode: config.authMode,
     setupRequired: config.authMode === 'passkey',
-    user: authenticated ? { id: 'development-user', displayName: 'Paul' } : null,
+    user: authenticated ? { id: 'development-user', displayName: 'Development user' } : null,
   };
 }
 
@@ -26,7 +26,7 @@ export function requireDevelopmentUser(config: AppConfig) {
       res.status(401).json({ error: 'Authentication required' });
       return;
     }
-    res.locals.user = { id: 'development-user', displayName: 'Paul' };
+    res.locals.user = { id: 'development-user', displayName: 'Development user' };
     next();
   };
 }

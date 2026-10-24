@@ -32,7 +32,7 @@ Automatic cleanup was enabled against these pre-deployment budgets:
 - web-process event-loop delay: at most 100 ms; and
 - concurrent list-plus-navigation reader latency: at most 250 ms p95.
 
-On 2026-09-10, `npm run benchmark:reader-cache-prune` ran against a disposable clone of the production-shaped local 3.1 GB SQLite database described in issue #43. This is local evidence, not a measurement of the deployed Railway database. The first candidate contained 26,214 articles, 26,214 search rows, and 70,848,186 HTML bytes. Its writer transaction took 802.3 ms. Web-process delay peaked at 1.3 ms, concurrent reader latency was 65.3 ms p95 and 83.4 ms maximum, WAL size peaked at 128,127,912 bytes, and peak additional filesystem consumption was 30,666,752 bytes. The free-page count rose from 5 to 48,569 while the database page count remained 795,554. All declared gates passed.
+On 2026-09-10, `npm run benchmark:reader-cache-prune` ran against a disposable clone of a production-shaped local database. This is local evidence, not a measurement of the deployed Railway database. All declared gates passed. Collection-specific row counts, database sizes, and account-derived timing/storage measurements are omitted from this document; these results are not relabeled as synthetic evidence.
 
 The benchmark command requires a disposable, file-backed database whose schema may be migrated and whose first eligible generation may be deleted:
 

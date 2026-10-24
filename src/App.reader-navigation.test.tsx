@@ -10,7 +10,7 @@ const article: Article = {
   feedId: 'feed-1',
   folderIds: [],
   title: 'A focused reading view',
-  author: 'Paul',
+  author: 'Reader',
   source: 'Example',
   canonicalUrl: 'https://example.test/article-2',
   publishedAt: '2026-09-08T00:00:00.000Z',
