@@ -8,6 +8,10 @@ The previous FreshRSS deployment wrapper has been moved to a local, Git-ignored 
 
 The initial review version includes the responsive reading interface, an expandable folder/feed tree with favicons and persistent ordering preferences, fixture-backed local use, a durable transactional server cache for live FreshRSS data, manual feed subscriptions, offline article caching and queued read/star changes, encrypted service credentials with explicit disconnect controls, production passkey onboarding with recovery codes and multiple passkeys, persistent Readwise highlights, article sharing, and versioned database migrations. The product specification, deployment guide, and supporting research are in [`docs/`](docs/).
 
+## Agent-assisted development
+
+Chadashot was created using AI coding agents. If you are concerned about the quality of agent-written code, carefully review the source and test the app in your own environment before deploying it.
+
 ## Run locally
 
 Requires Node.js 24 or later.
