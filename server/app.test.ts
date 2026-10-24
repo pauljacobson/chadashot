@@ -155,7 +155,7 @@ describe('application API', () => {
     expect(valid.body).toEqual({ mutations, synchronized: true });
   });
 
-  it('validates and encrypts a Birchfeed connection', async () => {
+  it('validates and encrypts a FreshRSS-compatible connection', async () => {
     const database = openMemoryDatabase();
     const encryptedConfig = loadConfig({
       NODE_ENV: 'test',

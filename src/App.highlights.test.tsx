@@ -18,7 +18,7 @@ const article: Article = {
   feedId: 'feed-1',
   folderIds: [],
   title: 'Persistent highlights',
-  author: 'Paul',
+  author: 'Reader',
   source: 'Example',
   canonicalUrl: 'https://example.test/article',
   publishedAt: '2026-09-07T00:00:00.000Z',

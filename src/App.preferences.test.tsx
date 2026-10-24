@@ -15,7 +15,7 @@ vi.mock('./api', async (importOriginal) => ({
     authenticated: true,
     mode: 'development',
     setupRequired: false,
-    user: { id: 'user-1', username: 'Paul' },
+    user: { id: 'user-1', username: 'Reader' },
   })),
 }));
 

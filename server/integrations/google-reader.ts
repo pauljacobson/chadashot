@@ -667,7 +667,7 @@ export class GoogleReaderClient {
         summary: text.slice(0, 240),
         thumbnailUrl: extractArticleThumbnail(html, item.canonical?.[0]?.href ?? item.alternate?.[0]?.href ?? item.origin.htmlUrl ?? '#'),
         contentHtml: html,
-        // Birchfeed does not expose read/starred tags on sampled item bodies.
+        // Some compatible providers do not expose read/starred tags on item bodies.
         // The independent authoritative state scan corrects these defaults.
         read: false,
         starred: false,

@@ -590,7 +590,7 @@ export function createApp(config: AppConfig, dependencies: {
 
   app.put('/api/settings/rss', requireUser, async (req, res) => {
     if (!config.encryptionKey) {
-      return res.status(503).json({ error: 'Set ENCRYPTION_KEY before connecting Birchfeed' });
+      return res.status(503).json({ error: 'Set ENCRYPTION_KEY before connecting FreshRSS' });
     }
     const parsedCredentials = birchfeedConnectionSchema.parse(req.body);
     let serverUrl: string;
@@ -962,7 +962,7 @@ export function createApp(config: AppConfig, dependencies: {
       }
     }
     if (config.nodeEnv === 'production') {
-      return res.status(409).json({ error: 'Connect Birchfeed in Settings before synchronizing' });
+      return res.status(409).json({ error: 'Connect FreshRSS in Settings before synchronizing' });
     }
     const performanceRun = new ReaderPerformanceRun();
     const snapshot = performanceRun.measureSync('mapping', () => ({ ...developmentFixture, generatedAt: new Date().toISOString() }));
@@ -1019,7 +1019,7 @@ export function createApp(config: AppConfig, dependencies: {
 
   app.get('/api/reader/navigation', requireUser, (_req, res) => {
     const reader = connectedReader(res);
-    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before loading reader navigation' });
+    if (!reader) return res.status(409).json({ error: 'Connect FreshRSS before loading reader navigation' });
     try {
       const result = readerApi.navigation(reader.identity);
       const { etag, ...body } = result;
@@ -1032,7 +1032,7 @@ export function createApp(config: AppConfig, dependencies: {
 
   app.get('/api/reader/articles', requireUser, (req, res) => {
     const reader = connectedReader(res);
-    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before loading articles' });
+    if (!reader) return res.status(409).json({ error: 'Connect FreshRSS before loading articles' });
     const query = readerArticleQuerySchema.parse(req.query);
     try {
       const result = readerApi.articles(reader.identity, query);
@@ -1046,7 +1046,7 @@ export function createApp(config: AppConfig, dependencies: {
 
   app.get('/api/reader/articles/:articleId/body', requireUser, (req, res) => {
     const reader = connectedReader(res);
-    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before loading article bodies' });
+    if (!reader) return res.status(409).json({ error: 'Connect FreshRSS before loading article bodies' });
     const { articleId } = readerBodyParamsSchema.parse(req.params);
     try {
       const result = readerApi.body(reader.identity, articleId);
@@ -1061,7 +1061,7 @@ export function createApp(config: AppConfig, dependencies: {
 
   app.get('/api/reader/status', requireUser, (_req, res) => {
     const reader = connectedReader(res);
-    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before checking synchronization' });
+    if (!reader) return res.status(409).json({ error: 'Connect FreshRSS before checking synchronization' });
     res.set('Cache-Control', 'no-store');
     if (reader.integration) {
       const plan = readerCache.syncPlan(reader.identity, readerSyncCadence);
@@ -1078,7 +1078,7 @@ export function createApp(config: AppConfig, dependencies: {
 
   app.post('/api/reader/refresh', requireUser, (_req, res) => {
     const reader = connectedReader(res);
-    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before refreshing' });
+    if (!reader) return res.status(409).json({ error: 'Connect FreshRSS before refreshing' });
     if (reader.integration) {
       startReaderCacheImport(
         (res.locals.user as { id?: string } | undefined)?.id ?? 'authenticated-user',
@@ -1092,7 +1092,7 @@ export function createApp(config: AppConfig, dependencies: {
 
   app.get('/api/reader/changes', requireUser, (req, res) => {
     const reader = connectedReader(res);
-    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before loading changes' });
+    if (!reader) return res.status(409).json({ error: 'Connect FreshRSS before loading changes' });
     const query = readerChangesQuerySchema.parse(req.query);
     try {
       const result = readerApi.changes(reader.identity, query.token, query.limit);
@@ -1144,7 +1144,7 @@ export function createApp(config: AppConfig, dependencies: {
 
   app.post('/api/reader/mark-read-jobs', requireUser, (req, res) => {
     const reader = connectedReader(res);
-    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before marking articles read' });
+    if (!reader) return res.status(409).json({ error: 'Connect FreshRSS before marking articles read' });
     const body = markReadJobSchema.parse(req.body) satisfies ReaderMarkReadJobRequest;
     try {
       const job = markReadJobs.accept(reader.identity, body);
@@ -1158,7 +1158,7 @@ export function createApp(config: AppConfig, dependencies: {
 
   app.get('/api/reader/mark-read-jobs', requireUser, (_req, res) => {
     const reader = connectedReader(res);
-    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before checking mark-read jobs' });
+    if (!reader) return res.status(409).json({ error: 'Connect FreshRSS before checking mark-read jobs' });
     void markReadJobs.resume(reader.identity, markReadSubmitter(reader));
     res.set('Cache-Control', 'no-store');
     return res.json({ jobs: markReadJobs.list(reader.identity) });
@@ -1166,7 +1166,7 @@ export function createApp(config: AppConfig, dependencies: {
 
   app.get('/api/reader/mark-read-jobs/:jobId', requireUser, (req, res) => {
     const reader = connectedReader(res);
-    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before checking mark-read jobs' });
+    if (!reader) return res.status(409).json({ error: 'Connect FreshRSS before checking mark-read jobs' });
     const { jobId } = markReadJobParamsSchema.parse(req.params);
     try {
       res.set('Cache-Control', 'no-store');
@@ -1178,7 +1178,7 @@ export function createApp(config: AppConfig, dependencies: {
 
   app.post('/api/reader/mark-read-jobs/:jobId/retry', requireUser, (req, res) => {
     const reader = connectedReader(res);
-    if (!reader) return res.status(409).json({ error: 'Connect Birchfeed before retrying mark-read jobs' });
+    if (!reader) return res.status(409).json({ error: 'Connect FreshRSS before retrying mark-read jobs' });
     const { jobId } = markReadJobParamsSchema.parse(req.params);
     try {
       const job = markReadJobs.get(reader.identity, jobId);

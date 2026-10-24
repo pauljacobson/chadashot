@@ -14,7 +14,7 @@ const config = loadConfig({
 
 function addAuthenticatedUser(database: ReturnType<typeof openMemoryDatabase>) {
   const createdAt = new Date().toISOString();
-  database.prepare('INSERT INTO users (id, display_name, created_at) VALUES (?, ?, ?)').run('user-1', 'Paul', createdAt);
+  database.prepare('INSERT INTO users (id, display_name, created_at) VALUES (?, ?, ?)').run('user-1', 'Reader', createdAt);
   database.prepare(`
     INSERT INTO passkey_credentials
       (credential_id, user_id, public_key, counter, transports, device_type, backed_up, created_at, name)
@@ -43,7 +43,7 @@ describe('passkey account bootstrap', () => {
   it('rejects an incorrect setup token', async () => {
     const app = createApp(config, { database: openMemoryDatabase() });
     const response = await request(app).post('/api/auth/bootstrap/options').send({
-      displayName: 'Paul',
+      displayName: 'Reader',
       bootstrapToken: 'incorrect',
     });
     expect(response.status).toBe(403);
@@ -52,7 +52,7 @@ describe('passkey account bootstrap', () => {
   it('creates discoverable, user-verified registration options', async () => {
     const app = createApp(config, { database: openMemoryDatabase() });
     const response = await request(app).post('/api/auth/bootstrap/options').send({
-      displayName: 'Paul',
+      displayName: 'Reader',
       bootstrapToken: config.bootstrapToken,
     });
     expect(response.status).toBe(200);
@@ -76,14 +76,14 @@ describe('passkey account bootstrap', () => {
     const app = createApp(config, { database });
     for (let attempt = 0; attempt < 12; attempt += 1) {
       const response = await request(app).post('/api/auth/bootstrap/options').send({
-        displayName: 'Paul',
+        displayName: 'Reader',
         bootstrapToken: config.bootstrapToken,
       });
       expect(response.status).toBe(200);
     }
 
     const blocked = await request(app).post('/api/auth/bootstrap/options').send({
-      displayName: 'Paul',
+      displayName: 'Reader',
       bootstrapToken: config.bootstrapToken,
     });
 

@@ -58,7 +58,7 @@ describe('reader cache API', () => {
     await app.synchronizeReader(signal);
     expect(fetchImplementation).not.toHaveBeenCalled(); // No owner exists yet.
     database.prepare('INSERT INTO users (id, display_name, created_at) VALUES (?, ?, ?)')
-      .run('owner', 'Paul', new Date().toISOString());
+      .run('owner', 'Reader', new Date().toISOString());
     await app.synchronizeReader(signal);
     fresh = true;
     await app.synchronizeReader(signal);
