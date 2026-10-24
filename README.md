@@ -8,6 +8,10 @@ The previous FreshRSS deployment wrapper has been moved to a local, Git-ignored 
 
 The initial review version includes the responsive reading interface, an expandable folder/feed tree with favicons and persistent ordering preferences, fixture-backed local use, a durable transactional server cache for live FreshRSS data, manual feed subscriptions, offline article caching and queued read/star changes, encrypted service credentials with explicit disconnect controls, production passkey onboarding with recovery codes and multiple passkeys, persistent Readwise highlights, article sharing, and versioned database migrations. The product specification, deployment guide, and supporting research are in [`docs/`](docs/).
 
+## Agent-assisted development
+
+Chadashot was created using AI coding agents. If you are concerned about the quality of agent-written code, carefully review the source and test the app in your own environment before deploying it.
+
 ## Run locally
 
 Requires Node.js 24 or later.
@@ -66,3 +70,13 @@ Five-minute polling adds up to 288 checks a day, plus checks triggered by device
 - Local development uses a tightly scoped development identity; production uses one-time onboarding followed by passkey authentication.
 - Article sharing uses the device's native share sheet with the original article title and URL. Unsupported browsers copy the link; denied clipboard access exposes a selectable link. Cancelling native sharing is silent.
 - Standalone Save to Reader is disabled in both the toolbar and `/api/readwise/documents`. To restore it, set `featureFlags.readerDocumentSaving` to `true` in `shared/features.ts` and rebuild the browser and server. Readwise highlights remain available and can still create their corresponding Reader documents.
+
+## License
+
+Copyright (C) 2026 Chadashot contributors.
+
+Chadashot's original code and documentation are free software: you may redistribute and/or modify them under the GNU Affero General Public License, version 3 only (`AGPL-3.0-only`). See [LICENSE](LICENSE) for the complete terms.
+
+The software is provided without any warranty, including the implied warranties of merchantability or fitness for a particular purpose. Operators of modified versions must offer their corresponding source code to users interacting with those versions over a network, as required by section 13 of the license.
+
+Third-party components and assets retain their respective licenses and copyright notices.
