@@ -232,14 +232,19 @@ export class ReaderApi {
     const pageRows = hasMore ? rows.slice(0, query.limit) : rows;
     // Read at most one metadata page of bodies locally; only image URLs cross the wire.
     const previewBody = query.publishedSince ? this.database.prepare(`
-      SELECT substr(content_html, 1, 128000) AS content_html FROM reader_article_bodies
-      WHERE generation_id = ? AND article_id = ?
+      SELECT substr(revision.content_html, 1, 128000) AS content_html
+      FROM reader_article_bodies body JOIN reader_body_revisions revision ON revision.id = body.body_id
+      WHERE body.generation_id = ? AND body.article_id = ?
     `) : null;
     // Only legacy rows on this bounded page need body reads. Persist the derived
     // result after the read transaction so future list requests stay metadata-only.
     for (const row of pageRows) {
       if (row.thumbnail_url !== null) continue;
-      const body = this.database.prepare('SELECT content_html FROM reader_article_bodies WHERE generation_id = ? AND article_id = ?')
+      const body = this.database.prepare(`
+        SELECT revision.content_html
+        FROM reader_article_bodies body JOIN reader_body_revisions revision ON revision.id = body.body_id
+        WHERE body.generation_id = ? AND body.article_id = ?
+      `)
         .get(context.generation, row.id) as { content_html: string } | undefined;
       row.thumbnail_url = extractArticleThumbnail(body?.content_html ?? '', row.canonical_url) ?? '';
       pendingThumbnails.push({ generation: context.generation, id: row.id, url: row.thumbnail_url });
@@ -322,7 +327,9 @@ export class ReaderApi {
     const context = this.context(identity);
     this.afterContext?.();
     const row = this.database.prepare(`
-      SELECT content_html FROM reader_article_bodies WHERE generation_id = ? AND article_id = ?
+      SELECT revision.content_html
+      FROM reader_article_bodies body JOIN reader_body_revisions revision ON revision.id = body.body_id
+      WHERE body.generation_id = ? AND body.article_id = ?
     `).get(context.generation, articleId) as { content_html: string } | undefined;
     if (!row) return null;
     return {

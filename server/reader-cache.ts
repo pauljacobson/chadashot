@@ -10,6 +10,7 @@ import type {
 } from '../shared/reader.js';
 import type { AppDatabase } from './database.js';
 import { newId, nowIso } from './database.js';
+import { prepareReaderBodyWriter } from './reader-bodies.js';
 import { normalizeGoogleReaderItemId, ReaderImportRestartError, type GoogleReaderCredentials } from './integrations/google-reader.js';
 
 export const READER_IMPORT_BATCH_SIZE = 500;
@@ -573,10 +574,7 @@ export class ReaderCache {
           published_at = excluded.published_at, reading_minutes = excluded.reading_minutes,
           summary = excluded.summary, thumbnail_url = excluded.thumbnail_url
       `);
-      const insertBody = this.database.prepare(`
-        INSERT INTO reader_article_bodies (generation_id, article_id, content_html) VALUES (?, ?, ?)
-        ON CONFLICT(generation_id, article_id) DO UPDATE SET content_html = excluded.content_html
-      `);
+      const writeBody = prepareReaderBodyWriter(this.database);
       const insertState = this.database.prepare(`
         INSERT INTO reader_article_state (generation_id, article_id, is_read, is_starred) VALUES (?, ?, ?, ?)
         ON CONFLICT(generation_id, article_id) DO UPDATE SET
@@ -602,7 +600,7 @@ export class ReaderCache {
           article.summary,
           article.thumbnailUrl ?? '',
         );
-        insertBody.run(importRun.generationId, article.id, article.contentHtml);
+        writeBody(importRun.generationId, article.id, article.contentHtml);
         insertState.run(importRun.generationId, article.id, Number(article.read), Number(article.starred));
         removeFolders.run(importRun.generationId, article.id);
         for (const folderId of new Set(article.folderIds)) {
@@ -785,7 +783,11 @@ export class ReaderCache {
     } | undefined;
     if (!row) return null;
     const thumbnailUrl = row.thumbnail_url ?? extractArticleThumbnail(
-      (this.database.prepare('SELECT content_html FROM reader_article_bodies WHERE generation_id = ? AND article_id = ?')
+      (this.database.prepare(`
+        SELECT revision.content_html
+        FROM reader_article_bodies body JOIN reader_body_revisions revision ON revision.id = body.body_id
+        WHERE body.generation_id = ? AND body.article_id = ?
+      `)
         .get(generationId, articleId) as { content_html: string } | undefined)?.content_html ?? '', row.canonical_url);
     const folderIds = (this.database.prepare(`
       SELECT folder_id FROM reader_article_folders WHERE generation_id = ? AND article_id = ? ORDER BY folder_id
@@ -837,7 +839,7 @@ export class ReaderCache {
           ) THEN 1 ELSE 0 END AS metadata_changed,
         CASE WHEN o.id IS NULL OR ns.is_read IS NOT os.is_read OR ns.is_starred IS NOT os.is_starred
           THEN 1 ELSE 0 END AS state_changed,
-        CASE WHEN o.id IS NULL OR nb.content_html IS NOT ob.content_html THEN 1 ELSE 0 END AS body_changed
+        CASE WHEN o.id IS NULL OR nb.body_id IS NOT ob.body_id THEN 1 ELSE 0 END AS body_changed
       FROM reader_articles n
       LEFT JOIN reader_articles o ON o.generation_id = ? AND o.id = n.id
       JOIN reader_article_state ns ON ns.generation_id = n.generation_id AND ns.article_id = n.id
@@ -849,7 +851,7 @@ export class ReaderCache {
         OR n.source IS NOT o.source OR n.canonical_url IS NOT o.canonical_url
         OR n.published_at IS NOT o.published_at OR n.reading_minutes IS NOT o.reading_minutes
         OR n.summary IS NOT o.summary OR n.thumbnail_url IS NOT o.thumbnail_url OR ns.is_read IS NOT os.is_read OR ns.is_starred IS NOT os.is_starred
-        OR nb.content_html IS NOT ob.content_html
+        OR nb.body_id IS NOT ob.body_id
         OR EXISTS (
           SELECT folder_id FROM reader_article_folders WHERE generation_id = n.generation_id AND article_id = n.id
           EXCEPT SELECT folder_id FROM reader_article_folders WHERE generation_id = o.generation_id AND article_id = o.id
@@ -992,8 +994,7 @@ export class ReaderCache {
       article.thumbnailUrl ?? '',
     ).changes === 1;
     if (!inserted) return false;
-    this.database.prepare(`INSERT INTO reader_article_bodies (generation_id, article_id, content_html) VALUES (?, ?, ?)`)
-      .run(generationId, article.id, article.contentHtml);
+    prepareReaderBodyWriter(this.database)(generationId, article.id, article.contentHtml);
     this.database.prepare(`
       INSERT INTO reader_article_state (generation_id, article_id, is_read, is_starred) VALUES (?, ?, ?, ?)
     `).run(generationId, article.id, Number(article.read), Number(article.starred));
@@ -1110,9 +1111,10 @@ export class ReaderCache {
       for (const article of articles) {
         const existing = this.database.prepare(`
           SELECT a.feed_id, a.title, a.author, a.source, a.canonical_url, a.published_at,
-            a.reading_minutes, a.summary, a.thumbnail_url, b.content_html
+            a.reading_minutes, a.summary, a.thumbnail_url, revision.content_html
           FROM reader_articles a JOIN reader_article_bodies b
             ON b.generation_id = a.generation_id AND b.article_id = a.id
+          JOIN reader_body_revisions revision ON revision.id = b.body_id
           WHERE a.generation_id = ? AND a.id = ?
         `).get(generationId, article.id) as {
           feed_id: string; title: string; author: string | null; source: string; canonical_url: string; published_at: string;
@@ -1156,9 +1158,7 @@ export class ReaderCache {
           generationId,
           article.id,
         );
-        this.database.prepare(`
-          UPDATE reader_article_bodies SET content_html = ? WHERE generation_id = ? AND article_id = ?
-        `).run(article.contentHtml, generationId, article.id);
+        if (bodyChanged) prepareReaderBodyWriter(this.database)(generationId, article.id, article.contentHtml);
         const priorLogicalBytes = articleCoreLogicalBytes({
           id: article.id,
           feedId: existing.feed_id,
@@ -1535,10 +1535,11 @@ export class ReaderCache {
     for (const candidate of candidates.slice(0, detailLimit)) {
       const details = this.database.prepare(`
         SELECT COUNT(article.id) AS article_count,
-          COALESCE(SUM(LENGTH(body.content_html)), 0) AS body_bytes
+          COALESCE(SUM(LENGTH(revision.content_html)), 0) AS body_bytes
         FROM reader_articles article
         LEFT JOIN reader_article_bodies body
           ON body.generation_id = article.generation_id AND body.article_id = article.id
+        LEFT JOIN reader_body_revisions revision ON revision.id = body.body_id
         WHERE article.generation_id = ?
       `).get(candidate.generationId) as { article_count: number; body_bytes: number };
       candidate.articleCount = details.article_count;
@@ -1758,9 +1759,10 @@ export class ReaderCache {
       `).all(generationId) as Array<{ subscription_id: string; folder_id: string }>;
       const articleRows = this.database.prepare(`
         SELECT a.id, a.feed_id, a.title, a.author, a.source, a.canonical_url, a.published_at,
-          a.reading_minutes, a.summary, a.thumbnail_url, b.content_html, s.is_read, s.is_starred
+          a.reading_minutes, a.summary, a.thumbnail_url, revision.content_html, s.is_read, s.is_starred
         FROM reader_articles a
         JOIN reader_article_bodies b ON b.generation_id = a.generation_id AND b.article_id = a.id
+        JOIN reader_body_revisions revision ON revision.id = b.body_id
         JOIN reader_article_state s ON s.generation_id = a.generation_id AND s.article_id = a.id
         WHERE a.generation_id = ?
         ORDER BY a.published_at DESC, a.id

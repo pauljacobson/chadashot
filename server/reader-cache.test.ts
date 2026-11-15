@@ -133,6 +133,36 @@ describe('transactional reader cache', () => {
     expect(database.prepare('SELECT continuation, pages_staged FROM reader_import_progress').get())
       .toEqual({ continuation: 'next', pages_staged: 1 });
     expect(database.prepare('SELECT items_staged FROM reader_sync_runs').get()).toEqual({ items_staged: 1 });
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_body_revisions').get()).toEqual({ count: 1 });
+  });
+
+  it('keeps shared bodies until the last reference is pruned or replaced', async () => {
+    const database = openMemoryDatabase();
+    const cache = new ReaderCache(database);
+    const original = article('edited');
+    const unchanged = article('same');
+    const edited = { ...original, contentHtml: '<p>Edited</p>' };
+    publish(cache, snapshot([original, unchanged]));
+    const replacement = begin(cache);
+    stage(cache, replacement, snapshot([edited, unchanged]));
+    expect(cache.readSnapshot(identity)?.articles.find(({ id }) => id === edited.id)?.contentHtml)
+      .toBe(original.contentHtml);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_body_revisions').get()).toEqual({ count: 3 });
+
+    cache.publish(replacement);
+    await cache.prune();
+    expect(database.prepare('SELECT content_html FROM reader_body_revisions ORDER BY content_html').pluck().all())
+      .toEqual([unchanged.contentHtml, edited.contentHtml]);
+
+    const run = cache.beginIncrementalRun(cache.acquireLease(identity)!, 'body');
+    const nowShared = { ...edited, contentHtml: unchanged.contentHtml };
+    expect(cache.applyBodyReconciliation(run, [nowShared], 0)).toMatchObject({ changed: 1 });
+    expect(cache.readSnapshot(identity)?.articles.map(({ contentHtml }) => contentHtml))
+      .toEqual([unchanged.contentHtml, unchanged.contentHtml]);
+    expect(database.prepare('SELECT content_html FROM reader_body_revisions').pluck().all())
+      .toEqual([unchanged.contentHtml]);
+    expect(database.pragma('foreign_key_check')).toEqual([]);
+    database.close();
   });
 
   it('bounds abandoned resume data by age and removes invalidated account progress', async () => {
