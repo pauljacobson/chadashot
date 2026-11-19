@@ -1,4 +1,5 @@
 import type { AppDatabase } from './database.js';
+import type { AppLogger } from './logging.js';
 import { prepareReaderBodyWriter } from './reader-bodies.js';
 
 type Migration = {
@@ -732,7 +733,11 @@ function ensureMigrationTable(database: AppDatabase) {
   `);
 }
 
-export function runMigrations(database: AppDatabase, maximumVersion = Number.POSITIVE_INFINITY) {
+export function runMigrations(
+  database: AppDatabase,
+  maximumVersion = Number.POSITIVE_INFINITY,
+  logger?: Pick<AppLogger, 'info'>,
+) {
   ensureMigrationTable(database);
   const applied = new Set((database.prepare('SELECT version FROM schema_migrations').all() as { version: number }[])
     .map((row) => row.version));
@@ -745,10 +750,22 @@ export function runMigrations(database: AppDatabase, maximumVersion = Number.POS
       INSERT INTO app_metadata (key, value) VALUES ('schema_version', ?)
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `).run(String(migration.version));
+    return performance.now();
   });
 
   for (const migration of migrations) {
-    if (migration.version <= maximumVersion && !applied.has(migration.version)) apply(migration);
+    if (migration.version <= maximumVersion && !applied.has(migration.version)) {
+      const details = { version: migration.version, name: migration.name };
+      logger?.info('SQLite migration started', details);
+      const started = performance.now();
+      const commitStarted = apply(migration);
+      const finished = performance.now();
+      logger?.info('SQLite migration committed', {
+        ...details,
+        durationMs: Math.round(finished - started),
+        commitDurationMs: Math.round(finished - commitStarted),
+      });
+    }
   }
 }
 

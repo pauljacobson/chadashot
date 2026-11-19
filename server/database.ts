@@ -2,17 +2,18 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import type { AppLogger } from './logging.js';
 import { runMigrations } from './migrations.js';
 
 export type AppDatabase = Database.Database;
 
-export function openDatabase(dataDir: string): AppDatabase {
+export function openDatabase(dataDir: string, logger?: Pick<AppLogger, 'info'>): AppDatabase {
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const database = new Database(path.join(dataDir, 'chadashot.sqlite'));
   database.pragma('journal_mode = WAL');
   database.pragma('foreign_keys = ON');
   database.pragma('busy_timeout = 5000');
-  runMigrations(database);
+  runMigrations(database, undefined, logger);
   return database;
 }
 
