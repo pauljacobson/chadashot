@@ -10,7 +10,7 @@ describe('database migrations', () => {
     runMigrations(database);
     runMigrations(database);
 
-    expect(currentSchemaVersion(database)).toEqual({ version: 13 });
+    expect(currentSchemaVersion(database)).toEqual({ version: 14 });
     expect(database.prepare('SELECT version, name FROM schema_migrations ORDER BY version').all()).toEqual([
       { version: 1, name: 'initial_schema' },
       { version: 2, name: 'passkey_management_and_recovery' },
@@ -25,6 +25,7 @@ describe('database migrations', () => {
       { version: 11, name: 'account_preferences' },
       { version: 12, name: 'article_thumbnails' },
       { version: 13, name: 'resumable_reader_imports' },
+      { version: 14, name: 'shared_reader_article_bodies' },
     ]);
     expect(database.prepare("PRAGMA table_info('passkey_credentials')").all()).toEqual(
       expect.arrayContaining([expect.objectContaining({ name: 'name' })]),
@@ -81,7 +82,49 @@ describe('database migrations', () => {
     runMigrations(database);
 
     expect(database.prepare('SELECT id, display_name FROM users').get()).toEqual({ id: 'user-1', display_name: 'Reader' });
-    expect(currentSchemaVersion(database)).toEqual({ version: 13 });
+    expect(currentSchemaVersion(database)).toEqual({ version: 14 });
+  });
+
+  it('shares identical legacy bodies while preserving both generations and import progress', () => {
+    const database = new Database(':memory:');
+    database.pragma('foreign_keys = ON');
+    runMigrations(database, 13);
+    database.exec(`
+      INSERT INTO reader_accounts (account_key, provider, provider_identity, credential_generation, current_generation_id)
+      VALUES ('account', 'google-reader', 'provider', 'credential', 'current');
+      INSERT INTO reader_cache_generations (id, account_key, generation_number, status, fence_token, started_at)
+      VALUES ('current', 'account', 1, 'committed', 1, '2026-09-08T00:00:00.000Z'),
+             ('staged', 'account', 2, 'staging', 2, '2026-09-08T01:00:00.000Z');
+      INSERT INTO reader_import_progress (generation_id, continuation, pages_staged)
+      VALUES ('staged', 'next-page', 1);
+      INSERT INTO reader_articles (
+        generation_id, id, feed_id, title, source, canonical_url, published_at, reading_minutes, summary
+      )
+      SELECT generation.id, article.column1, 'feed', 'Title', 'Feed', 'https://example.test/',
+        '2026-09-08T00:00:00.000Z', 1, ''
+      FROM reader_cache_generations generation CROSS JOIN (VALUES ('same'), ('edited')) article;
+      INSERT INTO reader_article_bodies (generation_id, article_id, content_html) VALUES
+        ('current', 'same', '<p>קריאה</p>'),
+        ('staged', 'same', '<p>קריאה</p>'),
+        ('current', 'edited', ''),
+        ('staged', 'edited', '<p>Edited</p>');
+    `);
+    const legacyBodies = database.prepare('SELECT * FROM reader_article_bodies ORDER BY generation_id, article_id').all();
+    const progress = database.prepare('SELECT * FROM reader_import_progress').get();
+
+    runMigrations(database);
+
+    expect(database.prepare(`
+      SELECT body.generation_id, body.article_id, revision.content_html
+      FROM reader_article_bodies body JOIN reader_body_revisions revision ON revision.id = body.body_id
+      ORDER BY body.generation_id, body.article_id
+    `).all()).toEqual(legacyBodies);
+    expect(database.prepare('SELECT COUNT(*) AS count FROM reader_body_revisions').get()).toEqual({ count: 3 });
+    expect(database.prepare('SELECT * FROM reader_import_progress').get()).toEqual(progress);
+    expect(database.prepare('SELECT current_generation_id FROM reader_accounts').get())
+      .toEqual({ current_generation_id: 'current' });
+    expect(database.pragma('foreign_key_check')).toEqual([]);
+    database.close();
   });
 
   it('repairs a database where the paginated migration was recorded without its navigation table', () => {
@@ -97,7 +140,7 @@ describe('database migrations', () => {
 
     expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'reader_navigation_activity'").get())
       .toEqual({ name: 'reader_navigation_activity' });
-    expect(currentSchemaVersion(database)).toEqual({ version: 13 });
+    expect(currentSchemaVersion(database)).toEqual({ version: 14 });
   });
 
   it('preserves every mark-read job and target while removing the physical generation dependency', () => {

@@ -1,10 +1,31 @@
 import type { AppDatabase } from './database.js';
+import { prepareReaderBodyWriter } from './reader-bodies.js';
 
 type Migration = {
   version: number;
   name: string;
   sql: string;
+  migrateData?: (database: AppDatabase) => void;
 };
+
+function migrateArticleBodies(database: AppDatabase) {
+  type LegacyBody = { generation_id: string; article_id: string; content_html: string };
+  const first = database.prepare(`
+    SELECT * FROM reader_article_bodies_v13 ORDER BY generation_id, article_id LIMIT 500
+  `);
+  const next = database.prepare(`
+    SELECT * FROM reader_article_bodies_v13 WHERE (generation_id, article_id) > (?, ?)
+    ORDER BY generation_id, article_id LIMIT 500
+  `);
+  const writeBody = prepareReaderBodyWriter(database);
+  let batch = first.all() as LegacyBody[];
+  while (batch.length > 0) {
+    for (const body of batch) writeBody(body.generation_id, body.article_id, body.content_html);
+    const last = batch[batch.length - 1]!;
+    batch = next.all(last.generation_id, last.article_id) as LegacyBody[];
+  }
+  database.exec('DROP TABLE reader_article_bodies_v13');
+}
 
 const migrations: Migration[] = [
   {
@@ -660,6 +681,45 @@ const migrations: Migration[] = [
       );
     `,
   },
+  {
+    version: 14,
+    name: 'shared_reader_article_bodies',
+    sql: `
+      ALTER TABLE reader_article_bodies RENAME TO reader_article_bodies_v13;
+
+      CREATE TABLE reader_body_revisions (
+        id INTEGER PRIMARY KEY,
+        digest BLOB NOT NULL UNIQUE,
+        content_html TEXT NOT NULL
+      );
+
+      CREATE TABLE reader_article_bodies (
+        generation_id TEXT NOT NULL,
+        article_id TEXT NOT NULL,
+        body_id INTEGER NOT NULL REFERENCES reader_body_revisions(id),
+        PRIMARY KEY(generation_id, article_id),
+        FOREIGN KEY(generation_id, article_id) REFERENCES reader_articles(generation_id, id) ON DELETE CASCADE
+      ) WITHOUT ROWID;
+
+      CREATE INDEX reader_article_bodies_revision ON reader_article_bodies(body_id);
+
+      CREATE TRIGGER reader_article_body_cleanup_after_delete
+      AFTER DELETE ON reader_article_bodies
+      WHEN NOT EXISTS (SELECT 1 FROM reader_article_bodies WHERE body_id = old.body_id)
+      BEGIN
+        DELETE FROM reader_body_revisions WHERE id = old.body_id;
+      END;
+
+      CREATE TRIGGER reader_article_body_cleanup_after_update
+      AFTER UPDATE OF body_id ON reader_article_bodies
+      WHEN old.body_id <> new.body_id
+        AND NOT EXISTS (SELECT 1 FROM reader_article_bodies WHERE body_id = old.body_id)
+      BEGIN
+        DELETE FROM reader_body_revisions WHERE id = old.body_id;
+      END;
+    `,
+    migrateData: migrateArticleBodies,
+  },
 ];
 
 function ensureMigrationTable(database: AppDatabase) {
@@ -678,6 +738,7 @@ export function runMigrations(database: AppDatabase, maximumVersion = Number.POS
     .map((row) => row.version));
   const apply = database.transaction((migration: Migration) => {
     database.exec(migration.sql);
+    migration.migrateData?.(database);
     database.prepare('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)')
       .run(migration.version, migration.name, new Date().toISOString());
     database.prepare(`
