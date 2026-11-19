@@ -17,7 +17,7 @@ export default defineRailway(() => {
     domains: [{ domain: "chadashot.app", port: 8787 }],
     volumeMounts: { "/data": chadashotVolume },
     healthcheck: "/api/health",
-    healthcheckTimeout: 100,
+    healthcheckTimeout: 600,
     env: {
       APP_ORIGIN: "https://chadashot.app",
       AUTH_MODE: "passkey",

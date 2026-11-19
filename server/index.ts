@@ -11,7 +11,10 @@ if (fs.existsSync('.env')) process.loadEnvFile('.env');
 
 const config = ensureDevelopmentEncryptionKey(loadConfig());
 const logger = new AppLogger(config);
-const database = openDatabase(config.dataDir);
+const startupStarted = performance.now();
+logger.info('Opening SQLite database');
+const database = openDatabase(config.dataDir, logger);
+logger.info('SQLite database ready', { durationMs: Math.round(performance.now() - startupStarted) });
 const app = createApp(config, {
   logger,
   database,
@@ -19,7 +22,12 @@ const app = createApp(config, {
 });
 
 const server = app.listen(config.port, config.host, () => {
-  logger.info('Chadashot started', { host: config.host, port: config.port, authMode: config.authMode });
+  logger.info('Chadashot started', {
+    host: config.host,
+    port: config.port,
+    authMode: config.authMode,
+    durationMs: Math.round(performance.now() - startupStarted),
+  });
 });
 
 const stopBackgroundSync = config.readerBackgroundSyncEnabled && config.readerCacheEnabled

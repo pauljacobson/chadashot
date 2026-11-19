@@ -16,7 +16,7 @@ Chadashot deploys as one Docker-based Railway service from the repository root. 
 - Keep `READER_CACHE_ENABLED=true` for normal operation. `false` is a temporary application rollback to the legacy blocking reader route; it does not reverse the forward-only cache migration.
 - `READER_SYNC_LEASE_MS` defaults to 45 seconds. The importing web process heartbeats every 15 seconds, and another process may take ownership only after the lease expires.
 - Reader synchronization defaults are `READER_ROUTINE_SYNC_INTERVAL_MS=180000`, `READER_STATE_SYNC_INTERVAL_MS=900000`, `READER_BODY_SYNC_INTERVAL_MS=21600000`, `READER_FULL_SYNC_INTERVAL_MS=86400000`, and `READER_SYNC_OVERLAP_SECONDS=21600`. They bound discovery delay while keeping complete state, body, and collection reconciliation less frequent.
-- The deployment health check is `/api/health`.
+- Set the deployment health check to `/api/health` with a 600-second timeout. The app starts listening after database migrations finish.
 
 Treat `ENCRYPTION_KEY` as permanent application data: changing it makes the saved FreshRSS and Readwise credentials unreadable. Store it in a password manager as well as Railway.
 
@@ -38,6 +38,8 @@ Migration rules:
 - Keep migrations forward-only. For rollback, restore the pre-deployment database backup and deploy the previous application image together.
 - Test both a clean database and an upgrade from the previous schema in CI.
 - Take or verify a recoverable Railway volume snapshot before deploying a migration that rewrites tables or removes data.
+- Rehearse large migrations on an isolated volume with a representative database and the production image. Measure startup and confirm it finishes within the health check window.
+- Check the startup logs for the migration version, total migration time, and commit time. Commit time can include an automatic SQLite write-ahead log checkpoint.
 - Keep application code compatible with the migration it ships with; the server applies migrations before it begins listening.
 
 #### Reader import process model
